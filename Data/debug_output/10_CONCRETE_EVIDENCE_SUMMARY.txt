@@ -1,0 +1,177 @@
+====================================================================================================
+CONCRETE EVIDENCE SUMMARY: WHY DO RECOMMENDERS PERFORM DIFFERENTLY?
+====================================================================================================
+
+1. OVERALL PERFORMANCE RANKINGS
+----------------------------------------------------------------------------------------------------
+#1. Random Forest
+    • Average Rank: 4.63
+    • Accuracy: 21.052631578947366%
+    • Avg Degradation: 6.133453256903567%
+    • Better than Baseline: 21.052631578947366%
+    • Training Time: 0.67s
+
+#2. Hybrid Meta
+    • Average Rank: 4.89
+    • Accuracy: 10.526315789473683%
+    • Avg Degradation: 7.991347486078277%
+    • Better than Baseline: 47.368421052631575%
+    • Training Time: 0.52s
+
+#3. AdaBoost Regressor
+    • Average Rank: 5.00
+    • Accuracy: 15.789473684210526%
+    • Avg Degradation: 6.793359445803826%
+    • Better than Baseline: 0.0%
+    • Training Time: 1.39s
+
+#4. Neural Network
+    • Average Rank: 5.05
+    • Accuracy: 15.789473684210526%
+    • Avg Degradation: 6.793359445803826%
+    • Better than Baseline: 0.0%
+    • Training Time: 2.8s
+
+#5. AutoGluon
+    • Average Rank: 5.21
+    • Accuracy: 21.052631578947366%
+    • Avg Degradation: 6.770783261249755%
+    • Better than Baseline: 42.10526315789473%
+    • Training Time: 3028.52s
+
+#6. Average Rank
+    • Average Rank: 5.21
+    • Accuracy: 10.526315789473683%
+    • Avg Degradation: 6.918031518996641%
+    • Better than Baseline: 47.368421052631575%
+    • Training Time: 0.0s
+
+#7. NN Regressor
+    • Average Rank: 5.26
+    • Accuracy: 21.052631578947366%
+    • Avg Degradation: 6.655433450202822%
+    • Better than Baseline: 47.368421052631575%
+    • Training Time: 8.11s
+
+#8. PMM (Original)
+    • Average Rank: 5.42
+    • Accuracy: 21.052631578947366%
+    • Avg Degradation: 8.421091228653017%
+    • Better than Baseline: 42.10526315789473%
+    • Training Time: 27.72s
+
+#9. KNN Classifier
+    • Average Rank: 5.53
+    • Accuracy: 10.526315789473683%
+    • Avg Degradation: 8.40633198963542%
+    • Better than Baseline: 26.31578947368421%
+    • Training Time: 0.5s
+
+#10. Paper PMM
+    • Average Rank: 5.79
+    • Accuracy: 10.526315789473683%
+    • Avg Degradation: 9.754906688717242%
+    • Better than Baseline: 36.84210526315789%
+    • Training Time: 42.19s
+
+#11. Bayesian Surrogate
+    • Average Rank: 6.05
+    • Accuracy: 5.263157894736842%
+    • Avg Degradation: 9.520123712505445%
+    • Better than Baseline: 42.10526315789473%
+    • Training Time: 5.71s
+
+#12. Random
+    • Average Rank: 8.74
+    • Accuracy: 10.526315789473683%
+    • Avg Degradation: 15.05284055136404%
+    • Better than Baseline: 21.052631578947366%
+    • Training Time: 0.0s
+
+#13. L1 Distance
+    • Average Rank: 8.84
+    • Accuracy: 5.263157894736842%
+    • Avg Degradation: 16.949059975009053%
+    • Better than Baseline: 26.31578947368421%
+    • Training Time: 0.02s
+
+
+2. KEY FINDINGS
+----------------------------------------------------------------------------------------------------
+
+A. Pipeline Diversity:
+   • Most diverse: Paper PMM (10 unique pipelines, Entropy: 3.07)
+   • Least diverse: Random (1 unique pipeline(s), Entropy: -0.00)
+   → Low diversity = recommender is not learning dataset-specific patterns!
+
+B. Dataset Difficulty:
+   • Hardest: Dataset 23517 (Avg Rank: 7.92, only 2 perfect predictions)
+   • Easiest: Dataset 12 (Avg Rank: 3.92, 4 perfect predictions)
+   → Some datasets are universally hard/easy for all recommenders!
+
+C. Baseline Comparison:
+   • Best vs baseline: NN Regressor (47.4% better, 31.6% worse)
+   • Worst vs baseline: Neural Network (0.0% better, 0.0% worse)
+   → Beating baseline is HARD! Even best recommender only wins 47.4% of the time.
+
+
+3. ROOT CAUSE ANALYSIS: WHY DO SOME RECOMMENDERS FAIL?
+----------------------------------------------------------------------------------------------------
+
+Paper PMM:
+   ✅ WORKING: Diverse predictions (10 unique pipelines)
+      → Better than baseline 36.8% of the time
+
+PMM (Original):
+   ✅ WORKING: Diverse predictions (8 unique pipelines)
+      → Better than baseline 42.1% of the time
+
+Hybrid Meta:
+   ✅ WORKING: Diverse predictions (6 unique pipelines)
+      → Better than baseline 47.4% of the time
+
+Bayesian Surrogate:
+   ✅ WORKING: Diverse predictions (6 unique pipelines)
+      → Better than baseline 42.1% of the time
+
+NN Regressor:
+   ✅ WORKING: Diverse predictions (6 unique pipelines)
+      → Better than baseline 47.4% of the time
+
+AutoGluon:
+   ✅ WORKING: Diverse predictions (6 unique pipelines)
+      → Better than baseline 42.1% of the time
+
+L1 Distance:
+   ⚠️  WARNING: Worse than baseline 73.7% of the time
+      → Model is making suboptimal recommendations
+      → Likely cause: Overfitting or wrong inductive bias
+
+KNN Classifier:
+   ✅ WORKING: Diverse predictions (5 unique pipelines)
+      → Better than baseline 26.3% of the time
+
+Random Forest:
+   ✅ WORKING: Diverse predictions (5 unique pipelines)
+      → Better than baseline 21.1% of the time
+
+Neural Network:
+   ⚠️  WARNING: Low diversity (2 unique pipelines)
+      → Model is learning very little variation
+      → Likely cause: Insufficient model capacity or poor training
+
+Average Rank:
+   ❌ FAILURE MODE: Always predicts 'constant_maxabs_iforest'
+      → Model is NOT learning dataset-specific patterns
+      → Likely cause: Undertrained, collapsed to most common class
+
+AdaBoost Regressor:
+   ❌ FAILURE MODE: Always predicts 'baseline'
+      → Model is NOT learning dataset-specific patterns
+      → Likely cause: Undertrained, collapsed to most common class
+
+Random:
+   ❌ FAILURE MODE: Always predicts 'dimension_reduction'
+      → Model is NOT learning dataset-specific patterns
+      → Likely cause: Undertrained, collapsed to most common class
+

@@ -1,0 +1,66 @@
+Recommender,Dataset,Recommended,Rank,Regret,Ground Truth
+Average Rank,11,constant_maxabs_iforest,12,0.027322033898305,dimension_reduction
+L1 Distance,12,mean_minmax_lof_svd,12,0.07,baseline
+Hybrid Meta,546,mostfreq_standard_iqr,12,0.1492042440318302,dimension_reduction
+PMM (Original),23517,dimension_reduction,12,0.0579999999999999,constant_maxabs_iforest
+PMM (Original),10,dimension_reduction,12,0.2333333333333332,mean_minmax_lof_svd
+L1 Distance,3,mean_minmax_lof_svd,12,0.0547719594594594,simple_preprocess
+Random,10,dimension_reduction,12,0.2333333333333332,mean_minmax_lof_svd
+Random,5,dimension_reduction,12,0.1736263736263736,mostfreq_standard_iqr
+Random,14,dimension_reduction,12,0.121015228426396,mutual_info_zscore
+Random,516,dimension_reduction,12,0.1645244215938303,baseline
+L1 Distance,475,mean_minmax_lof_svd,12,0.3999999999999999,simple_preprocess
+L1 Distance,9,mean_minmax_lof_svd,12,0.2682926829268292,simple_preprocess
+L1 Distance,6,aggressive,12,0.0704396248534583,conservative
+KNN Classifier,5,dimension_reduction,12,0.1736263736263736,mostfreq_standard_iqr
+Random,1552,dimension_reduction,12,0.1023923444976075,constant_maxabs_iforest
+Bayesian Surrogate,546,robust_preprocess,11,0.1492042440318302,dimension_reduction
+Average Rank,1503,constant_maxabs_iforest,11,0.0319757508955634,mutual_info_zscore
+Average Rank,8,constant_maxabs_iforest,11,0.0847503373819162,aggressive
+Paper PMM,546,robust_preprocess,11,0.1492042440318302,dimension_reduction
+Paper PMM,5,knn_impute_pca,11,0.1406593406593407,mostfreq_standard_iqr
+NN Regressor,516,aggressive,10,0.151507855761539,baseline
+AutoGluon,9,mostfreq_standard_iqr,10,0.2085786375105129,simple_preprocess
+NN Regressor,546,aggressive,10,0.1271093176815848,dimension_reduction
+Bayesian Surrogate,8,simple_preprocess,10,0.07627765064836,aggressive
+Bayesian Surrogate,9,mostfreq_standard_iqr,10,0.2085786375105129,simple_preprocess
+NN Regressor,23517,conservative,10,0.051,constant_maxabs_iforest
+AutoGluon,11,conservative,9,0.016,dimension_reduction
+Neural Network,23517,baseline,9,0.051,constant_maxabs_iforest
+KNN Classifier,23517,baseline,9,0.051,constant_maxabs_iforest
+Hybrid Meta,23517,baseline,9,0.051,constant_maxabs_iforest
+PMM (Original),516,mean_minmax_lof_svd,9,0.1292974377807282,baseline
+Random Forest,23517,baseline,9,0.051,constant_maxabs_iforest
+NN Regressor,11,conservative,9,0.016,dimension_reduction
+AdaBoost Regressor,23517,baseline,9,0.051,constant_maxabs_iforest
+KNN Classifier,546,mutual_info_zscore,9,0.0689655172413792,dimension_reduction
+Bayesian Surrogate,11,conservative,9,0.016,dimension_reduction
+AutoGluon,516,robust_preprocess,8,0.0249522416924127,baseline
+KNN Classifier,11,baseline,8,0.016,dimension_reduction
+AutoGluon,8,conservative,8,0.0617848970251715,aggressive
+AutoGluon,1503,conservative,8,0.0256073298429318,mutual_info_zscore
+Neural Network,475,baseline,8,0.1374999999999999,simple_preprocess
+Paper PMM,10,robust_preprocess,8,0.1057471264367815,mean_minmax_lof_svd
+Paper PMM,8,conservative,8,0.0617848970251715,aggressive
+NN Regressor,1503,conservative,8,0.0256073298429318,mutual_info_zscore
+Paper PMM,6,mostfreq_standard_iqr,8,0.0436842105263157,conservative
+Random Forest,475,baseline,8,0.1374999999999999,simple_preprocess
+Random Forest,5,simple_preprocess,8,0.0967032967032966,mostfreq_standard_iqr
+Random Forest,11,baseline,8,0.016,dimension_reduction
+KNN Classifier,516,robust_preprocess,8,0.0249522416924127,baseline
+AdaBoost Regressor,475,baseline,8,0.1374999999999999,simple_preprocess
+AdaBoost Regressor,11,baseline,8,0.016,dimension_reduction
+Neural Network,11,baseline,8,0.016,dimension_reduction
+PMM (Original),481,baseline,7,0.0285714285714284,robust_preprocess
+PMM (Original),255,robust_preprocess,7,0.0178752556237218,simple_preprocess
+Random Forest,8,baseline,7,0.0617848970251715,aggressive
+Average Rank,546,constant_maxabs_iforest,7,0.065987460815047,dimension_reduction
+Average Rank,14,constant_maxabs_iforest,7,0.032594175794817,mutual_info_zscore
+Neural Network,5,baseline,7,0.0967032967032966,mostfreq_standard_iqr
+Hybrid Meta,516,mostfreq_standard_iqr,7,0.0140268162860404,baseline
+Hybrid Meta,11,simple_preprocess,7,0.016,dimension_reduction
+Bayesian Surrogate,255,robust_preprocess,7,0.0178752556237218,simple_preprocess
+Neural Network,8,baseline,7,0.0617848970251715,aggressive
+AdaBoost Regressor,5,baseline,7,0.0967032967032966,mostfreq_standard_iqr
+AdaBoost Regressor,8,baseline,7,0.0617848970251715,aggressive
+Hybrid Meta,14,baseline,6,0.026015228426396,mutual_info_zscore
