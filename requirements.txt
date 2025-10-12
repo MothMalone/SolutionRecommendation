@@ -1,0 +1,20 @@
+# Core dependencies
+numpy
+pandas
+scikit-learn
+matplotlib
+
+# AutoML and dataset management
+autogluon
+openml
+
+# Deep learning (optional)
+torch
+torchvision
+
+# Bayesian optimization
+smac
+scikit-optimize
+numpy
+pandas
+
