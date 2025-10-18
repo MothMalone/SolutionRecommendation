@@ -1,0 +1,478 @@
+NEURAL NETWORK PREDICTION EXPLANATIONS
+================================================================================
+
+
+Dataset 1503
+--------------------------------------------------------------------------------
+Recommended: mutual_info_zscore
+Ground Truth Best: mutual_info_zscore
+Rank: 1
+Score: 0.1246
+Confidence: 0.9999
+
+Top 5 Predictions:
+  1. mutual_info_zscore: 99.99%
+  2. baseline: 0.01%
+  3. simple_preprocess: 0.00%
+  4. aggressive: 0.00%
+  5. robust_preprocess: 0.00%
+
+Top 5 Important Features:
+  RandomTreeDepth1ErrRate: 7.51%
+  AutoCorrelation: 6.84%
+  kNN1NErrRate: 5.83%
+  Quartile1MutualInformation: 4.79%
+  RandomTreeDepth3ErrRate: 4.68%
+
+================================================================================
+
+
+Dataset 23517
+--------------------------------------------------------------------------------
+Recommended: mutual_info_zscore
+Ground Truth Best: constant_maxabs_iforest
+Rank: 5
+Score: 0.4790
+Confidence: 1.0000
+
+Top 5 Predictions:
+  1. mutual_info_zscore: 100.00%
+  2. simple_preprocess: 0.00%
+  3. baseline: 0.00%
+  4. aggressive: 0.00%
+  5. robust_preprocess: 0.00%
+
+Top 5 Important Features:
+  RandomTreeDepth1ErrRate: 6.56%
+  RandomTreeDepth3ErrRate: 4.99%
+  DecisionStumpKappa: 4.80%
+  CfsSubsetEval_NaiveBayesErrRate: 4.75%
+  NaiveBayesAUC: 4.48%
+
+================================================================================
+
+
+Dataset 1551
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: baseline
+Rank: 1
+Score: 0.4250
+Confidence: 0.9992
+
+Top 5 Predictions:
+  1. baseline: 99.92%
+  2. constant_maxabs_iforest: 0.08%
+  3. simple_preprocess: 0.00%
+  4. dimension_reduction: 0.00%
+  5. aggressive: 0.00%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 9.02%
+  Dimensionality: 4.72%
+  DecisionStumpKappa: 4.50%
+  NaiveBayesAUC: 4.43%
+  RandomTreeDepth3ErrRate: 3.68%
+
+================================================================================
+
+
+Dataset 1552
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: constant_maxabs_iforest
+Rank: 5
+Score: 0.3682
+Confidence: 0.9697
+
+Top 5 Predictions:
+  1. baseline: 96.97%
+  2. constant_maxabs_iforest: 2.86%
+  3. simple_preprocess: 0.15%
+  4. dimension_reduction: 0.00%
+  5. aggressive: 0.00%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 7.69%
+  NaiveBayesErrRate: 6.06%
+  NaiveBayesAUC: 4.77%
+  Dimensionality: 3.99%
+  NaiveBayesKappa: 3.80%
+
+================================================================================
+
+
+Dataset 183
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: robust_preprocess
+Rank: 7
+Score: 0.2823
+Confidence: 0.9286
+
+Top 5 Predictions:
+  1. baseline: 92.86%
+  2. constant_maxabs_iforest: 6.87%
+  3. simple_preprocess: 0.27%
+  4. mutual_info_zscore: 0.00%
+  5. aggressive: 0.00%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 8.11%
+  NaiveBayesErrRate: 6.37%
+  NaiveBayesAUC: 5.89%
+  DecisionStumpKappa: 4.77%
+  AutoCorrelation: 4.49%
+
+================================================================================
+
+
+Dataset 255
+--------------------------------------------------------------------------------
+Recommended: simple_preprocess
+Ground Truth Best: simple_preprocess
+Rank: 1
+Score: 0.5690
+Confidence: 0.7997
+
+Top 5 Predictions:
+  1. simple_preprocess: 79.97%
+  2. mutual_info_zscore: 16.05%
+  3. baseline: 3.98%
+  4. aggressive: 0.00%
+  5. robust_preprocess: 0.00%
+
+Top 5 Important Features:
+  DecisionStumpKappa: 6.15%
+  CfsSubsetEval_NaiveBayesErrRate: 4.80%
+  RandomTreeDepth1ErrRate: 4.79%
+  J48.00001.ErrRate: 4.57%
+  Dimensionality: 4.42%
+
+================================================================================
+
+
+Dataset 546
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: dimension_reduction
+Rank: 3
+Score: 0.4397
+Confidence: 0.9988
+
+Top 5 Predictions:
+  1. baseline: 99.88%
+  2. robust_preprocess: 0.09%
+  3. aggressive: 0.01%
+  4. dimension_reduction: 0.01%
+  5. mutual_info_zscore: 0.01%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 8.07%
+  Quartile1MutualInformation: 5.42%
+  DecisionStumpKappa: 4.73%
+  J48.001.AUC: 4.54%
+  CfsSubsetEval_kNN1NAUC: 4.39%
+
+================================================================================
+
+
+Dataset 475
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: simple_preprocess
+Rank: 8
+Score: 0.3750
+Confidence: 0.9926
+
+Top 5 Predictions:
+  1. baseline: 99.26%
+  2. constant_maxabs_iforest: 0.37%
+  3. simple_preprocess: 0.34%
+  4. dimension_reduction: 0.01%
+  5. aggressive: 0.01%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 7.07%
+  RandomTreeDepth3AUC: 5.24%
+  Dimensionality: 3.75%
+  CfsSubsetEval_kNN1NAUC: 3.73%
+  RandomTreeDepth3ErrRate: 3.46%
+
+================================================================================
+
+
+Dataset 481
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: robust_preprocess
+Rank: 6
+Score: 0.9048
+Confidence: 0.9893
+
+Top 5 Predictions:
+  1. baseline: 98.93%
+  2. dimension_reduction: 0.40%
+  3. mean_minmax_lof_svd: 0.32%
+  4. simple_preprocess: 0.15%
+  5. constant_maxabs_iforest: 0.09%
+
+Top 5 Important Features:
+  CfsSubsetEval_kNN1NAUC: 5.81%
+  NaiveBayesAUC: 5.74%
+  RandomTreeDepth2AUC: 4.61%
+  CfsSubsetEval_DecisionStumpAUC: 4.60%
+  DecisionStumpAUC: 3.31%
+
+================================================================================
+
+
+Dataset 516
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: baseline
+Rank: 1
+Score: 0.9974
+Confidence: 0.9982
+
+Top 5 Predictions:
+  1. baseline: 99.82%
+  2. robust_preprocess: 0.12%
+  3. aggressive: 0.03%
+  4. mutual_info_zscore: 0.01%
+  5. dimension_reduction: 0.01%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 8.45%
+  CfsSubsetEval_kNN1NAUC: 5.64%
+  CfsSubsetEval_NaiveBayesAUC: 5.41%
+  CfsSubsetEval_DecisionStumpErrRate: 4.70%
+  CfsSubsetEval_DecisionStumpAUC: 3.90%
+
+================================================================================
+
+
+Dataset 3
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: simple_preprocess
+Rank: 6
+Score: 0.9906
+Confidence: 0.8078
+
+Top 5 Predictions:
+  1. baseline: 80.78%
+  2. mutual_info_zscore: 11.31%
+  3. simple_preprocess: 4.04%
+  4. robust_preprocess: 3.05%
+  5. aggressive: 0.61%
+
+Top 5 Important Features:
+  AutoCorrelation: 7.76%
+  J48.001.AUC: 7.56%
+  DecisionStumpErrRate: 5.16%
+  Dimensionality: 5.13%
+  J48.00001.ErrRate: 4.81%
+
+================================================================================
+
+
+Dataset 6
+--------------------------------------------------------------------------------
+Recommended: mutual_info_zscore
+Ground Truth Best: conservative
+Rank: 5
+Score: 0.9383
+Confidence: 0.9370
+
+Top 5 Predictions:
+  1. mutual_info_zscore: 93.70%
+  2. baseline: 4.85%
+  3. simple_preprocess: 1.44%
+  4. robust_preprocess: 0.00%
+  5. constant_maxabs_iforest: 0.00%
+
+Top 5 Important Features:
+  RandomTreeDepth1ErrRate: 7.84%
+  RandomTreeDepth2ErrRate: 5.91%
+  RandomTreeDepth3ErrRate: 5.49%
+  CfsSubsetEval_NaiveBayesErrRate: 5.25%
+  CfsSubsetEval_kNN1NErrRate: 4.89%
+
+================================================================================
+
+
+Dataset 8
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: aggressive
+Rank: 7
+Score: 0.3768
+Confidence: 0.9976
+
+Top 5 Predictions:
+  1. baseline: 99.76%
+  2. robust_preprocess: 0.18%
+  3. dimension_reduction: 0.03%
+  4. aggressive: 0.02%
+  5. mutual_info_zscore: 0.00%
+
+Top 5 Important Features:
+  CfsSubsetEval_kNN1NAUC: 6.67%
+  DecisionStumpAUC: 6.43%
+  Quartile1MutualInformation: 6.33%
+  CfsSubsetEval_DecisionStumpErrRate: 4.78%
+  RandomTreeDepth2AUC: 4.42%
+
+================================================================================
+
+
+Dataset 10
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: mean_minmax_lof_svd
+Rank: 3
+Score: 0.8667
+Confidence: 0.9503
+
+Top 5 Predictions:
+  1. baseline: 95.03%
+  2. simple_preprocess: 1.82%
+  3. mean_minmax_lof_svd: 1.13%
+  4. constant_maxabs_iforest: 1.09%
+  5. dimension_reduction: 0.73%
+
+Top 5 Important Features:
+  Dimensionality: 6.23%
+  DecisionStumpKappa: 5.82%
+  J48.00001.ErrRate: 5.66%
+  J48.001.AUC: 4.76%
+  DecisionStumpAUC: 4.66%
+
+================================================================================
+
+
+Dataset 12
+--------------------------------------------------------------------------------
+Recommended: dimension_reduction
+Ground Truth Best: baseline
+Rank: 7
+Score: 0.9600
+Confidence: 0.8888
+
+Top 5 Predictions:
+  1. dimension_reduction: 88.88%
+  2. baseline: 10.31%
+  3. simple_preprocess: 0.23%
+  4. robust_preprocess: 0.21%
+  5. mean_minmax_lof_svd: 0.15%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 8.29%
+  CfsSubsetEval_DecisionStumpErrRate: 5.46%
+  kNN1NAUC: 5.09%
+  RandomTreeDepth3AUC: 4.32%
+  kNN1NKappa: 3.98%
+
+================================================================================
+
+
+Dataset 14
+--------------------------------------------------------------------------------
+Recommended: dimension_reduction
+Ground Truth Best: mutual_info_zscore
+Rank: 11
+Score: 0.7800
+Confidence: 0.5248
+
+Top 5 Predictions:
+  1. dimension_reduction: 52.48%
+  2. baseline: 44.30%
+  3. constant_maxabs_iforest: 1.42%
+  4. simple_preprocess: 1.27%
+  5. mean_minmax_lof_svd: 0.45%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 7.86%
+  CfsSubsetEval_DecisionStumpErrRate: 7.04%
+  NaiveBayesErrRate: 4.32%
+  kNN1NAUC: 4.18%
+  J48.0001.ErrRate: 4.11%
+
+================================================================================
+
+
+Dataset 9
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: simple_preprocess
+Rank: 5
+Score: 0.7073
+Confidence: 0.9248
+
+Top 5 Predictions:
+  1. baseline: 92.48%
+  2. constant_maxabs_iforest: 6.60%
+  3. dimension_reduction: 0.65%
+  4. simple_preprocess: 0.16%
+  5. mean_minmax_lof_svd: 0.08%
+
+Top 5 Important Features:
+  kNN1NErrRate: 5.18%
+  AutoCorrelation: 5.13%
+  DecisionStumpAUC: 5.04%
+  J48.001.ErrRate: 4.15%
+  RandomTreeDepth3AUC: 4.11%
+
+================================================================================
+
+
+Dataset 11
+--------------------------------------------------------------------------------
+Recommended: dimension_reduction
+Ground Truth Best: dimension_reduction
+Rank: 1
+Score: 0.9680
+Confidence: 0.9219
+
+Top 5 Predictions:
+  1. dimension_reduction: 92.19%
+  2. baseline: 3.18%
+  3. simple_preprocess: 3.02%
+  4. mean_minmax_lof_svd: 1.18%
+  5. robust_preprocess: 0.22%
+
+Top 5 Important Features:
+  DecisionStumpAUC: 8.33%
+  DecisionStumpKappa: 6.52%
+  CfsSubsetEval_DecisionStumpErrRate: 6.45%
+  J48.0001.ErrRate: 4.20%
+  NaiveBayesAUC: 3.74%
+
+================================================================================
+
+
+Dataset 5
+--------------------------------------------------------------------------------
+Recommended: baseline
+Ground Truth Best: mostfreq_standard_iqr
+Rank: 7
+Score: 0.7033
+Confidence: 0.9999
+
+Top 5 Predictions:
+  1. baseline: 99.99%
+  2. robust_preprocess: 0.01%
+  3. mutual_info_zscore: 0.00%
+  4. aggressive: 0.00%
+  5. constant_maxabs_iforest: 0.00%
+
+Top 5 Important Features:
+  J48.0001.AUC: 4.90%
+  RandomTreeDepth1ErrRate: 4.59%
+  Quartile1MutualInformation: 4.12%
+  Dimensionality: 3.98%
+  RandomTreeDepth3ErrRate: 3.79%
+
+================================================================================
+

@@ -1,1 +1,367 @@
-Data/SolutionRecommendation/code/Miniconda3-latest-Linux-x86_64.sh
+# =============================================================================
+# SoluRec Repository .gitignore
+# Comprehensive ignore file for machine learning/data science projects
+# =============================================================================
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# =============================================================================
+# Virtual Environments
+# =============================================================================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# =============================================================================
+# Jupyter Notebook
+# =============================================================================
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# =============================================================================
+# Machine Learning / Data Science Artifacts
+# =============================================================================
+# Model files and checkpoints
+*.pkl
+*.pickle
+*.joblib
+*.model
+*.h5
+*.hdf5
+*.ckpt
+*.pth
+*.pt
+*.pb
+*.onnx
+*.tflite
+*.gguf
+*.bin
+
+# AutoGluon artifacts
+AutogluonModels/
+ag_models/
+agModels/
+
+# TensorFlow/Keras
+checkpoint
+*.pb
+*.ckpt
+*.index
+*.meta
+logs/
+tensorboard/
+
+# PyTorch Lightning
+lightning_logs/
+*.ckpt
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# Weights & Biases
+wandb/
+
+# =============================================================================
+# Data Files (Large datasets and outputs)
+# =============================================================================
+# CSV outputs and results
+preprocessed_performance*.csv
+test_ground_truth_performance*.csv
+*_results.csv
+*_summary.csv
+*_analysis.csv
+dataset_feats*.csv
+training_performance*.csv
+
+# Large data directories (uncomment if you want to ignore all data)
+# data-model/
+# data-pruning-analysis/
+# dataperf-speech-example/
+# FakeTrue-Corpus/
+# IMDB-2K-OfficialSplit/
+# Medical-Abstracts-TC-Corpus/
+
+# Temporary data files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# =============================================================================
+# Logs and Outputs
+# =============================================================================
+logs/
+*.log
+log.txt
+output/
+outputs/
+results/
+experiments/
+failed_datasets.log
+
+# =============================================================================
+# IDE and Editor Files
+# =============================================================================
+# VS Code
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# JupyterLab
+.jupyterlab/
+
+# Spyder
+.spyderproject
+.spyproject
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# SublimeText
+*.tmlanguage.cache
+*.tmPreferences.cache
+*.stTheme.cache
+*.sublime-workspace
+*.sublime-project
+
+# =============================================================================
+# OS Generated Files
+# =============================================================================
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# =============================================================================
+# Temporary Files
+# =============================================================================
+*.bak
+*.backup
+*.orig
+*.rej
+*.swp
+*.swo
+*.tmp
+*.temp
+.cache/
+*.cache
+
+# =============================================================================
+# Package Management
+# =============================================================================
+# pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# conda
+*.conda
+*.condarc
+
+# poetry
+poetry.lock
+
+# =============================================================================
+# Documentation and Build
+# =============================================================================
+# Sphinx documentation
+docs/_build/
+docs/build/
+
+# MkDocs documentation
+/site
+
+# LaTeX
+*.aux
+*.log
+*.synctex.gz
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.blg
+*.bbl
+
+# =============================================================================
+# Testing
+# =============================================================================
+.coverage
+.pytest_cache/
+.tox/
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# =============================================================================
+# Cloud and Deployment
+# =============================================================================
+# AWS
+.aws/
+*.pem
+
+# GCP
+.gcp/
+*.p12
+
+# Azure
+.azure/
+
+# Heroku
+Procfile
+
+# Docker
+.dockerignore
+
+# =============================================================================
+# Secrets and Credentials
+# =============================================================================
+.env
+.env.local
+.env.production
+.env.staging
+secrets.json
+credentials.json
+*.key
+*.pem
+*.crt
+*.cer
+
+# =============================================================================
+# Large Binary Files
+# =============================================================================
+*.zip
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.7z
+*.rar
+*.iso
+*.dmg
+*.exe
+*.msi
+*.deb
+*.rpm
+*.apk
+
+# =============================================================================
+# Custom SoluRec Specific
+# =============================================================================
+# Experiment artifacts
+*_search_results.csv
+*_architecture_results.csv
+nn_architecture_search.py
+architecture_analysis.py
+
+# Streamlit cache
+.streamlit/
+
+# NLTK data (if downloaded locally)
+nltk_data/
+
+# Specific directories that might contain large files
+assets/
+code/
+model/
+supplementary\ material/
+workspace/
+
+# =============================================================================
+# Keep these if needed (uncomment to ignore)
+# =============================================================================
+# # All CSV files (uncomment if you want to ignore all CSVs)
+# # *.csv
+
+# # All JSON files
+# # *.json
+
+# # All pickle files
+# # *.pkl
+
+# # All HDF5 files
+# # *.h5
+
+# # All model directories
+# # models/
+# # checkpoints/
+
+# =============================================================================
+# Git
+# =============================================================================
+*.orig
+*.rej

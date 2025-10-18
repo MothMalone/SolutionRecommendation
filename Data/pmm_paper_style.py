@@ -229,7 +229,7 @@ class PaperPmmRecommender:
         return np.array(pipeline_features, dtype=np.float32)
     
     def _calculate_influence_scores(self, performance_matrix, metafeatures_df):
-        """Calculate influence scores for training datasets (same as before)"""
+        """Calculate influence scores for training datasets"""
         influence_scores = {}
         
         print(f"    Calculating influence scores using method: {self.influence_method}")
@@ -281,16 +281,95 @@ class PaperPmmRecommender:
                 
                 for i, col in enumerate(dataset_cols_ordered):
                     influence_scores[col] = min_distances[i]
+        
+        elif self.influence_method == 'combined':
+            # Calculate all three metrics and combine them
+            variance_scores = {}
+            power_scores = {}
+            diversity_scores = {}
+            
+            # 1. Performance variance
+            for col in performance_matrix.columns:
+                perfs = performance_matrix[col].dropna()
+                if len(perfs) > 0:
+                    variance_scores[col] = perfs.var()
+            
+            # 2. Discriminative power
+            for col in performance_matrix.columns:
+                perfs = performance_matrix[col].dropna()
+                if len(perfs) >= 2:
+                    gap = perfs.max() - perfs.min()
+                    power_scores[col] = gap
+            
+            # 3. Data diversity
+            all_metafeatures = []
+            dataset_cols_ordered = []
+            
+            for col in performance_matrix.columns:
+                if col.startswith('D_'):
+                    ds_id = int(col[2:])
+                else:
+                    ds_id = col
+                
+                if ds_id in metafeatures_df.index:
+                    mf = metafeatures_df.loc[ds_id].values
+                    if not np.isnan(mf).any():
+                        all_metafeatures.append(mf)
+                        dataset_cols_ordered.append(col)
+            
+            if len(all_metafeatures) > 1:
+                all_metafeatures = np.array(all_metafeatures)
+                from sklearn.metrics.pairwise import euclidean_distances
+                distances = euclidean_distances(all_metafeatures)
+                np.fill_diagonal(distances, np.inf)
+                min_distances = distances.min(axis=1)
+                
+                for i, col in enumerate(dataset_cols_ordered):
+                    diversity_scores[col] = min_distances[i]
+            
+            # Normalize each score type to [0, 1]
+            def normalize_dict(d):
+                if not d:
+                    return {}
+                vals = np.array(list(d.values()))
+                if vals.max() > vals.min():
+                    vals = (vals - vals.min()) / (vals.max() - vals.min())
+                else:
+                    vals = np.ones_like(vals) * 0.5  # All equal = moderate influence
+                return {k: vals[i] for i, k in enumerate(d.keys())}
+            
+            variance_scores = normalize_dict(variance_scores)
+            power_scores = normalize_dict(power_scores)
+            diversity_scores = normalize_dict(diversity_scores)
+            
+            # Combine with equal weights
+            all_cols = set(variance_scores.keys()) | set(power_scores.keys()) | set(diversity_scores.keys())
+            for col in all_cols:
+                v = variance_scores.get(col, 0.5)
+                p = power_scores.get(col, 0.5)
+                d = diversity_scores.get(col, 0.5)
+                influence_scores[col] = (v + p + d) / 3.0
+        
         else:
+            # Default: uniform weighting
             for col in performance_matrix.columns:
                 influence_scores[col] = 1.0
         
-        # Normalize
+        # Normalize and ensure no zeros (which would cause sampling issues)
         if influence_scores:
             scores_array = np.array(list(influence_scores.values()))
-            if scores_array.max() > 0:
+            
+            # Check if all scores are equal
+            if scores_array.max() == scores_array.min():
+                # All equal - use uniform weighting
+                for col in influence_scores.keys():
+                    influence_scores[col] = 1.0
+            else:
+                # Normalize to [0, 1] and add small epsilon to prevent zeros
                 scores_array = (scores_array - scores_array.min()) / (scores_array.max() - scores_array.min() + 1e-9)
                 scores_array = np.power(scores_array, 2)  # Stronger differentiation
+                scores_array = scores_array + 0.1  # Add minimum weight to prevent zeros
+                
                 for i, col in enumerate(influence_scores.keys()):
                     influence_scores[col] = scores_array[i]
         
@@ -348,7 +427,23 @@ class PaperPmmRecommender:
         # Calculate sampling probabilities
         if self.use_influence_weighting and self.influence_scores:
             sampling_weights = np.array([self.influence_scores.get(col, 1.0) for col in performance_matrix.columns])
+            
+            # Safety checks for sampling weights
+            if np.any(np.isnan(sampling_weights)) or np.any(np.isinf(sampling_weights)):
+                print("    WARNING: NaN or Inf in influence scores, using uniform weights")
+                sampling_weights = np.ones(n_datasets)
+            
+            if sampling_weights.sum() == 0:
+                print("    WARNING: All influence scores are zero, using uniform weights")
+                sampling_weights = np.ones(n_datasets)
+            
+            # Normalize to sum to 1
             sampling_weights = sampling_weights / sampling_weights.sum()
+            
+            # Final check
+            if np.any(np.isnan(sampling_weights)):
+                print("    WARNING: NaN in normalized weights, using uniform weights")
+                sampling_weights = np.ones(n_datasets) / n_datasets
         else:
             sampling_weights = np.ones(n_datasets) / n_datasets
         

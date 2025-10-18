@@ -21,12 +21,21 @@ from autogluon.tabular import TabularPredictor
 from scipy.stats import zscore
 
 
-# Configuration constants
-AG_ARGS_FIT = {
-    "ag.max_memory_usage_ratio": 0.3,
-    'num_gpus': 0,
-    'num_cpus': min(10, os.cpu_count() if os.cpu_count() else 4)
+# Configuration constants - Updated to match new AutoGluon config
+AUTOGLUON_CONFIG = {
+    "eval_metric": "accuracy",
+    "time_limit": 600,  # 10 minutes per dataset (5 minutes in original comment but 600 seconds)
+    "presets": "medium_quality",
+    "verbosity": 4,
+    "hyperparameter_tune_kwargs": None,
+    "ag_args_fit": {
+        "ag.max_memory_usage_ratio": 0.9,
+    },
+    "seed": 42
 }
+
+# Legacy constants (kept for backwards compatibility)
+AG_ARGS_FIT = AUTOGLUON_CONFIG["ag_args_fit"]
 
 STABLE_MODELS = [
     "GBM", "CAT", "XGB", "RF", "XT", "KNN", "LR", "NN_TORCH", "FASTAI",
@@ -316,12 +325,22 @@ def get_temp_dir():
 
 
 def run_autogluon_evaluation(X_train, y_train, X_test, y_test):
+    """
+    Evaluate using AutoGluon with the specified configuration.
+    Uses IdentityFeatureGenerator to prevent AutoGluon from doing its own preprocessing.
+    """
     if len(X_train) == 0 or len(X_test) == 0:
         print("      Warning: Empty dataset provided to AutoGluon")
         return np.nan
         
     temp_dir = get_temp_dir()
+    
+    # Suppress "path already exists" warning
+    warnings.filterwarnings("ignore", message="path already exists! This predictor may overwrite")
+    
     try:
+        from autogluon.features.generators import IdentityFeatureGenerator
+        
         # Reset column names to avoid mismatch issues
         X_train_ag = X_train.copy()
         X_train_ag.columns = [f"col_{i}" for i in range(X_train_ag.shape[1])]
@@ -329,44 +348,89 @@ def run_autogluon_evaluation(X_train, y_train, X_test, y_test):
         X_test_ag = X_test.copy()
         X_test_ag.columns = [f"col_{i}" for i in range(X_test_ag.shape[1])]
         
+        # Prepare training data
         train_data = X_train_ag.copy()
         train_data['target'] = y_train.values
         
-        problem_type = 'binary' if y_train.nunique() <= 2 else 'multiclass'
+        # Detect problem type based on target
+        unique_classes = y_train.nunique()
+        if unique_classes == 2:
+            problem_type = 'binary'
+        elif unique_classes > 20 and np.issubdtype(y_train.dtype, np.number):
+            problem_type = 'regression'
+        else:
+            problem_type = 'multiclass'
+        
+        # Determine eval metric
+        eval_metric = 'r2' if problem_type == 'regression' else AUTOGLUON_CONFIG['eval_metric']
+        
+        # Create predictor with new config
         predictor = TabularPredictor(
             label='target', 
             path=temp_dir, 
             problem_type=problem_type, 
-            eval_metric='accuracy', 
-            verbosity=0
+            eval_metric=eval_metric,
+            verbosity=AUTOGLUON_CONFIG['verbosity']
         )
         
+        # Fit with new config - using IdentityFeatureGenerator to prevent extra preprocessing
         predictor.fit(
-            train_data, 
-            time_limit=600, 
-            presets='medium_quality',
-            included_model_types=STABLE_MODELS, 
-            hyperparameter_tune_kwargs=None,
-            feature_generator=None, 
-            ag_args_fit=AG_ARGS_FIT, 
+            train_data=train_data,
+            time_limit=AUTOGLUON_CONFIG['time_limit'],
+            presets=AUTOGLUON_CONFIG['presets'],
+            hyperparameter_tune_kwargs=AUTOGLUON_CONFIG['hyperparameter_tune_kwargs'],
+            ag_args_fit=AUTOGLUON_CONFIG['ag_args_fit'],
+            feature_generator=IdentityFeatureGenerator(),  # Prevent AutoGluon from preprocessing
             raise_on_no_models_fitted=False
         )
         
+        # Make predictions
         preds = predictor.predict(X_test_ag)
-        return accuracy_score(y_test, preds)
+        
+        # Calculate score based on problem type
+        if problem_type == 'regression':
+            from sklearn.metrics import r2_score
+            return r2_score(y_test, preds)
+        else:
+            return accuracy_score(y_test, preds)
         
     except Exception as e:
         print(f"      Warning: AutoGluon evaluation failed: {e}")
+        print("      Fallback: using RandomForestClassifier/Regressor")
         
-        # Fallback to a simple RandomForest
+        # Fallback to a simple RandomForest based on problem type
         try:
-            from sklearn.ensemble import RandomForestClassifier
-            clf = RandomForestClassifier(n_estimators=100, random_state=42)
-            clf.fit(X_train, y_train)
-            preds = clf.predict(X_test)
-            return accuracy_score(y_test, preds)
+            # Determine problem type for fallback
+            unique_classes = y_train.nunique()
+            if unique_classes > 20 and np.issubdtype(y_train.dtype, np.number):
+                problem_type = 'regression'
+            else:
+                problem_type = 'classification'
+            
+            if problem_type == 'regression':
+                from sklearn.ensemble import RandomForestRegressor
+                from sklearn.metrics import r2_score
+                model = RandomForestRegressor(
+                    n_estimators=50, 
+                    random_state=AUTOGLUON_CONFIG['seed'], 
+                    max_depth=10
+                )
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                return r2_score(y_test, y_pred)
+            else:
+                from sklearn.ensemble import RandomForestClassifier
+                model = RandomForestClassifier(
+                    n_estimators=50, 
+                    random_state=AUTOGLUON_CONFIG['seed'], 
+                    max_depth=10
+                )
+                model.fit(X_train, y_train)
+                y_pred = model.predict(X_test)
+                return accuracy_score(y_test, y_pred)
+                
         except Exception as e2:
-            print(f"      Warning: Fallback classifier also failed: {e2}")
+            print(f"      Warning: Fallback model also failed: {e2}")
             return np.nan
     finally:
         try:
@@ -375,7 +439,7 @@ def run_autogluon_evaluation(X_train, y_train, X_test, y_test):
             pass
 
 
-def run_experiment_for_dataset(dataset, meta_features_df, global_performance_matrix=None, recommender_type='baseline', ground_truth_perf_matrix=None, use_influence=False, influence_method='performance_variance'):
+def run_experiment_for_dataset(dataset, meta_features_df, global_performance_matrix=None, recommender_type='baseline', ground_truth_perf_matrix=None, use_influence=False, influence_method='performance_variance', evaluate_only_baseline=False):
     """
     Run experiment for a dataset. Can use pre-computed ground truth performance or evaluate pipelines.
     
@@ -387,6 +451,7 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         ground_truth_perf_matrix: Optional DataFrame with pre-computed performance for TEST datasets only
         use_influence: Whether to use DPO-style influence weighting (for PMM/BalancedPMM)
         influence_method: Method for calculating influence scores
+        evaluate_only_baseline: If True, only evaluate 'baseline' pipeline (skip all others)
     """
     print(f"\n{'='*30} EXPERIMENT FOR {dataset['name']} ({dataset['id']}) {'='*30}")
     
@@ -431,28 +496,35 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         else:
             print(f"  ⚠️ No ground truth file provided, evaluating all pipelines...")
         
-        # Use the full dataset for training and testing
+        # Use the full dataset
         X_full = dataset['X']
         y_full = dataset['y']
         
-        # Use a single train/test split
+        # Split into train/test
         X_train, X_test, y_train, y_test = safe_train_test_split(
-            X_full, y_full, test_size=0.2, random_state=42
+            X_full, y_full, test_size=0.3, random_state=42
         )
         
-        print(f"  Dataset size: Full={len(X_full)}, Train={len(X_train)}, Test={len(X_test)}")
+        print(f"  Dataset size: {len(X_full)} samples, split into train: {len(X_train)}, test: {len(X_test)}")
         
         # Check if dataset is too small
         if len(X_train) < 10 or len(X_test) < 5:
             print("  WARNING: Dataset too small for reliable evaluation, skipping...")
             return None, None, None
         
-        print("  Evaluating all pipelines...")
-        local_perf = {}
-        
         from recommender_trainer import pipeline_configs
         
-        for config in pipeline_configs:
+        # Filter pipelines based on evaluate_only_baseline flag
+        if evaluate_only_baseline:
+            print("  Evaluating ONLY baseline pipeline...")
+            configs_to_evaluate = [c for c in pipeline_configs if c['name'] == 'baseline']
+        else:
+            print("  Evaluating all pipelines...")
+            configs_to_evaluate = pipeline_configs
+        
+        local_perf = {}
+        
+        for config in configs_to_evaluate:
             print(f"    Evaluating '{config['name']}'...")
             try:
                 if config['name'] == 'baseline':
@@ -582,10 +654,9 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Using Random recommender...")
-            recommender = RandomRecommender()
-            recommender.fit(global_performance_matrix, meta_features_df)
-            recommendation_result = recommender.recommend(dataset['id'])
-            recommended_pipeline = recommendation_result['pipeline']
+            recommender = RandomRecommender(global_performance_matrix, meta_features_df)
+            recommender.fit()
+            recommended_pipeline, predictions = recommender.recommend(dataset['id'])
             print(f"  Random recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: Random recommender failed: {e}")
@@ -597,10 +668,9 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Using Average Rank recommender...")
-            recommender = AverageRankRecommender()
-            recommender.fit(global_performance_matrix, meta_features_df)
-            recommendation_result = recommender.recommend(dataset['id'])
-            recommended_pipeline = recommendation_result['pipeline']
+            recommender = AverageRankRecommender(global_performance_matrix, meta_features_df)
+            recommender.fit()
+            recommended_pipeline, predictions = recommender.recommend(dataset['id'])
             print(f"  Average Rank recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: Average Rank recommender failed: {e}")
@@ -612,10 +682,9 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Using L1 Distance recommender...")
-            recommender = L1Recommender()
-            recommender.fit(global_performance_matrix, meta_features_df)
-            recommendation_result = recommender.recommend(dataset['id'], performance_matrix=global_performance_matrix)
-            recommended_pipeline = recommendation_result['pipeline']
+            recommender = L1Recommender(global_performance_matrix, meta_features_df)
+            recommender.fit()
+            recommended_pipeline, predictions = recommender.recommend(dataset['id'])
             print(f"  L1 Distance recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: L1 Distance recommender failed: {e}")
@@ -627,10 +696,9 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Using Basic recommender...")
-            recommender = BasicRecommender()
-            recommender.fit(global_performance_matrix, meta_features_df)
-            recommendation_result = recommender.recommend(dataset['id'])
-            recommended_pipeline = recommendation_result['pipeline']
+            recommender = BasicRecommender(global_performance_matrix, meta_features_df)
+            recommender.fit()
+            recommended_pipeline, predictions = recommender.recommend(dataset['id'])
             print(f"  Basic recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: Basic recommender failed: {e}")
@@ -642,16 +710,22 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Training KNN recommender...")
-            recommender = KnnRecommender(n_neighbors=5)
-            if not recommender.fit(global_performance_matrix, meta_features_df):
+            recommender = KnnRecommender(global_performance_matrix, meta_features_df)
+            if not recommender.fit():
                 print("  WARNING: KNN recommender training failed, using local best pipeline...")
                 recommended_pipeline = valid_local_perf.idxmax().iloc[0]
             else:
                 recommendation_result = recommender.recommend(dataset['id'])
-                recommended_pipeline = recommendation_result['pipeline']
-                print(f"  KNN recommender suggests: {recommended_pipeline}")
+                # Handle tuple return: (pipeline_name, predictions_dict)
+                if isinstance(recommendation_result, tuple):
+                    recommended_pipeline, predictions = recommendation_result
+                else:
+                    recommended_pipeline = recommendation_result
+                print(f"  ✅ KNN recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: KNN recommender failed: {e}")
+            import traceback
+            traceback.print_exc()
             recommended_pipeline = valid_local_perf.idxmax().iloc[0]
     
     elif recommender_type == 'rf' and global_performance_matrix is not None:
@@ -660,16 +734,22 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Training Random Forest recommender...")
-            recommender = RFRecommender()
-            if not recommender.fit(global_performance_matrix, meta_features_df):
+            recommender = RFRecommender(global_performance_matrix, meta_features_df)
+            if not recommender.fit():
                 print("  WARNING: RF recommender training failed, using local best pipeline...")
                 recommended_pipeline = valid_local_perf.idxmax().iloc[0]
             else:
                 recommendation_result = recommender.recommend(dataset['id'])
-                recommended_pipeline = recommendation_result['pipeline']
-                print(f"  Random Forest recommender suggests: {recommended_pipeline}")
+                # Handle tuple return: (pipeline_name, predictions_dict)
+                if isinstance(recommendation_result, tuple):
+                    recommended_pipeline, predictions = recommendation_result
+                else:
+                    recommended_pipeline = recommendation_result
+                print(f"  ✅ Random Forest recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: Random Forest recommender failed: {e}")
+            import traceback
+            traceback.print_exc()
             recommended_pipeline = valid_local_perf.idxmax().iloc[0]
     
     elif recommender_type == 'nn' and global_performance_matrix is not None:
@@ -678,16 +758,22 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Training Neural Network recommender...")
-            recommender = NNRecommender()
-            if not recommender.fit(global_performance_matrix, meta_features_df):
+            recommender = NNRecommender(global_performance_matrix, meta_features_df)
+            if not recommender.fit():
                 print("  WARNING: NN recommender training failed, using local best pipeline...")
                 recommended_pipeline = valid_local_perf.idxmax().iloc[0]
             else:
                 recommendation_result = recommender.recommend(dataset['id'])
-                recommended_pipeline = recommendation_result['pipeline']
-                print(f"  Neural Network recommender suggests: {recommended_pipeline}")
+                # Handle tuple return: (pipeline_name, predictions_dict)
+                if isinstance(recommendation_result, tuple):
+                    recommended_pipeline, predictions = recommendation_result
+                else:
+                    recommended_pipeline = recommendation_result
+                print(f"  ✅ Neural Network recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: Neural Network recommender failed: {e}")
+            import traceback
+            traceback.print_exc()
             recommended_pipeline = valid_local_perf.idxmax().iloc[0]
     
     elif recommender_type == 'regressor' and global_performance_matrix is not None:
@@ -696,16 +782,22 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Training Regressor recommender...")
-            recommender = RegressorRecommender()
-            if not recommender.fit(global_performance_matrix, meta_features_df):
+            recommender = RegressorRecommender(global_performance_matrix, meta_features_df)
+            if not recommender.fit():
                 print("  WARNING: Regressor recommender training failed, using local best pipeline...")
                 recommended_pipeline = valid_local_perf.idxmax().iloc[0]
             else:
                 recommendation_result = recommender.recommend(dataset['id'])
-                recommended_pipeline = recommendation_result['pipeline']
-                print(f"  Regressor recommender suggests: {recommended_pipeline}")
+                # Handle tuple return: (pipeline_name, predictions_dict)
+                if isinstance(recommendation_result, tuple):
+                    recommended_pipeline, predictions = recommendation_result
+                else:
+                    recommended_pipeline = recommendation_result
+                print(f"  ✅ Regressor recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: Regressor recommender failed: {e}")
+            import traceback
+            traceback.print_exc()
             recommended_pipeline = valid_local_perf.idxmax().iloc[0]
     
     elif recommender_type == 'adaboost' and global_performance_matrix is not None:
@@ -714,16 +806,22 @@ def run_experiment_for_dataset(dataset, meta_features_df, global_performance_mat
         
         try:
             print("  Training AdaBoost Regressor recommender...")
-            recommender = AdaBoostRegressorRecommender()
-            if not recommender.fit(global_performance_matrix, meta_features_df):
+            recommender = AdaBoostRegressorRecommender(global_performance_matrix, meta_features_df)
+            if not recommender.fit():
                 print("  WARNING: AdaBoost recommender training failed, using local best pipeline...")
                 recommended_pipeline = valid_local_perf.idxmax().iloc[0]
             else:
                 recommendation_result = recommender.recommend(dataset['id'])
-                recommended_pipeline = recommendation_result['pipeline']
-                print(f"  AdaBoost Regressor recommender suggests: {recommended_pipeline}")
+                # Handle tuple return: (pipeline_name, predictions_dict)
+                if isinstance(recommendation_result, tuple):
+                    recommended_pipeline, predictions = recommendation_result
+                else:
+                    recommended_pipeline = recommendation_result
+                print(f"  ✅ AdaBoost Regressor recommender suggests: {recommended_pipeline}")
         except Exception as e:
             print(f"  ERROR: AdaBoost Regressor recommender failed: {e}")
+            import traceback
+            traceback.print_exc()
             recommended_pipeline = valid_local_perf.idxmax().iloc[0]
     
     elif recommender_type == 'pmm' and global_performance_matrix is not None:
