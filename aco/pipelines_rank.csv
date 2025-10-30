@@ -1,0 +1,13 @@
+pipeline,average_performance
+baseline,0.810958873488889
+robust_preprocess,0.8041441372
+simple_preprocess,0.8026713166222222
+conservative,0.8025544367000002
+constant_maxabs_iforest,0.7933078129111111
+feature_selection,0.7900521022555557
+mostfreq_standard_iqr,0.7865991061111111
+mutual_info_zscore,0.7790748447746478
+knn_impute_pca,0.7756795340000001
+dimension_reduction,0.7756257401111112
+mean_minmax_lof_svd,0.7681241368222221
+aggressive,0.7543685405222221
