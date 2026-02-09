@@ -110,8 +110,7 @@ test_ground_truth_performance*.csv
 *_results.csv
 *_summary.csv
 *_analysis.csv
-dataset_feats*.csv
-training_performance*.csv
+
 
 # Large data directories (uncomment if you want to ignore all data)
 # data-model/

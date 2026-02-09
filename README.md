@@ -2,7 +2,7 @@
 
 This repository is a production-ready, research-friendly refactor of the original notebook. It preserves the notebook behavior (preprocessing operators, ACO logic, meta-learning flow, and evaluation APIs) while providing a modular, testable codebase.
 
-## How to run
+## How to run (local)
 
 Train the siamese regression metric:
 
@@ -20,6 +20,7 @@ python -m scripts.run_recommend \
   --performance-matrix path/to/performance_matrix.csv \
   --metafeatures path/to/metafeatures.csv \
   --pipeline-configs path/to/pipeline_configs.json \
+  --dataset-source csv \
   --dataset-csv path/to/dataset.csv \
   --target-column target \
   --dataset-id 1387 \
@@ -31,6 +32,34 @@ Run tests:
 ```bash
 pytest -q
 ```
+
+## Kaggle quickstart
+
+From a Kaggle notebook cell:
+
+```bash
+!git clone <your-repo-url>
+%cd SolutionRecommendation
+!pip -q install -r requirements-kaggle.txt
+```
+
+Run ACO + final AutoGluon evaluation (outputs saved to `/kaggle/working`):
+
+```bash
+!python -m scripts.run_recommend \
+  --kaggle \
+  --dataset-source openml \
+  --dataset-id 2 \
+  --use-aco \
+  --verbose
+```
+
+Artifacts saved:
+- `/kaggle/working/recommendation.json`
+- `/kaggle/working/aco_history.csv`
+- `/kaggle/working/aco_progress.png` (if `matplotlib` is installed)
+
+If AutoGluon is not available, the final evaluation will fall back to proxy scores and the output will note `autogluon_unavailable`.
 
 ## Design notes
 

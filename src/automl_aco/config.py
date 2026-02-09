@@ -27,6 +27,22 @@ OPERATORS: "OrderedDict[str, List[str]]" = OrderedDict(
     ]
 )
 
+# Notebook-sourced default paths (kept for parity with Kaggle runs)
+KAGGLE_TRAIN_PERF_PATHS = [
+    "/kaggle/input/disable-autogluon/training_performance_matrix_autogluon.csv",
+    "/kaggle/input/diffprep-setting/training_performance_matrix_autogluon_diffprep.csv",
+    "/kaggle/input/quick-test-regression/training_performance_matrix_autogluon.csv",
+]
+KAGGLE_METAFEATURES_PATH = "/kaggle/working/SolutionRecommendation/data/openml/dataset_feats.csv"
+KAGGLE_PIPELINES_PATH = "/kaggle/input/openml/pipelines.json"
+KAGGLE_DATA_FOLDER = "/kaggle/input/openml"
+
+# Local-friendly defaults (repo-relative)
+LOCAL_TRAIN_PERF_PATH = "aco/training_performance_matrix_autogluon.csv"
+LOCAL_METAFEATURES_PATH = "aco/dataset_feats.csv"
+LOCAL_PIPELINES_PATH = "aco/pipeline_configs.json"
+LOCAL_PIPELINES_PATH_ALT = "Data/openml/pipelines.json"
+
 # Notebook default search ordering (preserves behavior)
 DEFAULT_PIPELINE_OPTIONS: "OrderedDict[str, List[str]]" = OrderedDict(
     [

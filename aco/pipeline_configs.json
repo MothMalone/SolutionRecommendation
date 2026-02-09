@@ -1,0 +1,110 @@
+[
+  {
+    "name": "baseline",
+    "imputation": "none",
+    "scaling": "none",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "simple_preprocess",
+    "imputation": "mean",
+    "scaling": "standard",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "robust_preprocess",
+    "imputation": "median",
+    "scaling": "robust",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "iqr",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "feature_selection",
+    "imputation": "median",
+    "scaling": "standard",
+    "encoding": "onehot",
+    "feature_selection": "k_best",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "dimension_reduction",
+    "imputation": "mean",
+    "scaling": "standard",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "pca"
+  },
+  {
+    "name": "conservative",
+    "imputation": "median",
+    "scaling": "minmax",
+    "encoding": "onehot",
+    "feature_selection": "variance_threshold",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "aggressive",
+    "imputation": "mean",
+    "scaling": "standard",
+    "encoding": "onehot",
+    "feature_selection": "k_best",
+    "outlier_removal": "iqr",
+    "dimensionality_reduction": "pca"
+  },
+  {
+    "name": "knn_impute_pca",
+    "imputation": "knn",
+    "scaling": "standard",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "pca"
+  },
+  {
+    "name": "mutual_info_zscore",
+    "imputation": "median",
+    "scaling": "robust",
+    "encoding": "onehot",
+    "feature_selection": "mutual_info",
+    "outlier_removal": "zscore",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "constant_maxabs_iforest",
+    "imputation": "constant",
+    "scaling": "maxabs",
+    "encoding": "onehot",
+    "feature_selection": "variance_threshold",
+    "outlier_removal": "isolation_forest",
+    "dimensionality_reduction": "none"
+  },
+  {
+    "name": "mean_minmax_lof_svd",
+    "imputation": "mean",
+    "scaling": "minmax",
+    "encoding": "onehot",
+    "feature_selection": "k_best",
+    "outlier_removal": "lof",
+    "dimensionality_reduction": "svd"
+  },
+  {
+    "name": "mostfreq_standard_iqr",
+    "imputation": "most_frequent",
+    "scaling": "standard",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "iqr",
+    "dimensionality_reduction": "none"
+  }
+]

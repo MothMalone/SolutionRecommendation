@@ -45,6 +45,7 @@ def evaluate_candidates_autogluon(
     target_column: str,
     candidate_configs: List[Dict[str, Any]],
     time_limit_per_model: int = 300,
+    verbose: bool = False,
 ) -> Tuple[Dict[str, Any], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     try:
         from autogluon.tabular import TabularPredictor  # type: ignore
@@ -84,7 +85,10 @@ def evaluate_candidates_autogluon(
             y_test_proc = y_test.reset_index(drop=True)
 
             if X_train_proc.shape[0] == 0:
-                logger.info("%s produced empty TRAIN data after preprocessing", name)
+                if verbose:
+                    print(f"    ✗ {name} produced empty TRAIN data after preprocessing")
+                else:
+                    logger.info("%s produced empty TRAIN data after preprocessing", name)
                 continue
 
             train_df = X_train_proc.copy()
@@ -92,7 +96,10 @@ def evaluate_candidates_autogluon(
             test_df = X_test_proc.copy()
 
             if len(y_test_proc) != len(X_test_proc):
-                logger.info("%s - y_test length mismatch after preprocessing", name)
+                if verbose:
+                    print(f"    ✗ {name} - y_test length mismatch after preprocessing")
+                else:
+                    logger.info("%s - y_test length mismatch after preprocessing", name)
                 continue
 
             import os, tempfile, uuid
@@ -104,14 +111,25 @@ def evaluate_candidates_autogluon(
                     path=temp_dir,
                     problem_type=problem_type,
                     eval_metric=eval_metric,
-                    verbosity=1,
+                    verbosity=2 if verbose else 0,
                 )
                 predictor.fit(
                     train_data=train_df,
                     time_limit=time_limit_per_model,
                     presets="best_quality",
                     feature_generator=IdentityFeatureGenerator(),
+                    raise_on_no_models_fitted=False,
                 )
+                try:
+                    model_names = predictor.model_names()
+                    if len(model_names) == 0:
+                        if verbose:
+                            print(f"    ✗ {name} - AutoGluon fitted no models")
+                        else:
+                            logger.info("%s - AutoGluon fitted no models", name)
+                        continue
+                except Exception:
+                    pass
                 preds = predictor.predict(test_df)
 
                 if problem_type == "regression":
@@ -123,12 +141,20 @@ def evaluate_candidates_autogluon(
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
             results.append((cfg, float(score)))
+            if verbose:
+                print(f"    ✓ {name} -> {score:.4f}")
         except Exception as exc:
-            logger.exception("Error evaluating cfg %s: %s", name, exc)
+            if verbose:
+                print(f"    ✗ Error evaluating cfg {name}: {exc}")
+            else:
+                logger.exception("Error evaluating cfg %s: %s", name, exc)
             continue
 
     if not results:
-        logger.info("No candidate produced valid evaluation results")
+        if verbose:
+            print("No candidate produced valid evaluation results")
+        else:
+            logger.info("No candidate produced valid evaluation results")
         results.append((candidate_configs[0], 0.0))
 
     unsorted_res = results.copy()
@@ -141,6 +167,7 @@ def evaluate_candidates_simple(
     dataset: Any,
     target_column: str,
     candidate_configs: List[Dict[str, Any]],
+    verbose: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     df = _normalize_dataset(dataset, target_column)
     if target_column not in df.columns:
@@ -182,19 +209,34 @@ def evaluate_candidates_simple(
             y_test_p = y_test.reset_index(drop=True)
 
             if X_train_p.shape[0] == 0:
-                logger.info("%s produced empty TRAIN data", name)
+                if verbose:
+                    print(f"    ✗ {name} produced empty TRAIN data")
+                else:
+                    logger.info("%s produced empty TRAIN data", name)
                 continue
             if X_val_p.shape[0] == 0:
-                logger.info("%s produced empty VAL data", name)
+                if verbose:
+                    print(f"    ✗ {name} produced empty VAL data")
+                else:
+                    logger.info("%s produced empty VAL data", name)
                 continue
             if X_test_p.shape[0] == 0:
-                logger.info("%s produced empty TEST data", name)
+                if verbose:
+                    print(f"    ✗ {name} produced empty TEST data")
+                else:
+                    logger.info("%s produced empty TEST data", name)
                 continue
             if len(X_train_p) != len(y_train_p):
-                logger.info("%s - TRAIN X/y length mismatch", name)
+                if verbose:
+                    print(f"    ✗ {name} - TRAIN X/y length mismatch")
+                else:
+                    logger.info("%s - TRAIN X/y length mismatch", name)
                 continue
             if len(X_val_p) != len(y_val_p):
-                logger.info("%s - VAL X/y length mismatch", name)
+                if verbose:
+                    print(f"    ✗ {name} - VAL X/y length mismatch")
+                else:
+                    logger.info("%s - VAL X/y length mismatch", name)
                 continue
 
             if problem_type == "regression":
@@ -244,11 +286,18 @@ def evaluate_candidates_simple(
                 score = float(max(scores))
 
             results.append((cfg, score))
+            if verbose:
+                print(f"    ✓ {name} -> {score:.4f}")
         except Exception as exc:
-            logger.exception("Error evaluating cfg %s: %s", name, exc)
+            if verbose:
+                print(f"    ✗ Error evaluating cfg {name}: {exc}")
+            else:
+                logger.exception("Error evaluating cfg %s: %s", name, exc)
             continue
 
     if not results:
+        if verbose:
+            print("❌ No candidate produced valid evaluation results")
         return None, np.nan, [], []
 
     unsorted_res = results.copy()

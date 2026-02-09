@@ -26,6 +26,8 @@ def search_pipelines_aco(
     weight_method: str = "rank",
     markov_order: int = 2,
     lambda_smooth: float = 0.7,
+    verbose: bool = False,
+    return_history: bool = False,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     rng = np.random.RandomState(seed)
 
@@ -42,6 +44,7 @@ def search_pipelines_aco(
 
     candidate_pipelines: List[Tuple[Dict[str, Any], float]] = []
     eval_cache: Dict[Tuple[Tuple[str, Any], ...], float] = {}
+    history: List[Dict[str, Any]] = []
 
     def sample_config() -> Dict[str, Any]:
         cfg: Dict[str, Any] = {}
@@ -80,6 +83,7 @@ def search_pipelines_aco(
 
         best_cfg, best_score, eval_results, unsorted_res = evaluate_fn(sampled)
         if not eval_results:
+            history.append({"iteration": iteration + 1, "best_score": None})
             logger.info("ACO Iter %s/%s - No valid evaluation", iteration + 1, n_iterations)
             continue
 
@@ -132,7 +136,14 @@ def search_pipelines_aco(
                 history.append((step, val_idx))
 
         candidate_pipelines.extend(unsorted_res)
-        logger.info("ACO Iter %s/%s - best: %.4f | k=%s", iteration + 1, n_iterations, best_score, markov_order)
+        history.append({"iteration": iteration + 1, "best_score": float(best_score)})
+        if verbose:
+            print(
+                f"ACO Iter {iteration+1}/{n_iterations} — "
+                f"best: {best_score:.4f} | k={markov_order}"
+            )
+        else:
+            logger.info("ACO Iter %s/%s - best: %.4f | k=%s", iteration + 1, n_iterations, best_score, markov_order)
 
     unsorted_candidate_pipelines = candidate_pipelines.copy()
     candidate_pipelines.sort(key=lambda x: x[1], reverse=True)
@@ -148,4 +159,10 @@ def search_pipelines_aco(
         final.append((dict(k), sc))
 
     final.sort(key=lambda x: x[1], reverse=True)
+    if verbose:
+        print("\n🏆 Top pipelines (k-order Markov ACO):")
+        for i, (cfg, sc) in enumerate(final[:n_pipelines]):
+            print(f"  {i+1}. {cfg.get('name', 'Pipeline')} — score: {sc:.4f}")
+    if return_history:
+        return final[:n_pipelines], unsorted_candidate_pipelines, history
     return final[:n_pipelines], unsorted_candidate_pipelines

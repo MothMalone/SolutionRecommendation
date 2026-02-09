@@ -32,22 +32,72 @@ class MetaPipelineRecommender:
         metafeatures_df: pd.DataFrame,
         pipeline_configs: List[Dict[str, Any]],
         pipeline_options: Optional[Dict[str, List[str]]] = None,
+        verbose: bool = False,
     ):
         self.performance_matrix = performance_matrix.copy()
         self.metafeatures_df = metafeatures_df.copy()
+        self.verbose = verbose
 
-        perf_datasets = set(self.performance_matrix.columns)
-        meta_datasets = set(self.metafeatures_df.index)
-        common_datasets = sorted(perf_datasets & meta_datasets)
-        if len(common_datasets) == 0:
-            raise ValueError("No common datasets between performance_matrix and metafeatures_df")
+        def _normalize_id(val: Any) -> str:
+            s = str(val).strip()
+            if s.startswith("D_"):
+                s = s[2:]
+            if s.startswith("Dataset_"):
+                s = s.split("_", 1)[1]
+            return s
 
-        self.performance_matrix = self.performance_matrix.loc[:, common_datasets]
-        self.metafeatures_df = self.metafeatures_df.loc[common_datasets, :]
-        assert list(self.performance_matrix.columns) == list(self.metafeatures_df.index)
+        perf_cols = list(self.performance_matrix.columns)
+        meta_idx = list(self.metafeatures_df.index)
+
+        perf_norm_map: Dict[str, Any] = {}
+        for c in perf_cols:
+            norm = _normalize_id(c)
+            if norm not in perf_norm_map:
+                perf_norm_map[norm] = c
+
+        meta_norm_map: Dict[str, Any] = {}
+        for i in meta_idx:
+            norm = _normalize_id(i)
+            if norm not in meta_norm_map:
+                meta_norm_map[norm] = i
+
+        common_norm = set(perf_norm_map.keys()) & set(meta_norm_map.keys())
+        if not common_norm:
+            perf_sample = perf_cols[:10]
+            meta_sample = meta_idx[:10]
+            raise ValueError(
+                "No common datasets between performance_matrix and metafeatures_df. "
+                f"Perf sample: {perf_sample} | Meta sample: {meta_sample}"
+            )
+
+        def _sort_key(x: str):
+            return int(x) if x.isdigit() else x
+
+        common_norm_sorted = sorted(common_norm, key=_sort_key)
+        perf_common = [perf_norm_map[k] for k in common_norm_sorted]
+        meta_common = [meta_norm_map[k] for k in common_norm_sorted]
+
+        if self.verbose:
+            print(f"Aligned datasets: {len(common_norm_sorted)}")
+            if len(common_norm_sorted) < 10:
+                print(f"Common dataset ids: {common_norm_sorted}")
+
+        self.performance_matrix = self.performance_matrix.loc[:, perf_common]
+        self.metafeatures_df = self.metafeatures_df.loc[meta_common, :]
+
+        # Normalize aligned identifiers so perf columns and metafeatures index match
+        norm_index = [str(k) for k in common_norm_sorted]
+        self.performance_matrix.columns = norm_index
+        self.metafeatures_df.index = norm_index
 
         self.pipeline_configs = pipeline_configs
         self.pipeline_options = pipeline_options or dict(DEFAULT_PIPELINE_OPTIONS)
+
+        if self.performance_matrix.notna().sum().sum() == 0:
+            raise ValueError(
+                "Performance matrix has no scores for the aligned datasets. "
+                "This usually means the metafeatures file does not match the performance matrix dataset IDs."
+            )
 
         self.imputer = SimpleImputer(strategy="mean")
         self.scaler = MinMaxScaler()
@@ -165,7 +215,7 @@ class MetaPipelineRecommender:
         beta: float = 2.0,
         evaporation: float = 0.2,
         dataset_weighting: str = "equality",
-        time_limit_per_model: int = 120,
+        time_limit_per_model: int = 3000,
         local_search: bool = False,
         metafeatures_func=None,
         top_k_pheromone: int = 3,
@@ -188,7 +238,7 @@ class MetaPipelineRecommender:
                 "eval_k": 3,
                 "use_aco": False,
                 "time_limit_per_model": time_limit_per_model,
-                "use_autogluon": True,
+                "use_autogluon": False,
                 "metafeatures_func": metafeatures_func,
             },
         )
@@ -196,7 +246,7 @@ class MetaPipelineRecommender:
         def _evaluate(sampled_configs):
             return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_configs)
 
-        return search_pipelines_aco(
+        result = search_pipelines_aco(
             options=options,
             evaluate_fn=_evaluate,
             eta=eta,
@@ -212,7 +262,13 @@ class MetaPipelineRecommender:
             weight_method=weight_method,
             markov_order=markov_order,
             lambda_smooth=lambda_smooth,
+            verbose=self.verbose,
+            return_history=True,
         )
+        if isinstance(result, tuple) and len(result) == 3:
+            return result
+        final, unsorted = result
+        return final, unsorted, []
 
     def _evaluate_candidates_with_autogluon(self, dataset, target_column, candidate_configs, time_limit_per_model=300):
         return evaluate_candidates_autogluon(
@@ -220,6 +276,7 @@ class MetaPipelineRecommender:
             target_column=target_column,
             candidate_configs=candidate_configs,
             time_limit_per_model=time_limit_per_model,
+            verbose=self.verbose,
         )
 
     def _evaluate_candidates_with_simple_models(self, dataset, target_column, candidate_configs):
@@ -227,6 +284,7 @@ class MetaPipelineRecommender:
             dataset=dataset,
             target_column=target_column,
             candidate_configs=candidate_configs,
+            verbose=self.verbose,
         )
 
     def recommend(
@@ -236,7 +294,7 @@ class MetaPipelineRecommender:
         k: int = 5,
         eval_k: int = 3,
         use_autogluon: bool = True,
-        time_limit_per_model: int = 120,
+        time_limit_per_model: int = 300,
         metafeatures_func=None,
         use_aco: bool = False,
         aco_params: Optional[Dict[str, Any]] = None,
@@ -254,7 +312,7 @@ class MetaPipelineRecommender:
         new_mf_scaled = self.scaler.transform(new_mf_imputed).ravel()
 
         if use_aco:
-            aco_results, aco_unsorted_res = self._search_pipelines_aco(
+            aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
                 new_dataset,
                 target_column,
                 new_mf_scaled,
@@ -266,11 +324,32 @@ class MetaPipelineRecommender:
                 metafeatures_func=metafeatures_func,
             )
             best_pipeline, best_score = aco_results[0]
+            final_eval = {"method": "proxy", "score": float(best_score)}
+            if use_autogluon:
+                if AUTOGLUON_AVAILABLE and target_column is not None:
+                    try:
+                        ag_best_cfg, ag_score, _ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
+                            new_dataset,
+                            target_column,
+                            [best_pipeline],
+                            time_limit_per_model=time_limit_per_model,
+                        )
+                        if ag_best_cfg is not None:
+                            best_pipeline = ag_best_cfg
+                        final_eval = {"method": "autogluon", "score": float(ag_score)}
+                    except Exception as exc:
+                        logger.warning("AutoGluon final evaluation failed: %s", exc)
+                        final_eval = {"method": "autogluon_failed", "score": float(best_score), "error": str(exc)}
+                else:
+                    final_eval = {"method": "autogluon_unavailable", "score": float(best_score)}
             return {
                 "pipeline_config": best_pipeline,
                 "recommended_performance": best_score,
+                "final_evaluation": final_eval,
+                "final_performance": float(final_eval.get("score", best_score)),
                 "confidence": "high" if best_score > 0.8 else "low",
                 "aco_results": aco_unsorted_res,
+                "aco_history": aco_history,
             }
 
         sims: List[Tuple[Any, float]] = []
@@ -315,11 +394,22 @@ class MetaPipelineRecommender:
         top_candidate_configs = [cfg for cfg in self.pipeline_configs if cfg.get("name") in top_candidate_names]
 
         if use_autogluon and AUTOGLUON_AVAILABLE and target_column is not None and len(top_candidate_configs) > 0:
-            best_cfg, best_score, all_results, _unsorted_res = self._evaluate_candidates_with_simple_models(
-                new_dataset,
-                target_column,
-                top_candidate_configs,
-            )
+            eval_method = "autogluon"
+            try:
+                best_cfg, best_score, all_results, _unsorted_res = self._evaluate_candidates_with_autogluon(
+                    new_dataset,
+                    target_column,
+                    top_candidate_configs,
+                    time_limit_per_model=time_limit_per_model,
+                )
+            except Exception as exc:
+                logger.warning("AutoGluon evaluation failed, falling back to simple models: %s", exc)
+                eval_method = "simple_models"
+                best_cfg, best_score, all_results, _unsorted_res = self._evaluate_candidates_with_simple_models(
+                    new_dataset,
+                    target_column,
+                    top_candidate_configs,
+                )
 
             if best_cfg is None or not all_results:
                 top_pipeline_name = pipeline_ranking[0]
@@ -349,7 +439,7 @@ class MetaPipelineRecommender:
                 "confidence": "high",
                 "similarity_scores": dict(sims[:k]),
                 "model_type": self.metric_type,
-                "evaluation_method": "autogluon",
+                "evaluation_method": eval_method,
             }
 
         top_pipeline_name = pipeline_ranking[0]
