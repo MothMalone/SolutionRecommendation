@@ -293,6 +293,33 @@ def main() -> None:
                 parts.append(f"{step}={cfg[step]}")
         return "{" + ", ".join(parts) + "}"
 
+    def _build_history(history_raw, aco_results, n_ants: int, n_iterations: int):
+        if history_raw and isinstance(history_raw, list) and isinstance(history_raw[0], dict):
+            if "iteration" in history_raw[0]:
+                return history_raw
+        flat = None
+        if history_raw and isinstance(history_raw, list):
+            if isinstance(history_raw[0], (list, tuple)) and len(history_raw[0]) >= 2:
+                flat = history_raw
+        if flat is None and aco_results and isinstance(aco_results, list):
+            if isinstance(aco_results[0], (list, tuple)) and len(aco_results[0]) >= 2:
+                flat = aco_results
+        if flat is None:
+            return []
+        n_ants = max(int(n_ants), 1)
+        history = []
+        for i in range(0, len(flat), n_ants):
+            chunk = flat[i : i + n_ants]
+            scores = []
+            for _cfg, sc in chunk:
+                if isinstance(sc, (int, float)):
+                    scores.append(float(sc))
+            best = max(scores) if scores else None
+            history.append({"iteration": len(history) + 1, "best_score": best})
+            if n_iterations and len(history) >= int(n_iterations):
+                break
+        return history
+
     def _save_history_plot(history, output_dir: str) -> Optional[str]:
         if not history:
             return None
@@ -316,11 +343,14 @@ def main() -> None:
         return out_path
 
     output_dir = _get_output_dir()
+    aco_results = recommendation.get("aco_results") or []
+    history = _build_history(recommendation.get("aco_history"), aco_results, args.n_ants, args.n_iterations)
+    if history and (not recommendation.get("aco_history") or not isinstance(recommendation.get("aco_history"), list)):
+        recommendation["aco_history"] = history
+
     rec_path = os.path.join(output_dir, "recommendation.json")
     with open(rec_path, "w", encoding="utf-8") as f:
         json.dump(recommendation, f, indent=2, default=str)
-
-    history = recommendation.get("aco_history") or []
     history_path = None
     if history:
         history_path = os.path.join(output_dir, "aco_history.csv")
