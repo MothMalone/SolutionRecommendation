@@ -4,6 +4,14 @@ This repository is a production-ready, research-friendly refactor of the origina
 
 ## How to run (local)
 
+Install dependencies:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
 Train the siamese regression metric:
 
 ```bash
@@ -13,7 +21,7 @@ python -m scripts.train_metric \
   --output outputs/siamese_metric.pt
 ```
 
-Run a recommendation:
+Run a recommendation (CSV source):
 
 ```bash
 python -m scripts.run_recommend \
@@ -26,6 +34,24 @@ python -m scripts.run_recommend \
   --dataset-id 1387 \
   --use-aco
 ```
+
+Run a recommendation (OpenML source):
+
+```bash
+python -m scripts.run_recommend \
+  --performance-matrix path/to/performance_matrix.csv \
+  --metafeatures path/to/metafeatures.csv \
+  --pipeline-configs path/to/pipeline_configs.json \
+  --dataset-source openml \
+  --dataset-id 2 \
+  --use-aco \
+  --verbose
+```
+
+Outputs (local):
+- `outputs/recommendation.json`
+- `outputs/aco_history.csv`
+- `outputs/aco_progress.png` (if `matplotlib` is installed)
 
 Run tests:
 
@@ -60,6 +86,22 @@ Artifacts saved:
 - `/kaggle/working/aco_progress.png` (if `matplotlib` is installed)
 
 If AutoGluon is not available, the final evaluation will fall back to proxy scores and the output will note `autogluon_unavailable`.
+
+Notes:
+- You do not need to set `PYTHONPATH`; the scripts add `src/` automatically.
+- Warnings are suppressed by default. Use `--show-warnings` to re-enable them.
+
+## Local vs Kaggle mode (path behavior)
+
+The CLI resolves input files differently depending on mode:
+
+- **Local (default)**: uses local training matrix and metafeatures if you don’t pass paths:
+  - `aco/training_performance_matrix_autogluon.csv`
+  - `aco/dataset_feats.csv`
+  - `aco/pipeline_configs.json`
+- **Kaggle**: enable with `--kaggle` (or when running inside `/kaggle/working`), then it uses Kaggle default paths from `automl_aco.config` and saves outputs to `/kaggle/working`.
+
+You can always override any file with `--performance-matrix`, `--metafeatures`, and `--pipeline-configs`.
 
 ## Design notes
 
