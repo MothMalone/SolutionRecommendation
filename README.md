@@ -80,6 +80,8 @@ Run ACO + final AutoGluon evaluation (outputs saved to `/kaggle/working`):
   --verbose
 ```
 
+If your uploaded dataset uses a different root, pass `--kaggle-root /kaggle/input/<your-dataset-name>`.
+
 Artifacts saved:
 - `/kaggle/working/recommendation.json`
 - `/kaggle/working/aco_history.csv`
@@ -90,6 +92,7 @@ If AutoGluon is not available, the final evaluation will fall back to proxy scor
 Notes:
 - You do not need to set `PYTHONPATH`; the scripts add `src/` automatically.
 - Warnings are suppressed by default. Use `--show-warnings` to re-enable them.
+- If you see a NumPy 2.x compatibility error from AutoGluon/PyTorch, reinstall with `numpy<2` (already pinned in `requirements.txt`).
 
 ## Local vs Kaggle mode (path behavior)
 
@@ -99,7 +102,8 @@ The CLI resolves input files differently depending on mode:
   - `aco/training_performance_matrix_autogluon.csv`
   - `aco/dataset_feats.csv`
   - `aco/pipeline_configs.json`
-- **Kaggle**: enable with `--kaggle` (or when running inside `/kaggle/working`), then it uses Kaggle default paths from `automl_aco.config` and saves outputs to `/kaggle/working`.
+- **Kaggle**: enable with `--kaggle` (or when running inside `/kaggle/working`), then it uses the repo root at `/kaggle/input/acorec` by default and saves outputs to `/kaggle/working`.
+  - Override the root with `--kaggle-root /kaggle/input/your_dataset`.
 
 You can always override any file with `--performance-matrix`, `--metafeatures`, and `--pipeline-configs`.
 

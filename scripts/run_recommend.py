@@ -20,6 +20,7 @@ from automl_aco.config import (
     DEFAULT_PIPELINE_OPTIONS,
     KAGGLE_METAFEATURES_PATH,
     KAGGLE_PIPELINES_PATH,
+    KAGGLE_REPO_ROOT,
     KAGGLE_TRAIN_PERF_PATHS,
     KAGGLE_DATA_FOLDER,
     LOCAL_METAFEATURES_PATH,
@@ -56,6 +57,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-id", required=False, help="Dataset id for metafeature lookup")
     parser.add_argument("--kaggle-data-folder", default=KAGGLE_DATA_FOLDER, help="Kaggle data folder for csv by id")
     parser.add_argument("--kaggle-target-column", default="target", help="Target column for kaggle CSVs")
+    parser.add_argument("--kaggle-root", default=KAGGLE_REPO_ROOT, help="Kaggle repo root path")
     parser.add_argument("--use-aco", action="store_true", help="Enable ACO search")
     parser.add_argument("--k", type=int, default=5, help="Top-k similar datasets")
     parser.add_argument("--eval-k", type=int, default=3, help="Number of top pipelines to evaluate")
@@ -109,9 +111,10 @@ def main() -> None:
         performance_matrix_path = args.performance_matrix
     else:
         if use_kaggle:
+            repo_perf = os.path.join(args.kaggle_root, "aco", "training_performance_matrix_autogluon.csv")
             performance_matrix_path = pick_existing(
                 "performance matrix",
-                KAGGLE_TRAIN_PERF_PATHS,
+                [repo_perf] + KAGGLE_TRAIN_PERF_PATHS,
             )
         else:
             performance_matrix_path = pick_existing(
@@ -123,7 +126,9 @@ def main() -> None:
         metafeatures_path = args.metafeatures
     else:
         if use_kaggle:
-            metafeatures_path = pick_existing("metafeatures", [KAGGLE_METAFEATURES_PATH])
+            repo_meta = os.path.join(args.kaggle_root, "aco", "dataset_feats.csv")
+            repo_meta_alt = os.path.join(args.kaggle_root, "data", "openml", "dataset_feats.csv")
+            metafeatures_path = pick_existing("metafeatures", [repo_meta, repo_meta_alt, KAGGLE_METAFEATURES_PATH])
         else:
             metafeatures_path = pick_existing(
                 "metafeatures",
@@ -134,7 +139,12 @@ def main() -> None:
         pipeline_configs_path = args.pipeline_configs
     else:
         if use_kaggle:
-            pipeline_configs_path = pick_existing("pipeline configs", [KAGGLE_PIPELINES_PATH])
+            repo_pipelines = os.path.join(args.kaggle_root, "aco", "pipeline_configs.json")
+            repo_pipelines_alt = os.path.join(args.kaggle_root, "Data", "openml", "pipelines.json")
+            pipeline_configs_path = pick_existing(
+                "pipeline configs",
+                [repo_pipelines, repo_pipelines_alt, KAGGLE_PIPELINES_PATH],
+            )
         else:
             pipeline_configs_path = pick_existing(
                 "pipeline configs",

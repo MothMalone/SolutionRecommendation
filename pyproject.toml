@@ -12,10 +12,10 @@ license = {text = "MIT"}
 authors = [{name = "Auto-generated"}]
 
 dependencies = [
-  "numpy",
-  "pandas",
-  "scikit-learn",
-  "scipy",
+  "numpy<2",
+  "pandas<3",
+  "scikit-learn<1.6",
+  "scipy<1.13",
 ]
 
 [project.optional-dependencies]

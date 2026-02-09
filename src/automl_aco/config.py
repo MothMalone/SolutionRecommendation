@@ -27,14 +27,18 @@ OPERATORS: "OrderedDict[str, List[str]]" = OrderedDict(
     ]
 )
 
+# Kaggle repo root (uploaded dataset path)
+KAGGLE_REPO_ROOT = "/kaggle/input/acorec"
+
 # Notebook-sourced default paths (kept for parity with Kaggle runs)
 KAGGLE_TRAIN_PERF_PATHS = [
+    f"{KAGGLE_REPO_ROOT}/aco/training_performance_matrix_autogluon.csv",
     "/kaggle/input/disable-autogluon/training_performance_matrix_autogluon.csv",
     "/kaggle/input/diffprep-setting/training_performance_matrix_autogluon_diffprep.csv",
     "/kaggle/input/quick-test-regression/training_performance_matrix_autogluon.csv",
 ]
-KAGGLE_METAFEATURES_PATH = "/kaggle/working/SolutionRecommendation/data/openml/dataset_feats.csv"
-KAGGLE_PIPELINES_PATH = "/kaggle/input/openml/pipelines.json"
+KAGGLE_METAFEATURES_PATH = f"{KAGGLE_REPO_ROOT}/aco/dataset_feats.csv"
+KAGGLE_PIPELINES_PATH = f"{KAGGLE_REPO_ROOT}/aco/pipeline_configs.json"
 KAGGLE_DATA_FOLDER = "/kaggle/input/openml"
 
 # Local-friendly defaults (repo-relative)
