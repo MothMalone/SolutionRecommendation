@@ -69,6 +69,21 @@ DEFAULT_PREPROCESSOR_ORDER: List[str] = [
     "dimensionality_reduction",
 ]
 
+# Default precedence constraints for ordering search.
+# (a, b) means a must appear before b.
+DEFAULT_ORDERING_CONSTRAINTS: List[tuple[str, str]] = [
+    ("imputation", "encoding"),
+    ("imputation", "scaling"),
+    ("imputation", "outlier_removal"),
+    ("imputation", "feature_selection"),
+    ("imputation", "dimensionality_reduction"),
+    ("encoding", "feature_selection"),
+    ("encoding", "dimensionality_reduction"),
+    ("scaling", "dimensionality_reduction"),
+    ("outlier_removal", "feature_selection"),
+    ("outlier_removal", "dimensionality_reduction"),
+]
+
 
 @dataclass
 class PipelineConfig:

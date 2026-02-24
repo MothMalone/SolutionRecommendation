@@ -63,7 +63,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-k", type=int, default=3, help="Number of top pipelines to evaluate")
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for ACO and ordering search")
     parser.add_argument("--time-limit", type=int, default=300)
+    parser.add_argument("--search-ordering", action="store_true", help="Search over valid step-type orders")
+    parser.add_argument("--num-orders", type=int, default=10, help="Number of candidate orders to evaluate")
+    parser.add_argument(
+        "--order-strategy",
+        choices=["fixed", "random", "heuristic", "scored", "all"],
+        default="fixed",
+        help="Order proposal strategy",
+    )
     parser.add_argument("--metric-path", required=False, help="Optional metric path to load")
     parser.add_argument(
         "--kaggle",
@@ -269,9 +278,12 @@ def main() -> None:
         eval_k=args.eval_k,
         use_autogluon=True,
         use_aco=args.use_aco,
-        aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations},
+        aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations, "seed": args.seed},
         time_limit_per_model=args.time_limit,
         metafeatures_func=_mf_func,
+        search_ordering=args.search_ordering,
+        num_orders=args.num_orders,
+        order_strategy=args.order_strategy,
     )
 
     def _get_output_dir() -> str:
@@ -291,6 +303,8 @@ def main() -> None:
         for step in DEFAULT_PIPELINE_OPTIONS.keys():
             if step in cfg:
                 parts.append(f"{step}={cfg[step]}")
+        if isinstance(cfg.get("step_order"), list):
+            parts.append(f"step_order={cfg['step_order']}")
         return "{" + ", ".join(parts) + "}"
 
     def _build_history(history_raw, aco_results, n_ants: int, n_iterations: int):
@@ -372,6 +386,13 @@ def main() -> None:
         print(f"  Proxy score: {float(proxy_score):.4f}")
     if final_score is not None and final_eval:
         print(f"  Final eval ({final_eval.get('method', 'unknown')}): {float(final_score):.4f}")
+    ordering_info = recommendation.get("ordering_search")
+    if isinstance(ordering_info, dict) and ordering_info.get("enabled"):
+        print(
+            "  Ordering search: "
+            f"strategy={ordering_info.get('strategy')} "
+            f"orders={ordering_info.get('num_orders_evaluated')}"
+        )
     print(f"  Saved recommendation: {rec_path}")
     if history_path:
         print(f"  Saved ACO history: {history_path}")

@@ -48,6 +48,22 @@ python -m scripts.run_recommend \
   --verbose
 ```
 
+Run with ordering search (CtxPipe-style outer loop over valid step orders):
+
+```bash
+python -m scripts.run_recommend \
+  --dataset-source openml \
+  --dataset-id 2 \
+  --use-aco \
+  --search-ordering \
+  --num-orders 10 \
+  --order-strategy heuristic \
+  --n-ants 10 \
+  --n-iterations 10 \
+  --seed 42 \
+  --verbose
+```
+
 Outputs (local):
 - `outputs/recommendation.json`
 - `outputs/aco_history.csv`
@@ -122,4 +138,9 @@ Extension points:
 
 ## Notes on ordering
 
-The ACO search ordering and preprocessor execution order are preserved from the notebook to keep results identical. The domain layer order is still available in `config.DOMAIN_LAYER_ORDER` if you want to re-align search or preprocessing.
+By default, search uses the notebook-fixed order from `DEFAULT_PIPELINE_OPTIONS`. You can enable order search with:
+- `--search-ordering`
+- `--num-orders K`
+- `--order-strategy {fixed,random,heuristic,scored,all}`
+
+Order search enforces precedence constraints from `DEFAULT_ORDERING_CONSTRAINTS` and evaluates each proposed order by running the existing ACO operator search within that order. Each candidate pipeline stores `step_order`, and preprocessing executes in that exact order.

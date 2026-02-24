@@ -9,12 +9,13 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from ..config import DEFAULT_PIPELINE_OPTIONS
+from ..config import DEFAULT_ORDERING_CONSTRAINTS, DEFAULT_PIPELINE_OPTIONS
 from ..utils.logging import get_logger
 from ..metalearning.metric import train_siamese_regression_metric, save_metric as save_metric_file, load_metric as load_metric_file
 from ..search.heuristics import compute_aco_heuristic
 from ..search.aco import search_pipelines_aco
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
+from ..search.ordering import OrderSearchConfig, propose_orders
 
 logger = get_logger(__name__)
 
@@ -224,6 +225,7 @@ class MetaPipelineRecommender:
         weight_method: str = "rank",
         markov_order: int = 2,
         lambda_smooth: float = 0.7,
+        step_order: Optional[List[str]] = None,
     ):
         eta = self._compute_aco_heuristic(
             new_metafeatures,
@@ -244,6 +246,13 @@ class MetaPipelineRecommender:
         )
 
         def _evaluate(sampled_configs):
+            if step_order:
+                sampled_with_order = []
+                for cfg in sampled_configs:
+                    cfg_with_order = dict(cfg)
+                    cfg_with_order["step_order"] = list(step_order)
+                    sampled_with_order.append(cfg_with_order)
+                return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_with_order)
             return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_configs)
 
         result = search_pipelines_aco(
@@ -299,6 +308,10 @@ class MetaPipelineRecommender:
         use_aco: bool = False,
         aco_params: Optional[Dict[str, Any]] = None,
         options: Optional[Dict[str, List[str]]] = None,
+        search_ordering: bool = False,
+        num_orders: int = 1,
+        order_strategy: str = "fixed",
+        order_constraints: Optional[List[Tuple[str, str]]] = None,
     ) -> Dict[str, Any]:
         if metafeatures_func is None:
             raise ValueError("metafeatures_func must be provided")
@@ -312,17 +325,77 @@ class MetaPipelineRecommender:
         new_mf_scaled = self.scaler.transform(new_mf_imputed).ravel()
 
         if use_aco:
-            aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
-                new_dataset,
-                target_column,
-                new_mf_scaled,
-                options,
-                n_pipelines=k,
-                n_ants=aco_params.get("n_ants", 10),
-                n_iterations=aco_params.get("n_iterations", 10),
-                time_limit_per_model=time_limit_per_model,
-                metafeatures_func=metafeatures_func,
-            )
+            base_order = list(options.keys())
+            aco_seed = int(aco_params.get("seed", 42))
+            if search_ordering:
+                constraints = order_constraints if order_constraints is not None else DEFAULT_ORDERING_CONSTRAINTS
+                constraints = [(a, b) for a, b in constraints if a in base_order and b in base_order]
+                order_cfg = OrderSearchConfig(
+                    steps=tuple(base_order),
+                    constraints=tuple(constraints),
+                    max_orders=max(1, int(num_orders)),
+                    strategy=order_strategy,
+                    seed=aco_seed,
+                )
+                candidate_orders = propose_orders(order_cfg)
+            else:
+                candidate_orders = [base_order]
+
+            all_top_results: List[Tuple[Dict[str, Any], float]] = []
+            all_unsorted_results: List[Tuple[Dict[str, Any], float]] = []
+            all_history: List[Dict[str, Any]] = []
+            global_iteration = 1
+
+            for order_idx, order in enumerate(candidate_orders, start=1):
+                ordered_options = {step: options[step] for step in order}
+                aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
+                    new_dataset,
+                    target_column,
+                    new_mf_scaled,
+                    ordered_options,
+                    n_pipelines=k,
+                    n_ants=aco_params.get("n_ants", 10),
+                    n_iterations=aco_params.get("n_iterations", 10),
+                    seed=aco_seed + order_idx - 1,
+                    time_limit_per_model=time_limit_per_model,
+                    metafeatures_func=metafeatures_func,
+                    step_order=order,
+                )
+
+                for cfg, score in aco_results:
+                    cfg2 = dict(cfg)
+                    cfg2["step_order"] = list(order)
+                    all_top_results.append((cfg2, float(score)))
+                for cfg, score in aco_unsorted_res:
+                    cfg2 = dict(cfg)
+                    cfg2["step_order"] = list(order)
+                    all_unsorted_results.append((cfg2, float(score)))
+                for hist in aco_history:
+                    if not isinstance(hist, dict):
+                        continue
+                    all_history.append(
+                        {
+                            "iteration": global_iteration,
+                            "best_score": hist.get("best_score"),
+                            "order_index": order_idx,
+                            "step_order": list(order),
+                        }
+                    )
+                    global_iteration += 1
+
+            dedup: Dict[Tuple[Any, ...], Tuple[Dict[str, Any], float]] = {}
+            dedup_source = all_unsorted_results if all_unsorted_results else all_top_results
+            for cfg, score in dedup_source:
+                key = tuple((step, cfg.get(step)) for step in base_order) + (("step_order", tuple(cfg.get("step_order", []))),)
+                if key not in dedup or score > dedup[key][1]:
+                    dedup[key] = (cfg, score)
+
+            if not dedup:
+                raise RuntimeError("ACO search produced no valid pipeline candidates.")
+
+            final_ranked = sorted(dedup.values(), key=lambda x: x[1], reverse=True)
+            aco_results = final_ranked[:k]
+            aco_unsorted_res = all_unsorted_results
             best_pipeline, best_score = aco_results[0]
             final_eval = {"method": "proxy", "score": float(best_score)}
             if use_autogluon:
@@ -349,7 +422,14 @@ class MetaPipelineRecommender:
                 "final_performance": float(final_eval.get("score", best_score)),
                 "confidence": "high" if best_score > 0.8 else "low",
                 "aco_results": aco_unsorted_res,
-                "aco_history": aco_history,
+                "aco_history": all_history,
+                "ordering_search": {
+                    "enabled": bool(search_ordering),
+                    "strategy": order_strategy,
+                    "num_orders_requested": int(num_orders),
+                    "num_orders_evaluated": len(candidate_orders),
+                    "orders": candidate_orders,
+                },
             }
 
         sims: List[Tuple[Any, float]] = []

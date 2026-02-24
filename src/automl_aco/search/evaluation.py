@@ -40,6 +40,14 @@ def _detect_problem_type(y: pd.Series) -> Tuple[str, str]:
     return "multiclass", "accuracy"
 
 
+def _make_preprocessor(cfg: Dict[str, Any]) -> Preprocessor:
+    step_order = cfg.get("step_order")
+    pre_cfg = {k: v for k, v in cfg.items() if k != "step_order"}
+    if isinstance(step_order, list) and len(step_order) > 0:
+        return Preprocessor(pre_cfg, step_order=step_order)
+    return Preprocessor(pre_cfg)
+
+
 def evaluate_candidates_autogluon(
     dataset: Any,
     target_column: str,
@@ -77,7 +85,7 @@ def evaluate_candidates_autogluon(
 
             X_train, y_train, _X_val, _y_val, X_test, y_test = split_train_val_test(X, y)
 
-            pre = Preprocessor(cfg)
+            pre = _make_preprocessor(cfg)
             result = pre.fit_transform(X_train, y_train)
             if isinstance(result, tuple):
                 X_train_proc, y_train_proc = result
@@ -198,7 +206,7 @@ def evaluate_candidates_simple(
 
             X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y)
 
-            pre = Preprocessor(cfg)
+            pre = _make_preprocessor(cfg)
             result = pre.fit_transform(X_train, y_train)
             if isinstance(result, tuple):
                 X_train_p, y_train_p = result
