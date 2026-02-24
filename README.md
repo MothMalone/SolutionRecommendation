@@ -64,6 +64,25 @@ python -m scripts.run_recommend \
   --verbose
 ```
 
+Run multiple datasets in one command:
+
+```bash
+python -m scripts.run_recommend \
+  --performance-matrix aco/training_performance_matrix_autogluon.csv \
+  --metafeatures aco/dataset_feats.csv \
+  --pipeline-configs aco/pipeline_configs.json \
+  --dataset-source openml \
+  --dataset-ids 2,14,18,46 \
+  --use-aco \
+  --search-ordering \
+  --num-orders 10 \
+  --order-strategy heuristic \
+  --seed 42 \
+  --n-ants 10 \
+  --n-iterations 10 \
+  --verbose
+```
+
 Outputs (local):
 - `outputs/recommendation.json`
 - `outputs/aco_history.csv`

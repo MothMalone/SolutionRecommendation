@@ -7,7 +7,7 @@ import os
 import sys
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any, List
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -55,6 +55,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-csv", required=False, help="Path to dataset CSV (csv source only)")
     parser.add_argument("--target-column", default="target", help="Target column name")
     parser.add_argument("--dataset-id", required=False, help="Dataset id for metafeature lookup")
+    parser.add_argument("--dataset-ids", required=False, help="Comma-separated dataset ids for batch runs")
     parser.add_argument("--kaggle-data-folder", default=KAGGLE_DATA_FOLDER, help="Kaggle data folder for csv by id")
     parser.add_argument("--kaggle-target-column", default="target", help="Target column for kaggle CSVs")
     parser.add_argument("--kaggle-root", default=KAGGLE_REPO_ROOT, help="Kaggle repo root path")
@@ -220,71 +221,37 @@ def main() -> None:
         else:
             dataset_source = "openml"
 
-    dataset_id = None
-    if args.dataset_id is not None and str(args.dataset_id).isdigit():
-        dataset_id = int(args.dataset_id)
-    elif args.dataset_id is not None:
-        dataset_id = args.dataset_id
+    def _parse_dataset_id(raw: Any):
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        if s.isdigit():
+            return int(s)
+        return s
 
-    if dataset_source == "openml":
-        if dataset_id is None:
-            raise ValueError("--dataset-id is required for openml source")
-        dataset = load_openml_dataset(dataset_id, verbose=args.verbose)
-    elif dataset_source == "kaggle":
-        if dataset_id is None:
-            raise ValueError("--dataset-id is required for kaggle source")
-        dataset = load_kaggle_dataset(
-            dataset_id,
-            data_folder=args.kaggle_data_folder,
-            target_column=args.kaggle_target_column,
-            verbose=args.verbose,
-        )
-    elif dataset_source == "csv":
-        if not args.dataset_csv:
-            raise ValueError("--dataset-csv is required for csv source")
-        dataset = load_csv_dataset(
-            args.dataset_csv,
-            target_column=args.target_column,
-            dataset_id=dataset_id,
-            verbose=args.verbose,
-        )
-    elif dataset_source == "dummy":
-        if dataset_id is None:
-            raise ValueError("--dataset-id is required for dummy source")
-        dataset = load_dummy_dataset(dataset_id, verbose=args.verbose)
+    dataset_ids: List[Any] = []
+    if args.dataset_ids:
+        dataset_ids = [_parse_dataset_id(tok) for tok in args.dataset_ids.split(",") if tok.strip()]
+        dataset_ids = [did for did in dataset_ids if did is not None]
     else:
-        raise ValueError(f"Unknown dataset source: {dataset_source}")
+        did = _parse_dataset_id(args.dataset_id)
+        if did is not None:
+            dataset_ids = [did]
 
-    if dataset is None or "X" not in dataset or "y" not in dataset:
-        raise ValueError("Dataset loading failed or did not return X/y")
-
-    X = dataset["X"]
-    y = dataset["y"]
-    test_dataset_df = X.copy()
-    test_dataset_df["target"] = y
+    if dataset_source in {"openml", "kaggle", "dummy"} and not dataset_ids:
+        raise ValueError("--dataset-id or --dataset-ids is required for openml/kaggle/dummy source")
+    if dataset_source == "csv" and not args.dataset_csv:
+        raise ValueError("--dataset-csv is required for csv source")
+    if dataset_source == "csv" and len(dataset_ids) > 1:
+        raise ValueError("CSV source supports at most one dataset id (metadata lookup only)")
+    if dataset_source == "csv" and not dataset_ids:
+        dataset_ids = [None]
 
     recommender = MetaPipelineRecommender(perf, meta, pipeline_configs, verbose=args.verbose)
     if args.metric_path:
         recommender.load_metric(args.metric_path)
-
-    def _mf_func(_df):
-        return extract_enhanced_metafeatures(dataset, meta_features_df=meta)
-
-    recommendation = recommender.recommend(
-        new_dataset=test_dataset_df,
-        target_column="target",
-        options=DEFAULT_PIPELINE_OPTIONS,
-        k=args.k,
-        eval_k=args.eval_k,
-        use_autogluon=True,
-        use_aco=args.use_aco,
-        aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations, "seed": args.seed},
-        time_limit_per_model=args.time_limit,
-        metafeatures_func=_mf_func,
-        search_ordering=args.search_ordering,
-        num_orders=args.num_orders,
-        order_strategy=args.order_strategy,
-    )
 
     def _get_output_dir() -> str:
         if args.output_dir:
@@ -356,52 +323,135 @@ def main() -> None:
         plt.close()
         return out_path
 
+    def _load_dataset_for_run(dataset_id: Any):
+        if dataset_source == "openml":
+            return load_openml_dataset(dataset_id, verbose=args.verbose)
+        if dataset_source == "kaggle":
+            return load_kaggle_dataset(
+                dataset_id,
+                data_folder=args.kaggle_data_folder,
+                target_column=args.kaggle_target_column,
+                verbose=args.verbose,
+            )
+        if dataset_source == "csv":
+            return load_csv_dataset(
+                args.dataset_csv,
+                target_column=args.target_column,
+                dataset_id=dataset_id,
+                verbose=args.verbose,
+            )
+        if dataset_source == "dummy":
+            return load_dummy_dataset(dataset_id, verbose=args.verbose)
+        raise ValueError(f"Unknown dataset source: {dataset_source}")
+
     output_dir = _get_output_dir()
-    aco_results = recommendation.get("aco_results") or []
-    history = _build_history(recommendation.get("aco_history"), aco_results, args.n_ants, args.n_iterations)
-    if history and (not recommendation.get("aco_history") or not isinstance(recommendation.get("aco_history"), list)):
-        recommendation["aco_history"] = history
+    n_runs = len(dataset_ids)
+    run_summaries = []
 
-    rec_path = os.path.join(output_dir, "recommendation.json")
-    with open(rec_path, "w", encoding="utf-8") as f:
-        json.dump(recommendation, f, indent=2, default=str)
-    history_path = None
-    if history:
-        history_path = os.path.join(output_dir, "aco_history.csv")
-        pd.DataFrame(history).to_csv(history_path, index=False)
+    for run_idx, dataset_id in enumerate(dataset_ids, start=1):
+        if n_runs > 1:
+            print(f"\n=== Dataset {dataset_id} ({run_idx}/{n_runs}) ===")
 
-    plot_path = _save_history_plot(history, output_dir)
+        dataset = _load_dataset_for_run(dataset_id)
+        if dataset is None or "X" not in dataset or "y" not in dataset:
+            raise ValueError(f"Dataset loading failed for dataset_id={dataset_id}")
 
-    pipeline_cfg = recommendation.get("pipeline_config") or {}
-    if "recommended_performance" in recommendation:
-        proxy_score = recommendation.get("recommended_performance")
-    else:
-        proxy_score = recommendation.get("expected_performance")
-    final_eval = recommendation.get("final_evaluation", {})
-    final_score = recommendation.get("final_performance", final_eval.get("score"))
+        X = dataset["X"]
+        y = dataset["y"]
+        test_dataset_df = X.copy()
+        test_dataset_df["target"] = y
 
-    print("\nFinal recommendation")
-    print(f"  Pipeline: {_format_pipeline(pipeline_cfg)}")
-    if proxy_score is not None:
-        print(f"  Proxy score: {float(proxy_score):.4f}")
-    if final_score is not None and final_eval:
-        print(f"  Final eval ({final_eval.get('method', 'unknown')}): {float(final_score):.4f}")
-    ordering_info = recommendation.get("ordering_search")
-    if isinstance(ordering_info, dict) and ordering_info.get("enabled"):
-        print(
-            "  Ordering search: "
-            f"strategy={ordering_info.get('strategy')} "
-            f"orders={ordering_info.get('num_orders_evaluated')}"
+        def _mf_func(_df, _dataset=dataset):
+            return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+
+        recommendation = recommender.recommend(
+            new_dataset=test_dataset_df,
+            target_column="target",
+            options=DEFAULT_PIPELINE_OPTIONS,
+            k=args.k,
+            eval_k=args.eval_k,
+            use_autogluon=True,
+            use_aco=args.use_aco,
+            aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations, "seed": args.seed},
+            time_limit_per_model=args.time_limit,
+            metafeatures_func=_mf_func,
+            search_ordering=args.search_ordering,
+            num_orders=args.num_orders,
+            order_strategy=args.order_strategy,
         )
-    print(f"  Saved recommendation: {rec_path}")
-    if history_path:
-        print(f"  Saved ACO history: {history_path}")
-    if plot_path:
-        print(f"  Saved ACO plot: {plot_path}")
-    elif history:
-        print("  ACO plot skipped (matplotlib not available)")
 
-    logger.info("Saved recommendation to %s", rec_path)
+        aco_results = recommendation.get("aco_results") or []
+        history = _build_history(recommendation.get("aco_history"), aco_results, args.n_ants, args.n_iterations)
+        if history and (not recommendation.get("aco_history") or not isinstance(recommendation.get("aco_history"), list)):
+            recommendation["aco_history"] = history
+
+        if n_runs == 1:
+            run_output_dir = output_dir
+            dataset_tag = str(dataset_id) if dataset_id is not None else "single"
+        else:
+            dataset_tag = str(dataset_id) if dataset_id is not None else f"run{run_idx}"
+            run_output_dir = os.path.join(output_dir, f"dataset_{dataset_tag}")
+            os.makedirs(run_output_dir, exist_ok=True)
+
+        rec_path = os.path.join(run_output_dir, "recommendation.json")
+        with open(rec_path, "w", encoding="utf-8") as f:
+            json.dump(recommendation, f, indent=2, default=str)
+
+        history_path = None
+        if history:
+            history_path = os.path.join(run_output_dir, "aco_history.csv")
+            pd.DataFrame(history).to_csv(history_path, index=False)
+
+        plot_path = _save_history_plot(history, run_output_dir)
+
+        pipeline_cfg = recommendation.get("pipeline_config") or {}
+        if "recommended_performance" in recommendation:
+            proxy_score = recommendation.get("recommended_performance")
+        else:
+            proxy_score = recommendation.get("expected_performance")
+        final_eval = recommendation.get("final_evaluation", {})
+        final_score = recommendation.get("final_performance", final_eval.get("score"))
+
+        print("\nFinal recommendation")
+        print(f"  Dataset: {dataset_tag}")
+        print(f"  Pipeline: {_format_pipeline(pipeline_cfg)}")
+        if proxy_score is not None:
+            print(f"  Proxy score: {float(proxy_score):.4f}")
+        if final_score is not None and final_eval:
+            print(f"  Final eval ({final_eval.get('method', 'unknown')}): {float(final_score):.4f}")
+        ordering_info = recommendation.get("ordering_search")
+        if isinstance(ordering_info, dict) and ordering_info.get("enabled"):
+            print(
+                "  Ordering search: "
+                f"strategy={ordering_info.get('strategy')} "
+                f"orders={ordering_info.get('num_orders_evaluated')}"
+            )
+        print(f"  Saved recommendation: {rec_path}")
+        if history_path:
+            print(f"  Saved ACO history: {history_path}")
+        if plot_path:
+            print(f"  Saved ACO plot: {plot_path}")
+        elif history:
+            print("  ACO plot skipped (matplotlib not available)")
+
+        logger.info("Saved recommendation to %s", rec_path)
+        run_summaries.append(
+            {
+                "dataset_id": dataset_id,
+                "proxy_score": proxy_score,
+                "final_score": final_score,
+                "final_method": final_eval.get("method") if isinstance(final_eval, dict) else None,
+                "recommendation_path": rec_path,
+                "history_path": history_path,
+                "plot_path": plot_path,
+            }
+        )
+
+    if n_runs > 1:
+        summary_path = os.path.join(output_dir, "recommendations_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as f:
+            json.dump(run_summaries, f, indent=2, default=str)
+        print(f"\nSaved multi-run summary: {summary_path}")
 
 
 if __name__ == "__main__":
