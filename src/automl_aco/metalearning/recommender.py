@@ -14,6 +14,7 @@ from ..utils.logging import get_logger
 from ..metalearning.metric import train_siamese_regression_metric, save_metric as save_metric_file, load_metric as load_metric_file
 from ..search.heuristics import compute_aco_heuristic
 from ..search.aco import search_pipelines_aco
+from ..search.optimizers import search_pipelines_with_optimizer
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
 from ..search.ordering import OrderSearchConfig, propose_orders
 
@@ -296,6 +297,37 @@ class MetaPipelineRecommender:
             verbose=self.verbose,
         )
 
+    def _search_pipelines_optimizer(
+        self,
+        optimizer: str,
+        new_dataset: Any,
+        target_column: str,
+        options: Dict[str, List[str]],
+        n_pipelines: int = 3,
+        sample_budget: int = 100,
+        seed: int = 42,
+        step_order: Optional[List[str]] = None,
+    ):
+        def _evaluate(sampled_configs):
+            if step_order:
+                sampled_with_order = []
+                for cfg in sampled_configs:
+                    cfg_with_order = dict(cfg)
+                    cfg_with_order["step_order"] = list(step_order)
+                    sampled_with_order.append(cfg_with_order)
+                return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_with_order)
+            return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_configs)
+
+        return search_pipelines_with_optimizer(
+            optimizer=optimizer,
+            options=options,
+            evaluate_fn=_evaluate,
+            sample_budget=sample_budget,
+            seed=seed,
+            n_pipelines=n_pipelines,
+            verbose=self.verbose,
+        )
+
     def recommend(
         self,
         new_dataset,
@@ -312,6 +344,8 @@ class MetaPipelineRecommender:
         num_orders: int = 1,
         order_strategy: str = "fixed",
         order_constraints: Optional[List[Tuple[str, str]]] = None,
+        optimizer: str = "aco",
+        sample_budget: int = 100,
     ) -> Dict[str, Any]:
         if metafeatures_func is None:
             raise ValueError("metafeatures_func must be provided")
@@ -327,6 +361,9 @@ class MetaPipelineRecommender:
         if use_aco:
             base_order = list(options.keys())
             aco_seed = int(aco_params.get("seed", 42))
+            optimizer_name = optimizer.lower().strip()
+            if optimizer_name == "":
+                optimizer_name = "aco"
             if search_ordering:
                 constraints = order_constraints if order_constraints is not None else DEFAULT_ORDERING_CONSTRAINTS
                 constraints = [(a, b) for a, b in constraints if a in base_order and b in base_order]
@@ -348,19 +385,31 @@ class MetaPipelineRecommender:
 
             for order_idx, order in enumerate(candidate_orders, start=1):
                 ordered_options = {step: options[step] for step in order}
-                aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
-                    new_dataset,
-                    target_column,
-                    new_mf_scaled,
-                    ordered_options,
-                    n_pipelines=k,
-                    n_ants=aco_params.get("n_ants", 10),
-                    n_iterations=aco_params.get("n_iterations", 10),
-                    seed=aco_seed + order_idx - 1,
-                    time_limit_per_model=time_limit_per_model,
-                    metafeatures_func=metafeatures_func,
-                    step_order=order,
-                )
+                if optimizer_name == "aco":
+                    aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
+                        new_dataset,
+                        target_column,
+                        new_mf_scaled,
+                        ordered_options,
+                        n_pipelines=k,
+                        n_ants=aco_params.get("n_ants", 10),
+                        n_iterations=aco_params.get("n_iterations", 10),
+                        seed=aco_seed + order_idx - 1,
+                        time_limit_per_model=time_limit_per_model,
+                        metafeatures_func=metafeatures_func,
+                        step_order=order,
+                    )
+                else:
+                    aco_results, aco_unsorted_res, aco_history = self._search_pipelines_optimizer(
+                        optimizer=optimizer_name,
+                        new_dataset=new_dataset,
+                        target_column=target_column,
+                        options=ordered_options,
+                        n_pipelines=k,
+                        sample_budget=sample_budget,
+                        seed=aco_seed + order_idx - 1,
+                        step_order=order,
+                    )
 
                 for cfg, score in aco_results:
                     cfg2 = dict(cfg)
@@ -423,6 +472,7 @@ class MetaPipelineRecommender:
                 "confidence": "high" if best_score > 0.8 else "low",
                 "aco_results": aco_unsorted_res,
                 "aco_history": all_history,
+                "optimizer": optimizer_name,
                 "ordering_search": {
                     "enabled": bool(search_ordering),
                     "strategy": order_strategy,

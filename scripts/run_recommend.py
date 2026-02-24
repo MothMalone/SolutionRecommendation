@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Optional, Any, List
@@ -15,6 +16,7 @@ if SRC.exists() and str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import pandas as pd
+import numpy as np
 
 from automl_aco.config import (
     DEFAULT_PIPELINE_OPTIONS,
@@ -55,7 +57,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-csv", required=False, help="Path to dataset CSV (csv source only)")
     parser.add_argument("--target-column", default="target", help="Target column name")
     parser.add_argument("--dataset-id", required=False, help="Dataset id for metafeature lookup")
-    parser.add_argument("--dataset-ids", required=False, help="Comma-separated dataset ids for batch runs")
+    parser.add_argument(
+        "--dataset-ids",
+        nargs="+",
+        required=False,
+        help="Dataset ids for batch runs (comma-separated and/or space-separated)",
+    )
     parser.add_argument("--kaggle-data-folder", default=KAGGLE_DATA_FOLDER, help="Kaggle data folder for csv by id")
     parser.add_argument("--kaggle-target-column", default="target", help="Target column for kaggle CSVs")
     parser.add_argument("--kaggle-root", default=KAGGLE_REPO_ROOT, help="Kaggle repo root path")
@@ -64,6 +71,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-k", type=int, default=3, help="Number of top pipelines to evaluate")
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
+    parser.add_argument(
+        "--optimizer",
+        choices=["aco", "random", "ga", "sa", "greedy", "mcts"],
+        default="aco",
+        help="Search optimizer. ACO uses n-ants*n-iterations; others use sample-budget.",
+    )
+    parser.add_argument("--sample-budget", type=int, default=100, help="Config evaluation budget for non-ACO optimizers")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for ACO and ordering search")
     parser.add_argument("--time-limit", type=int, default=300)
     parser.add_argument("--search-ordering", action="store_true", help="Search over valid step-type orders")
@@ -233,7 +247,14 @@ def main() -> None:
 
     dataset_ids: List[Any] = []
     if args.dataset_ids:
-        dataset_ids = [_parse_dataset_id(tok) for tok in args.dataset_ids.split(",") if tok.strip()]
+        raw_tokens: List[str] = []
+        for token in args.dataset_ids:
+            raw_tokens.extend(str(token).split(","))
+        dataset_ids = [_parse_dataset_id(tok) for tok in raw_tokens if str(tok).strip()]
+        dataset_ids = [did for did in dataset_ids if did is not None]
+    elif isinstance(args.dataset_id, str) and "," in args.dataset_id:
+        # Backward-compatible convenience: allow comma lists in --dataset-id too.
+        dataset_ids = [_parse_dataset_id(tok) for tok in args.dataset_id.split(",") if tok.strip()]
         dataset_ids = [did for did in dataset_ids if did is not None]
     else:
         did = _parse_dataset_id(args.dataset_id)
@@ -347,38 +368,57 @@ def main() -> None:
     output_dir = _get_output_dir()
     n_runs = len(dataset_ids)
     run_summaries = []
+    search_enabled = args.use_aco or args.optimizer != "aco"
+    if args.optimizer != "aco" and not args.use_aco and args.verbose:
+        print("Info: --optimizer is non-ACO, enabling search flow (same as --use-aco).")
 
     for run_idx, dataset_id in enumerate(dataset_ids, start=1):
         if n_runs > 1:
             print(f"\n=== Dataset {dataset_id} ({run_idx}/{n_runs}) ===")
 
-        dataset = _load_dataset_for_run(dataset_id)
-        if dataset is None or "X" not in dataset or "y" not in dataset:
-            raise ValueError(f"Dataset loading failed for dataset_id={dataset_id}")
+        run_start = time.perf_counter()
+        try:
+            dataset = _load_dataset_for_run(dataset_id)
+            if dataset is None or "X" not in dataset or "y" not in dataset:
+                raise ValueError(f"Dataset loading failed for dataset_id={dataset_id}")
 
-        X = dataset["X"]
-        y = dataset["y"]
-        test_dataset_df = X.copy()
-        test_dataset_df["target"] = y
+            X = dataset["X"]
+            y = dataset["y"]
+            test_dataset_df = X.copy()
+            test_dataset_df["target"] = y
 
-        def _mf_func(_df, _dataset=dataset):
-            return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+            def _mf_func(_df, _dataset=dataset):
+                return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
 
-        recommendation = recommender.recommend(
-            new_dataset=test_dataset_df,
-            target_column="target",
-            options=DEFAULT_PIPELINE_OPTIONS,
-            k=args.k,
-            eval_k=args.eval_k,
-            use_autogluon=True,
-            use_aco=args.use_aco,
-            aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations, "seed": args.seed},
-            time_limit_per_model=args.time_limit,
-            metafeatures_func=_mf_func,
-            search_ordering=args.search_ordering,
-            num_orders=args.num_orders,
-            order_strategy=args.order_strategy,
-        )
+            recommendation = recommender.recommend(
+                new_dataset=test_dataset_df,
+                target_column="target",
+                options=DEFAULT_PIPELINE_OPTIONS,
+                k=args.k,
+                eval_k=args.eval_k,
+                use_autogluon=True,
+                use_aco=search_enabled,
+                aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations, "seed": args.seed},
+                time_limit_per_model=args.time_limit,
+                metafeatures_func=_mf_func,
+                search_ordering=args.search_ordering,
+                num_orders=args.num_orders,
+                order_strategy=args.order_strategy,
+                optimizer=args.optimizer,
+                sample_budget=args.sample_budget,
+            )
+        except Exception as exc:
+            elapsed = time.perf_counter() - run_start
+            print(f"  Dataset {dataset_id} failed: {exc}")
+            run_summaries.append(
+                {
+                    "dataset_id": dataset_id,
+                    "status": "failed",
+                    "error": str(exc),
+                    "elapsed_seconds": elapsed,
+                }
+            )
+            continue
 
         aco_results = recommendation.get("aco_results") or []
         history = _build_history(recommendation.get("aco_history"), aco_results, args.n_ants, args.n_iterations)
@@ -419,6 +459,7 @@ def main() -> None:
             print(f"  Proxy score: {float(proxy_score):.4f}")
         if final_score is not None and final_eval:
             print(f"  Final eval ({final_eval.get('method', 'unknown')}): {float(final_score):.4f}")
+        print(f"  Optimizer: {recommendation.get('optimizer', args.optimizer)}")
         ordering_info = recommendation.get("ordering_search")
         if isinstance(ordering_info, dict) and ordering_info.get("enabled"):
             print(
@@ -434,13 +475,19 @@ def main() -> None:
         elif history:
             print("  ACO plot skipped (matplotlib not available)")
 
+        elapsed = time.perf_counter() - run_start
+        print(f"  Elapsed seconds: {elapsed:.2f}")
+
         logger.info("Saved recommendation to %s", rec_path)
         run_summaries.append(
             {
                 "dataset_id": dataset_id,
+                "status": "ok",
+                "optimizer": recommendation.get("optimizer", args.optimizer),
                 "proxy_score": proxy_score,
                 "final_score": final_score,
                 "final_method": final_eval.get("method") if isinstance(final_eval, dict) else None,
+                "elapsed_seconds": elapsed,
                 "recommendation_path": rec_path,
                 "history_path": history_path,
                 "plot_path": plot_path,
@@ -448,9 +495,36 @@ def main() -> None:
         )
 
     if n_runs > 1:
+        ok_runs = [r for r in run_summaries if r.get("status") == "ok"]
+        avg_time = float(np.mean([r["elapsed_seconds"] for r in ok_runs])) if ok_runs else None
+        avg_proxy = float(np.mean([r["proxy_score"] for r in ok_runs if isinstance(r.get("proxy_score"), (int, float))])) if ok_runs else None
+        avg_final = float(np.mean([r["final_score"] for r in ok_runs if isinstance(r.get("final_score"), (int, float))])) if ok_runs else None
+        ag_runs = [r for r in ok_runs if r.get("final_method") == "autogluon" and isinstance(r.get("final_score"), (int, float))]
+        avg_ag = float(np.mean([r["final_score"] for r in ag_runs])) if ag_runs else None
+
+        aggregate = {
+            "num_requested": n_runs,
+            "num_ok": len(ok_runs),
+            "num_failed": n_runs - len(ok_runs),
+            "avg_elapsed_seconds": avg_time,
+            "avg_proxy_score": avg_proxy,
+            "avg_final_score": avg_final,
+            "avg_autogluon_score": avg_ag,
+            "optimizer": args.optimizer,
+        }
         summary_path = os.path.join(output_dir, "recommendations_summary.json")
         with open(summary_path, "w", encoding="utf-8") as f:
-            json.dump(run_summaries, f, indent=2, default=str)
+            json.dump({"aggregate": aggregate, "runs": run_summaries}, f, indent=2, default=str)
+        print("\nAggregate summary")
+        print(f"  Runs ok/failed: {aggregate['num_ok']}/{aggregate['num_failed']}")
+        if avg_time is not None:
+            print(f"  Avg elapsed seconds: {avg_time:.2f}")
+        if avg_proxy is not None:
+            print(f"  Avg proxy score: {avg_proxy:.4f}")
+        if avg_final is not None:
+            print(f"  Avg final score: {avg_final:.4f}")
+        if avg_ag is not None:
+            print(f"  Avg autogluon score: {avg_ag:.4f}")
         print(f"\nSaved multi-run summary: {summary_path}")
 
 

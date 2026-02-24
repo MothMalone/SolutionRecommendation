@@ -64,6 +64,39 @@ python -m scripts.run_recommend \
   --verbose
 ```
 
+Run optimizer ablation with 100 sampled configs per optimizer (same split/order constraints/eval flow):
+
+```bash
+python -m scripts.run_recommend \
+  --performance-matrix aco/training_performance_matrix_autogluon.csv \
+  --metafeatures aco/dataset_feats.csv \
+  --pipeline-configs aco/pipeline_configs.json \
+  --dataset-source openml \
+  --dataset-ids 248,1066,1164,1047,862,2,40663,1054,1387,876,18,1520,1548,184,378,381,382,993,1485,14 \
+  --use-aco \
+  --optimizer ga \
+  --sample-budget 100 \
+  --search-ordering \
+  --num-orders 10 \
+  --order-strategy heuristic \
+  --seed 42 \
+  --verbose
+```
+
+Supported optimizers:
+- `aco`
+- `random`
+- `ga`
+- `sa`
+- `greedy`
+- `mcts`
+
+For batch runs, summary metrics are saved to `recommendations_summary.json`:
+- average elapsed time
+- average proxy score
+- average final score
+- average AutoGluon score (runs where final method is `autogluon`)
+
 Run multiple datasets in one command:
 
 ```bash
@@ -82,6 +115,8 @@ python -m scripts.run_recommend \
   --n-iterations 10 \
   --verbose
 ```
+
+`--dataset-ids` accepts comma-separated and/or space-separated ids.
 
 Outputs (local):
 - `outputs/recommendation.json`
