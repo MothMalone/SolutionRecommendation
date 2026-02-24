@@ -10,6 +10,23 @@ from ..utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _freeze_value(value: Any) -> Any:
+    """Convert nested mutable values into hashable equivalents."""
+    if isinstance(value, dict):
+        return tuple(sorted((k, _freeze_value(v)) for k, v in value.items()))
+    if isinstance(value, list):
+        return tuple(_freeze_value(v) for v in value)
+    if isinstance(value, tuple):
+        return tuple(_freeze_value(v) for v in value)
+    if isinstance(value, set):
+        return tuple(sorted(_freeze_value(v) for v in value))
+    return value
+
+
+def _cfg_key(cfg: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
+    return tuple(sorted((k, _freeze_value(v)) for k, v in cfg.items()))
+
+
 def search_pipelines_aco(
     options: Mapping[str, List[str]],
     evaluate_fn: Callable[[List[Dict[str, Any]]], Tuple[Any, float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]],
@@ -43,7 +60,7 @@ def search_pipelines_aco(
         return k_conditional_pheromones[key]
 
     candidate_pipelines: List[Tuple[Dict[str, Any], float]] = []
-    eval_cache: Dict[Tuple[Tuple[str, Any], ...], float] = {}
+    eval_cache: Dict[Tuple[Tuple[str, Any], ...], Tuple[Dict[str, Any], float]] = {}
     history: List[Dict[str, Any]] = []
 
     def sample_config() -> Dict[str, Any]:
@@ -74,7 +91,7 @@ def search_pipelines_aco(
         sampled: List[Dict[str, Any]] = []
         for _ in range(n_ants):
             cfg = sample_config()
-            key = tuple(sorted(cfg.items()))
+            key = _cfg_key(cfg)
             if key not in eval_cache:
                 sampled.append(cfg)
 
@@ -88,14 +105,14 @@ def search_pipelines_aco(
             continue
 
         for cfg, score in eval_results:
-            eval_cache[tuple(sorted(cfg.items()))] = score
+            eval_cache[_cfg_key(cfg)] = (dict(cfg), float(score))
 
         for step in pheromones:
             pheromones[step] *= (1 - evaporation)
         for key in k_conditional_pheromones:
             k_conditional_pheromones[key] *= (1 - evaporation)
 
-        cached_results = [(dict(k), sc) for k, sc in eval_cache.items()]
+        cached_results = [(cfg, sc) for cfg, sc in eval_cache.values()]
         cached_results.sort(key=lambda x: x[1], reverse=True)
 
         selected = cached_results if use_all_iter_pipelines else cached_results[: min(top_k_pheromone, len(cached_results))]
@@ -148,15 +165,15 @@ def search_pipelines_aco(
     unsorted_candidate_pipelines = candidate_pipelines.copy()
     candidate_pipelines.sort(key=lambda x: x[1], reverse=True)
 
-    seen: Dict[Tuple[Tuple[str, Any], ...], float] = {}
+    seen: Dict[Tuple[Tuple[str, Any], ...], Tuple[Dict[str, Any], float]] = {}
     final: List[Tuple[Dict[str, Any], float]] = []
     for cfg, sc in candidate_pipelines:
-        key = tuple(sorted(cfg.items()))
-        if key not in seen or sc > seen[key]:
-            seen[key] = sc
+        key = _cfg_key(cfg)
+        if key not in seen or sc > seen[key][1]:
+            seen[key] = (dict(cfg), float(sc))
 
-    for k, sc in seen.items():
-        final.append((dict(k), sc))
+    for cfg, sc in seen.values():
+        final.append((cfg, sc))
 
     final.sort(key=lambda x: x[1], reverse=True)
     if verbose:
