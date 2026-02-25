@@ -197,5 +197,7 @@ By default, search uses the notebook-fixed order from `DEFAULT_PIPELINE_OPTIONS`
 - `--search-ordering`
 - `--num-orders K`
 - `--order-strategy {fixed,random,heuristic,scored,all}`
+- `--ordering-quick-time-limit SECONDS` (quick AutoGluon score per ordering iteration)
 
 Order search enforces precedence constraints from `DEFAULT_ORDERING_CONSTRAINTS` and evaluates each proposed order by running the existing ACO operator search within that order. Each candidate pipeline stores `step_order`, and preprocessing executes in that exact order.
+When order search is enabled, each ordering iteration also runs a quick AutoGluon check on that order's best pipeline, and history uses this per-iteration AutoGluon score (falling back to proxy only if quick AutoGluon fails).

@@ -381,7 +381,16 @@ class MetaPipelineRecommender:
             all_top_results: List[Tuple[Dict[str, Any], float]] = []
             all_unsorted_results: List[Tuple[Dict[str, Any], float]] = []
             all_history: List[Dict[str, Any]] = []
+            order_iteration_results: List[Dict[str, Any]] = []
             global_iteration = 1
+            run_quick_order_eval = bool(
+                search_ordering
+                and use_autogluon
+                and AUTOGLUON_AVAILABLE
+                and target_column is not None
+            )
+            quick_order_eval_time_limit = int(aco_params.get("ordering_quick_time_limit", 30))
+            quick_order_eval_time_limit = max(5, quick_order_eval_time_limit)
 
             for order_idx, order in enumerate(candidate_orders, start=1):
                 ordered_options = {step: options[step] for step in order}
@@ -419,33 +428,132 @@ class MetaPipelineRecommender:
                     cfg2 = dict(cfg)
                     cfg2["step_order"] = list(order)
                     all_unsorted_results.append((cfg2, float(score)))
-                for hist in aco_history:
-                    if not isinstance(hist, dict):
-                        continue
+                order_best_cfg: Optional[Dict[str, Any]] = None
+                order_proxy_score: Optional[float] = None
+                if aco_results:
+                    order_best_cfg = dict(aco_results[0][0])
+                    order_best_cfg["step_order"] = list(order)
+                    order_proxy_score = float(aco_results[0][1])
+
+                order_autogluon_score: Optional[float] = None
+                order_autogluon_error: Optional[str] = None
+                if run_quick_order_eval and order_best_cfg is not None:
+                    try:
+                        ag_cfg, ag_score, ag_results, _ = self._evaluate_candidates_with_autogluon(
+                            new_dataset,
+                            target_column,
+                            [order_best_cfg],
+                            time_limit_per_model=quick_order_eval_time_limit,
+                        )
+                        if ag_cfg is not None and ag_results and np.isfinite(ag_score):
+                            order_best_cfg = dict(ag_cfg)
+                            order_best_cfg["step_order"] = list(order)
+                            order_autogluon_score = float(ag_score)
+                            if self.verbose:
+                                print(
+                                    f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                    f"quick AutoGluon: {order_autogluon_score:.4f}"
+                                )
+                        else:
+                            order_autogluon_error = "No valid quick AutoGluon result"
+                    except Exception as exc:
+                        order_autogluon_error = str(exc)
+                        if self.verbose:
+                            print(
+                                f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                f"quick AutoGluon failed: {exc}"
+                            )
+                        else:
+                            logger.warning(
+                                "Quick AutoGluon failed for ordering iteration %s: %s",
+                                order_idx,
+                                exc,
+                            )
+
+                order_selection_score = (
+                    order_autogluon_score
+                    if order_autogluon_score is not None
+                    else order_proxy_score
+                )
+                order_iteration_results.append(
+                    {
+                        "iteration": order_idx,
+                        "order_index": order_idx,
+                        "step_order": list(order),
+                        "pipeline_config": order_best_cfg,
+                        "proxy_score": order_proxy_score,
+                        "autogluon_score": order_autogluon_score,
+                        "selection_score": order_selection_score,
+                        "autogluon_error": order_autogluon_error,
+                    }
+                )
+
+                if search_ordering:
                     all_history.append(
                         {
-                            "iteration": global_iteration,
-                            "best_score": hist.get("best_score"),
+                            "iteration": order_idx,
+                            "best_score": order_selection_score,
+                            "proxy_score": order_proxy_score,
+                            "autogluon_score": order_autogluon_score,
                             "order_index": order_idx,
                             "step_order": list(order),
                         }
                     )
-                    global_iteration += 1
+                else:
+                    for hist in aco_history:
+                        if not isinstance(hist, dict):
+                            continue
+                        all_history.append(
+                            {
+                                "iteration": global_iteration,
+                                "best_score": hist.get("best_score"),
+                                "order_index": order_idx,
+                                "step_order": list(order),
+                            }
+                        )
+                        global_iteration += 1
 
-            dedup: Dict[Tuple[Any, ...], Tuple[Dict[str, Any], float]] = {}
-            dedup_source = all_unsorted_results if all_unsorted_results else all_top_results
-            for cfg, score in dedup_source:
-                key = tuple((step, cfg.get(step)) for step in base_order) + (("step_order", tuple(cfg.get("step_order", []))),)
-                if key not in dedup or score > dedup[key][1]:
-                    dedup[key] = (cfg, score)
+            used_order_level_scoring = False
+            if search_ordering and order_iteration_results:
+                ranked_orders = [
+                    item for item in order_iteration_results
+                    if item.get("pipeline_config") is not None and item.get("selection_score") is not None
+                ]
+                ranked_orders.sort(key=lambda x: float(x["selection_score"]), reverse=True)
+                if ranked_orders:
+                    used_order_level_scoring = True
+                    aco_results = [
+                        (dict(item["pipeline_config"]), float(item["selection_score"]))
+                        for item in ranked_orders[:k]
+                    ]
+                    aco_unsorted_res = [
+                        (dict(item["pipeline_config"]), float(item["selection_score"]))
+                        for item in ranked_orders
+                    ]
+                    best_pipeline, best_score = aco_results[0]
+                else:
+                    aco_results = []
+                    aco_unsorted_res = []
+            else:
+                aco_results = []
+                aco_unsorted_res = []
 
-            if not dedup:
-                raise RuntimeError("ACO search produced no valid pipeline candidates.")
+            if not aco_results:
+                dedup: Dict[Tuple[Any, ...], Tuple[Dict[str, Any], float]] = {}
+                dedup_source = all_unsorted_results if all_unsorted_results else all_top_results
+                for cfg, score in dedup_source:
+                    key = tuple((step, cfg.get(step)) for step in base_order) + (("step_order", tuple(cfg.get("step_order", []))),)
+                    if key not in dedup or score > dedup[key][1]:
+                        dedup[key] = (cfg, score)
 
-            final_ranked = sorted(dedup.values(), key=lambda x: x[1], reverse=True)
-            aco_results = final_ranked[:k]
-            aco_unsorted_res = all_unsorted_results
-            best_pipeline, best_score = aco_results[0]
+                if not dedup:
+                    raise RuntimeError("ACO search produced no valid pipeline candidates.")
+
+                final_ranked = sorted(dedup.values(), key=lambda x: x[1], reverse=True)
+                aco_results = final_ranked[:k]
+                aco_unsorted_res = all_unsorted_results
+                best_pipeline, best_score = aco_results[0]
+
             final_eval = {"method": "proxy", "score": float(best_score)}
             if use_autogluon:
                 if AUTOGLUON_AVAILABLE and target_column is not None:
@@ -485,7 +593,11 @@ class MetaPipelineRecommender:
                     "num_orders_requested": int(num_orders),
                     "num_orders_evaluated": len(candidate_orders),
                     "orders": candidate_orders,
+                    "quick_autogluon_per_iteration": bool(run_quick_order_eval),
+                    "quick_autogluon_time_limit": quick_order_eval_time_limit if run_quick_order_eval else None,
+                    "selection_metric": "autogluon_quick_or_proxy" if used_order_level_scoring else "proxy",
                 },
+                "ordering_iteration_results": order_iteration_results if search_ordering else [],
             }
 
         sims: List[Tuple[Any, float]] = []

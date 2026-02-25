@@ -80,6 +80,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample-budget", type=int, default=100, help="Config evaluation budget for non-ACO optimizers")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for ACO and ordering search")
     parser.add_argument("--time-limit", type=int, default=300)
+    parser.add_argument(
+        "--ordering-quick-time-limit",
+        type=int,
+        default=30,
+        help="Quick AutoGluon time limit (seconds) per ordering iteration",
+    )
     parser.add_argument("--search-ordering", action="store_true", help="Search over valid step-type orders")
     parser.add_argument("--num-orders", type=int, default=10, help="Number of candidate orders to evaluate")
     parser.add_argument(
@@ -398,7 +404,12 @@ def main() -> None:
                 eval_k=args.eval_k,
                 use_autogluon=True,
                 use_aco=search_enabled,
-                aco_params={"n_ants": args.n_ants, "n_iterations": args.n_iterations, "seed": args.seed},
+                aco_params={
+                    "n_ants": args.n_ants,
+                    "n_iterations": args.n_iterations,
+                    "seed": args.seed,
+                    "ordering_quick_time_limit": args.ordering_quick_time_limit,
+                },
                 time_limit_per_model=args.time_limit,
                 metafeatures_func=_mf_func,
                 search_ordering=args.search_ordering,
