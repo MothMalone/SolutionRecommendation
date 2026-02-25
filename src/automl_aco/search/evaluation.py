@@ -1,7 +1,7 @@
 """Candidate evaluation functions (simple models and AutoGluon)."""
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -48,13 +48,68 @@ def _make_preprocessor(cfg: Dict[str, Any]) -> Preprocessor:
     return Preprocessor(pre_cfg)
 
 
+def _should_retry_without_xgb(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "xgbclassifier" in msg and "n_classes_" in msg
+
+
+def _fit_predict_with_autogluon(
+    *,
+    TabularPredictor,
+    IdentityFeatureGenerator,
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_column: str,
+    problem_type: str,
+    eval_metric: str,
+    time_limit_per_model: int,
+    verbosity: int,
+    excluded_model_types: Optional[Sequence[str]] = None,
+):
+    import os
+    import shutil
+    import tempfile
+    import uuid
+
+    temp_dir = os.path.join(tempfile.gettempdir(), f"autogluon_{uuid.uuid4().hex}")
+    try:
+        predictor = TabularPredictor(
+            label=target_column,
+            path=temp_dir,
+            problem_type=problem_type,
+            eval_metric=eval_metric,
+            verbosity=verbosity,
+        )
+        fit_kwargs = dict(
+            train_data=train_df,
+            time_limit=time_limit_per_model,
+            presets="best_quality",
+            feature_generator=IdentityFeatureGenerator(),
+            raise_on_no_models_fitted=False,
+        )
+        if excluded_model_types:
+            fit_kwargs["excluded_model_types"] = list(excluded_model_types)
+
+        predictor.fit(**fit_kwargs)
+        try:
+            model_names = predictor.model_names()
+            if len(model_names) == 0:
+                return None, "no_models_fitted"
+        except Exception:
+            pass
+        preds = predictor.predict(test_df)
+        return preds, None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def evaluate_candidates_autogluon(
     dataset: Any,
     target_column: str,
     candidate_configs: List[Dict[str, Any]],
     time_limit_per_model: int = 300,
     verbose: bool = False,
-) -> Tuple[Dict[str, Any], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
+) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     try:
         import numpy as _np
         ver = _np.__version__.split(".")
@@ -114,43 +169,58 @@ def evaluate_candidates_autogluon(
                     logger.info("%s - y_test length mismatch after preprocessing", name)
                 continue
 
-            import os, tempfile, uuid
-            temp_dir = os.path.join(tempfile.gettempdir(), f"autogluon_{uuid.uuid4().hex}")
-
             try:
-                predictor = TabularPredictor(
-                    label=target_column,
-                    path=temp_dir,
+                preds, ag_issue = _fit_predict_with_autogluon(
+                    TabularPredictor=TabularPredictor,
+                    IdentityFeatureGenerator=IdentityFeatureGenerator,
+                    train_df=train_df,
+                    test_df=test_df,
+                    target_column=target_column,
                     problem_type=problem_type,
                     eval_metric=eval_metric,
+                    time_limit_per_model=time_limit_per_model,
                     verbosity=2 if verbose else 0,
                 )
-                predictor.fit(
-                    train_data=train_df,
-                    time_limit=time_limit_per_model,
-                    presets="best_quality",
-                    feature_generator=IdentityFeatureGenerator(),
-                    raise_on_no_models_fitted=False,
-                )
-                try:
-                    model_names = predictor.model_names()
-                    if len(model_names) == 0:
-                        if verbose:
-                            print(f"    ✗ {name} - AutoGluon fitted no models")
-                        else:
-                            logger.info("%s - AutoGluon fitted no models", name)
-                        continue
-                except Exception:
-                    pass
-                preds = predictor.predict(test_df)
+
+                if ag_issue == "no_models_fitted":
+                    if verbose:
+                        print(f"    ✗ {name} - AutoGluon fitted no models")
+                    else:
+                        logger.info("%s - AutoGluon fitted no models", name)
+                    continue
 
                 if problem_type == "regression":
                     score = r2_score(y_test_proc, preds)
                 else:
                     score = accuracy_score(y_test_proc, preds)
-            finally:
-                import shutil
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as exc:
+                if _should_retry_without_xgb(exc):
+                    if verbose:
+                        print(f"    ! {name} hit XGBoost compatibility issue, retrying without XGB models")
+                    preds, ag_issue = _fit_predict_with_autogluon(
+                        TabularPredictor=TabularPredictor,
+                        IdentityFeatureGenerator=IdentityFeatureGenerator,
+                        train_df=train_df,
+                        test_df=test_df,
+                        target_column=target_column,
+                        problem_type=problem_type,
+                        eval_metric=eval_metric,
+                        time_limit_per_model=time_limit_per_model,
+                        verbosity=2 if verbose else 0,
+                        excluded_model_types=["XGB"],
+                    )
+                    if ag_issue == "no_models_fitted":
+                        if verbose:
+                            print(f"    ✗ {name} - AutoGluon fitted no models (retry without XGB)")
+                        else:
+                            logger.info("%s - AutoGluon fitted no models (retry without XGB)", name)
+                        continue
+                    if problem_type == "regression":
+                        score = r2_score(y_test_proc, preds)
+                    else:
+                        score = accuracy_score(y_test_proc, preds)
+                else:
+                    raise
 
             results.append((cfg, float(score)))
             if verbose:
@@ -167,7 +237,7 @@ def evaluate_candidates_autogluon(
             print("No candidate produced valid evaluation results")
         else:
             logger.info("No candidate produced valid evaluation results")
-        results.append((candidate_configs[0], 0.0))
+        return None, np.nan, [], []
 
     unsorted_res = results.copy()
     results.sort(key=lambda x: x[1], reverse=True)

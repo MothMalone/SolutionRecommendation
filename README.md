@@ -163,6 +163,7 @@ Notes:
 - You do not need to set `PYTHONPATH`; the scripts add `src/` automatically.
 - Warnings are suppressed by default. Use `--show-warnings` to re-enable them.
 - If you see a NumPy 2.x compatibility error from AutoGluon/PyTorch, reinstall with `numpy<2` (already pinned in `requirements.txt`).
+- If AutoGluon hits an XGBoost compatibility error (`'XGBClassifier' object has no attribute 'n_classes_'`), evaluation now retries automatically without XGB models.
 
 ## Local vs Kaggle mode (path behavior)
 

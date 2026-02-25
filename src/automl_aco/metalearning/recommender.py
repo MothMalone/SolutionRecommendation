@@ -450,15 +450,21 @@ class MetaPipelineRecommender:
             if use_autogluon:
                 if AUTOGLUON_AVAILABLE and target_column is not None:
                     try:
-                        ag_best_cfg, ag_score, _ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
+                        ag_best_cfg, ag_score, ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
                             new_dataset,
                             target_column,
                             [best_pipeline],
                             time_limit_per_model=time_limit_per_model,
                         )
-                        if ag_best_cfg is not None:
+                        if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
                             best_pipeline = ag_best_cfg
-                        final_eval = {"method": "autogluon", "score": float(ag_score)}
+                            final_eval = {"method": "autogluon", "score": float(ag_score)}
+                        else:
+                            final_eval = {
+                                "method": "autogluon_failed",
+                                "score": float(best_score),
+                                "error": "No candidate produced valid AutoGluon evaluation results",
+                            }
                     except Exception as exc:
                         logger.warning("AutoGluon final evaluation failed: %s", exc)
                         final_eval = {"method": "autogluon_failed", "score": float(best_score), "error": str(exc)}
