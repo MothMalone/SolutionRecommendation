@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import exp, log, sqrt
+from itertools import product
 from typing import Any, Callable, Dict, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -45,6 +46,20 @@ def _neighbor_cfg(
 
 def _append_history(history: List[Dict[str, Any]], n_eval: int, best_score: Optional[float]) -> None:
     history.append({"iteration": n_eval, "best_score": best_score})
+
+
+def _random_unseen_cfg(
+    options: Mapping[str, List[str]],
+    step_order: Sequence[str],
+    rng: np.random.RandomState,
+    cache: Mapping[Tuple[Tuple[str, Any], ...], float],
+    max_tries: int = 500,
+) -> Optional[Dict[str, Any]]:
+    for _ in range(max_tries):
+        cfg = _random_cfg(options, rng)
+        if _cfg_key(cfg, step_order) not in cache:
+            return cfg
+    return None
 
 
 def _evaluate_one(
@@ -105,7 +120,7 @@ def search_pipelines_with_optimizer(
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]], List[Dict[str, Any]]]:
     """Search configs with non-ACO optimizers under a fixed step order."""
     optimizer = optimizer.lower().strip()
-    if optimizer not in {"random", "ga", "sa", "greedy", "mcts"}:
+    if optimizer not in {"random", "ga", "sa", "greedy", "mcts", "beam", "tpe", "exhaustive"}:
         raise ValueError(f"Unsupported optimizer: {optimizer}")
 
     rng = np.random.RandomState(seed)
@@ -135,8 +150,18 @@ def search_pipelines_with_optimizer(
     if optimizer == "random":
         random_until_budget()
 
+    elif optimizer == "exhaustive":
+        all_combos = int(np.prod([len(options[s]) for s in step_order], dtype=np.int64))
+        if all_combos <= sample_budget:
+            for values in product(*[options[s] for s in step_order]):
+                cfg = {s: v for s, v in zip(step_order, values)}
+                eval_cfg(cfg)
+        else:
+            # Exact for small spaces; fallback to unique random subset when full enumeration is too large.
+            random_until_budget()
+
     elif optimizer == "sa":
-        cur = _random_cfg(options, rng)
+        cur = _random_unseen_cfg(options, step_order, rng, cache) or _random_cfg(options, rng)
         cur_score = eval_cfg(cur)
         if cur_score is None:
             cur_score = -np.inf
@@ -154,7 +179,7 @@ def search_pipelines_with_optimizer(
             temp *= 0.97
 
     elif optimizer == "greedy":
-        cur = _random_cfg(options, rng)
+        cur = _random_unseen_cfg(options, step_order, rng, cache) or _random_cfg(options, rng)
         cur_score = eval_cfg(cur)
         if cur_score is None:
             cur_score = -np.inf
@@ -181,7 +206,7 @@ def search_pipelines_with_optimizer(
                 cur = best_neighbor
                 cur_score = best_neighbor_score
             else:
-                cur = _random_cfg(options, rng)
+                cur = _random_unseen_cfg(options, step_order, rng, cache) or _random_cfg(options, rng)
                 sc = eval_cfg(cur)
                 cur_score = sc if sc is not None else cur_score
 
@@ -189,7 +214,7 @@ def search_pipelines_with_optimizer(
         pop_size = min(20, max(4, sample_budget // 5))
         population: List[Tuple[Dict[str, Any], float]] = []
         while len(population) < pop_size and len(cache) < sample_budget:
-            cfg = _random_cfg(options, rng)
+            cfg = _random_unseen_cfg(options, step_order, rng, cache) or _random_cfg(options, rng)
             sc = eval_cfg(cfg)
             if sc is not None:
                 population.append((cfg, sc))
@@ -214,6 +239,140 @@ def search_pipelines_with_optimizer(
 
         if len(cache) < sample_budget:
             random_until_budget()
+
+    elif optimizer == "beam":
+        beam_width = min(12, max(4, sample_budget // 10))
+        beam: List[Tuple[Dict[str, Any], float]] = []
+
+        # Warm start the beam with random unique seeds.
+        while len(beam) < beam_width and len(cache) < sample_budget:
+            cfg = _random_unseen_cfg(options, step_order, rng, cache)
+            if cfg is None:
+                break
+            sc = eval_cfg(cfg)
+            if sc is not None:
+                beam.append((cfg, sc))
+
+        while len(cache) < sample_budget and beam:
+            neighborhood: List[Tuple[Dict[str, Any], float]] = []
+            for cfg, _sc in beam:
+                for step in step_order:
+                    for val in options[step]:
+                        if len(cache) >= sample_budget:
+                            break
+                        if cfg.get(step) == val:
+                            continue
+                        cand = dict(cfg)
+                        cand[step] = val
+                        sc = eval_cfg(cand)
+                        if sc is not None:
+                            neighborhood.append((cand, sc))
+                    if len(cache) >= sample_budget:
+                        break
+
+            if not neighborhood:
+                refill = _random_unseen_cfg(options, step_order, rng, cache)
+                if refill is None:
+                    break
+                sc = eval_cfg(refill)
+                if sc is None:
+                    break
+                beam = [(refill, sc)]
+                continue
+
+            merged = beam + neighborhood
+            merged.sort(key=lambda x: x[1], reverse=True)
+            next_beam: List[Tuple[Dict[str, Any], float]] = []
+            seen_keys = set()
+            for cfg, sc in merged:
+                key = _cfg_key(cfg, step_order)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                next_beam.append((cfg, sc))
+                if len(next_beam) >= beam_width:
+                    break
+            beam = next_beam
+
+        if len(cache) < sample_budget:
+            random_until_budget()
+
+    elif optimizer == "tpe":
+        # Lightweight categorical TPE-style search:
+        # model P(x|good) vs P(x|bad) with count statistics and sample by likelihood ratio.
+        n_init = min(max(10, sample_budget // 10), sample_budget)
+        while len(cache) < n_init:
+            cfg = _random_unseen_cfg(options, step_order, rng, cache)
+            if cfg is None:
+                break
+            eval_cfg(cfg)
+
+        gamma = 0.25
+        n_candidates = 48
+        prior = 1.0
+
+        def _build_stats():
+            ranked_items = sorted(cache.items(), key=lambda kv: kv[1], reverse=True)
+            n_good = max(1, int(np.ceil(gamma * len(ranked_items))))
+            good_keys = [k for k, _ in ranked_items[:n_good]]
+            bad_keys = [k for k, _ in ranked_items[n_good:]] or [k for k, _ in ranked_items[:n_good]]
+
+            good_counts = {s: {v: prior for v in options[s]} for s in step_order}
+            bad_counts = {s: {v: prior for v in options[s]} for s in step_order}
+
+            for key in good_keys:
+                for s, v in key:
+                    if s in good_counts and v in good_counts[s]:
+                        good_counts[s][v] += 1.0
+            for key in bad_keys:
+                for s, v in key:
+                    if s in bad_counts and v in bad_counts[s]:
+                        bad_counts[s][v] += 1.0
+            return good_counts, bad_counts
+
+        def _score_cfg_with_stats(cfg: Mapping[str, Any], good_counts, bad_counts) -> float:
+            score = 0.0
+            for s in step_order:
+                gv = good_counts[s][cfg[s]]
+                bv = bad_counts[s][cfg[s]]
+                gtot = sum(good_counts[s].values())
+                btot = sum(bad_counts[s].values())
+                pg = gv / gtot
+                pb = bv / btot
+                score += log(max(pg, 1e-12)) - log(max(pb, 1e-12))
+            return score
+
+        while len(cache) < sample_budget:
+            if len(cache) < 2:
+                cfg = _random_unseen_cfg(options, step_order, rng, cache)
+                if cfg is None:
+                    break
+                eval_cfg(cfg)
+                continue
+
+            good_counts, bad_counts = _build_stats()
+            best_cfg = None
+            best_model_score = -np.inf
+            for _ in range(n_candidates):
+                cand = {}
+                for s in step_order:
+                    vals = options[s]
+                    probs = np.array([good_counts[s][v] for v in vals], dtype=float)
+                    probs = probs / probs.sum()
+                    cand[s] = vals[int(rng.choice(len(vals), p=probs))]
+                key = _cfg_key(cand, step_order)
+                if key in cache:
+                    continue
+                mscore = _score_cfg_with_stats(cand, good_counts, bad_counts)
+                if mscore > best_model_score:
+                    best_cfg = cand
+                    best_model_score = mscore
+
+            if best_cfg is None:
+                best_cfg = _random_unseen_cfg(options, step_order, rng, cache)
+                if best_cfg is None:
+                    break
+            eval_cfg(best_cfg)
 
     elif optimizer == "mcts":
         steps = step_order

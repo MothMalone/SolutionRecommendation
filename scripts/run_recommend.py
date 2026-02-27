@@ -73,7 +73,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-iterations", type=int, default=10)
     parser.add_argument(
         "--optimizer",
-        choices=["aco", "random", "ga", "sa", "greedy", "mcts"],
+        choices=["aco", "random", "ga", "sa", "greedy", "mcts", "beam", "tpe", "exhaustive"],
         default="aco",
         help="Search optimizer. ACO uses n-ants*n-iterations; others use sample-budget.",
     )

@@ -90,6 +90,9 @@ Supported optimizers:
 - `sa`
 - `greedy`
 - `mcts`
+- `beam`
+- `tpe` (lightweight categorical TPE-style model-based search)
+- `exhaustive` (exact only when full space size <= sample budget, otherwise random fallback)
 
 For batch runs, summary metrics are saved to `recommendations_summary.json`:
 - average elapsed time
