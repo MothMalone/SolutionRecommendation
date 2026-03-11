@@ -64,6 +64,27 @@ python -m scripts.run_recommend \
   --verbose
 ```
 
+Run dataset-378 conservative profile (toggle to reduce over-processing on OpenML 378):
+
+```bash
+python -m scripts.run_recommend \
+  --dataset-source openml \
+  --dataset-id 378 \
+  --use-aco \
+  --optimizer tpe \
+  --sample-budget 100 \
+  --proxy-profile robust \
+  --final-autogluon-topk 5 \
+  --seed 42 \
+  --verbose
+```
+
+Proxy robustness knobs:
+- `--proxy-profile robust` enables multi-seed proxy scoring + over-processing penalties.
+- `--proxy-seeds 42,52,62` overrides split seeds.
+- `--final-autogluon-topk 5` re-ranks top-5 proxy pipelines with final AutoGluon.
+- `--dataset378-profile {off,conservative,scaling_only}` keeps optional dataset-378-only search-space constraints.
+
 Run optimizer ablation with 100 sampled configs per optimizer (same split/order constraints/eval flow):
 
 ```bash
@@ -85,6 +106,7 @@ python -m scripts.run_recommend \
 
 Supported optimizers:
 - `aco`
+- `dqn` (context-gated DQN with warm-start priors and online proxy-reward updates)
 - `random`
 - `ga`
 - `sa`
@@ -93,6 +115,33 @@ Supported optimizers:
 - `beam`
 - `tpe` (lightweight categorical TPE-style model-based search)
 - `exhaustive` (exact only when full space size <= sample budget, otherwise random fallback)
+
+Run the DQN-enhanced search (warm-start + context gate inspired by CtxPipe):
+
+```bash
+python -m scripts.run_recommend \
+  --performance-matrix aco/training_performance_matrix_autogluon.csv \
+  --metafeatures aco/dataset_feats.csv \
+  --pipeline-configs aco/pipeline_configs.json \
+  --dataset-source openml \
+  --dataset-id 2 \
+  --use-aco \
+  --optimizer dqn \
+  --sample-budget 120 \
+  --dqn-order-policy ctxpipe \
+  --dqn-num-logic-orders 6 \
+  --dqn-updates-per-episode 2 \
+  --dqn-replay-warmup 20 \
+  --dqn-loss-fn huber \
+  --dqn-grad-clip-norm 5.0 \
+  --dqn-target-q-clip 5.0 \
+  --dqn-gamma 0.95 \
+  --dqn-warmstart-weight 0.5 \
+  --verbose
+```
+
+`--dqn-order-policy ctxpipe` uses an internal RL logical-order selector (CtxPipe-style)
+instead of outer-loop `--search-ordering`.
 
 For batch runs, summary metrics are saved to `recommendations_summary.json`:
 - average elapsed time

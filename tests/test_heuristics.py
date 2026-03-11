@@ -35,3 +35,35 @@ def test_heuristic_eta_shape():
     assert set(eta.keys()) == set(options.keys())
     for step, values in options.items():
         assert eta[step].shape[0] == len(values)
+
+
+def test_heuristic_similarity_top_k_prefers_nearest_dataset():
+    performance_matrix = pd.DataFrame(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 1.0]],
+        index=["p1", "p2"],
+        columns=["d1", "d2", "d3"],
+    )
+    metafeatures_df = pd.DataFrame(
+        [[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+        index=["d1", "d2", "d3"],
+        columns=["f1", "f2"],
+    )
+    pipeline_configs = [
+        {"name": "p1", "imputation": "none"},
+        {"name": "p2", "imputation": "mean"},
+    ]
+    options = {"imputation": ["none", "mean"]}
+    new_mf = np.array([1.0, 0.0], dtype=float)
+
+    eta = compute_aco_heuristic(
+        performance_matrix=performance_matrix,
+        metafeatures_df=metafeatures_df,
+        pipeline_configs=pipeline_configs,
+        options=options,
+        new_metafeatures=new_mf,
+        dataset_weighting="similarity",
+        top_k=1,
+        use_top_pipelines_from_metric=False,
+    )
+
+    assert eta["imputation"][0] > eta["imputation"][1]

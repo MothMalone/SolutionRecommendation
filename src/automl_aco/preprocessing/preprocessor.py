@@ -53,6 +53,9 @@ class Preprocessor:
         if y is not None and len(X) != len(y):
             raise ValueError("X and y must have the same length")
 
+        X = X.copy()
+        X.columns = X.columns.astype(str)
+
         self.num_cols = X.select_dtypes(include=["number"]).columns.tolist()
         self.cat_cols = X.select_dtypes(exclude=["number"]).columns.tolist()
 
@@ -95,6 +98,9 @@ class Preprocessor:
         if not self.fitted:
             raise AssertionError("You must call fit() before transform()")
 
+        X = X.copy()
+        X.columns = X.columns.astype(str)
+
         X_num = X[self.num_cols].copy() if self.num_cols else None
         X_cat = X[self.cat_cols].copy() if self.cat_cols else None
 
@@ -128,6 +134,27 @@ class Preprocessor:
     # -----------------------------
     # 1. Imputation
     # -----------------------------
+    @staticmethod
+    def _imputer_output_to_df(arr, index, original_columns, imputer):
+        """Build DataFrame safely even when sklearn drops all-missing columns."""
+        cols = list(original_columns)
+        if arr.shape[1] == len(cols):
+            return pd.DataFrame(arr, index=index, columns=cols)
+
+        # Some sklearn versions drop columns that are entirely missing at fit-time.
+        # Reconstruct surviving column names from imputer.statistics_ when possible.
+        recovered_cols = None
+        stats = getattr(imputer, "statistics_", None)
+        if stats is not None and len(stats) == len(cols):
+            keep_mask = ~pd.isna(stats)
+            if int(np.sum(keep_mask)) == arr.shape[1]:
+                recovered_cols = [c for c, keep in zip(cols, keep_mask) if keep]
+
+        if recovered_cols is None:
+            recovered_cols = cols[: arr.shape[1]]
+
+        return pd.DataFrame(arr, index=index, columns=recovered_cols)
+
     def _fit_imputation(self, X_num, X_cat):
         method = self.config["imputation"]
 
@@ -139,35 +166,39 @@ class Preprocessor:
             else:
                 self.num_imputer = SimpleImputer(strategy="mean")
 
-            X_num = pd.DataFrame(
+            X_num = self._imputer_output_to_df(
                 self.num_imputer.fit_transform(X_num),
                 index=X_num.index,
-                columns=X_num.columns,
+                original_columns=X_num.columns,
+                imputer=self.num_imputer,
             )
 
         if X_cat is not None and method != "none":
             self.cat_imputer = SimpleImputer(strategy="most_frequent")
-            X_cat = pd.DataFrame(
+            X_cat = self._imputer_output_to_df(
                 self.cat_imputer.fit_transform(X_cat),
                 index=X_cat.index,
-                columns=X_cat.columns,
+                original_columns=X_cat.columns,
+                imputer=self.cat_imputer,
             )
 
         return X_num, X_cat
 
     def _transform_imputation(self, X_num, X_cat):
         if X_num is not None and self.num_imputer is not None:
-            X_num = pd.DataFrame(
+            X_num = self._imputer_output_to_df(
                 self.num_imputer.transform(X_num),
                 index=X_num.index,
-                columns=X_num.columns,
+                original_columns=X_num.columns,
+                imputer=self.num_imputer,
             )
 
         if X_cat is not None and self.cat_imputer is not None:
-            X_cat = pd.DataFrame(
+            X_cat = self._imputer_output_to_df(
                 self.cat_imputer.transform(X_cat),
                 index=X_cat.index,
-                columns=X_cat.columns,
+                original_columns=X_cat.columns,
+                imputer=self.cat_imputer,
             )
         return X_num, X_cat
 
@@ -498,10 +529,12 @@ class Preprocessor:
             self.reducer = TruncatedSVD(n_components=n_components)
 
         arr = self.reducer.fit_transform(X)
-        return pd.DataFrame(arr, index=X.index)
+        cols = [f"dr_{i}" for i in range(arr.shape[1])]
+        return pd.DataFrame(arr, index=X.index, columns=cols)
 
     def _transform_dim_reduction(self, X):
         if X is None or self.reducer is None:
             return X
         arr = self.reducer.transform(X)
-        return pd.DataFrame(arr, index=X.index)
+        cols = [f"dr_{i}" for i in range(arr.shape[1])]
+        return pd.DataFrame(arr, index=X.index, columns=cols)

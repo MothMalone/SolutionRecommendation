@@ -68,16 +68,115 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kaggle-root", default=KAGGLE_REPO_ROOT, help="Kaggle repo root path")
     parser.add_argument("--use-aco", action="store_true", help="Enable ACO search")
     parser.add_argument("--k", type=int, default=5, help="Top-k similar datasets")
+    parser.add_argument(
+        "--heuristic-top-k",
+        type=int,
+        default=None,
+        help="Top-k similar datasets used to build Phase-2 ACO heuristic (default: use --k)",
+    )
+    parser.add_argument(
+        "--dataset-weighting",
+        choices=["equality", "similarity"],
+        default="equality",
+        help="How to weight historical datasets when transferring heuristic",
+    )
     parser.add_argument("--eval-k", type=int, default=3, help="Number of top pipelines to evaluate")
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
+    parser.add_argument("--alpha", type=float, default=1.0, help="ACO alpha: pheromone importance")
+    parser.add_argument("--beta", type=float, default=2.0, help="ACO beta: heuristic importance")
+    parser.add_argument("--evaporation", type=float, default=0.2, help="ACO pheromone evaporation rate")
     parser.add_argument(
         "--optimizer",
-        choices=["aco", "random", "ga", "sa", "greedy", "mcts", "beam", "tpe", "exhaustive"],
+        choices=["aco", "dqn", "random", "ga", "sa", "greedy", "mcts", "beam", "tpe", "exhaustive"],
         default="aco",
-        help="Search optimizer. ACO uses n-ants*n-iterations; others use sample-budget.",
+        help="Search optimizer. ACO uses n-ants*n-iterations; DQN/others use sample-budget.",
     )
     parser.add_argument("--sample-budget", type=int, default=100, help="Config evaluation budget for non-ACO optimizers")
+    parser.add_argument(
+        "--dqn-epochs",
+        type=int,
+        default=1,
+        help="Legacy alias for DQN updates-per-episode (optimizer=dqn)",
+    )
+    parser.add_argument("--dqn-batch-size", type=int, default=64, help="Replay batch size for DQN updates (optimizer=dqn)")
+    parser.add_argument("--dqn-lr", type=float, default=3e-4, help="Offline DQN learning rate (optimizer=dqn)")
+    parser.add_argument("--dqn-gamma", type=float, default=0.95, help="Offline DQN discount factor (optimizer=dqn)")
+    parser.add_argument("--dqn-target-update", type=int, default=5, help="Target-net sync interval in epochs")
+    parser.add_argument("--dqn-loss-fn", choices=["huber", "mse"], default="huber", help="DQN TD loss")
+    parser.add_argument("--dqn-huber-delta", type=float, default=1.0, help="Huber delta if dqn-loss-fn=huber")
+    parser.add_argument("--dqn-grad-clip-norm", type=float, default=5.0, help="Gradient clipping norm for DQN")
+    parser.add_argument("--dqn-reward-clip", type=float, default=1.0, help="Reward clip value for DQN targets")
+    parser.add_argument("--dqn-target-q-clip", type=float, default=5.0, help="Clamp TD target Q to [-clip, clip]")
+    parser.add_argument(
+        "--dqn-use-double-dqn",
+        dest="dqn_use_double_dqn",
+        action="store_true",
+        help="Use Double-DQN target action selection",
+    )
+    parser.add_argument(
+        "--no-dqn-use-double-dqn",
+        dest="dqn_use_double_dqn",
+        action="store_false",
+        help="Disable Double-DQN target action selection",
+    )
+    parser.set_defaults(dqn_use_double_dqn=True)
+    parser.add_argument(
+        "--dqn-updates-per-episode",
+        type=int,
+        default=1,
+        help="Number of replay updates after each newly evaluated pipeline (optimizer=dqn)",
+    )
+    parser.add_argument(
+        "--dqn-replay-warmup",
+        type=int,
+        default=16,
+        help="Number of evaluated pipelines before starting replay updates (optimizer=dqn)",
+    )
+    parser.add_argument(
+        "--dqn-order-policy",
+        choices=["fixed", "ctxpipe"],
+        default="ctxpipe",
+        help="Order policy mode for DQN. 'ctxpipe' learns logical pipeline order like CtxPipe.",
+    )
+    parser.add_argument(
+        "--dqn-num-logic-orders",
+        type=int,
+        default=6,
+        help="Maximum logical pipeline orders considered in DQN ctxpipe mode",
+    )
+    parser.add_argument(
+        "--dqn-order-updates-per-episode",
+        type=int,
+        default=1,
+        help="Replay updates for logical-order policy after each evaluated pipeline",
+    )
+    parser.add_argument(
+        "--dqn-order-replay-warmup",
+        type=int,
+        default=16,
+        help="Replay warmup size before training logical-order policy",
+    )
+    parser.add_argument(
+        "--dqn-order-epsilon-start",
+        type=float,
+        default=0.35,
+        help="Start epsilon for logical-order exploration",
+    )
+    parser.add_argument(
+        "--dqn-order-epsilon-end",
+        type=float,
+        default=0.05,
+        help="End epsilon for logical-order exploration",
+    )
+    parser.add_argument("--dqn-epsilon-start", type=float, default=0.35, help="Start epsilon for DQN sampling")
+    parser.add_argument("--dqn-epsilon-end", type=float, default=0.05, help="End epsilon for DQN sampling")
+    parser.add_argument(
+        "--dqn-warmstart-weight",
+        type=float,
+        default=0.5,
+        help="Weight for warm-start priors in DQN action scores",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for ACO and ordering search")
     parser.add_argument("--time-limit", type=int, default=300)
     parser.add_argument(
@@ -109,6 +208,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--show-warnings",
         action="store_true",
         help="Show sklearn warnings during evaluation",
+    )
+    parser.add_argument(
+        "--proxy-profile",
+        choices=["default", "robust"],
+        default="default",
+        help=(
+            "Proxy scoring profile. robust uses multi-seed validation and "
+            "over-processing penalties to reduce search-time overfitting."
+        ),
+    )
+    parser.add_argument(
+        "--proxy-seeds",
+        default=None,
+        help="Comma-separated split seeds for proxy scoring (overrides profile), e.g. 42,52,62",
+    )
+    parser.add_argument(
+        "--proxy-clf-model",
+        choices=["logreg", "linear_svm", "random_forest", "extra_trees", "knn", "hist_gbdt"],
+        default="logreg",
+        help="Proxy model used for classification tasks during search",
+    )
+    parser.add_argument(
+        "--proxy-reg-model",
+        choices=["ensemble", "linear", "random_forest"],
+        default="ensemble",
+        help="Proxy model used for regression tasks during search",
+    )
+    parser.add_argument(
+        "--proxy-logreg-max-iter",
+        type=int,
+        default=3000,
+        help="Max iterations for logistic-regression proxy model",
+    )
+    parser.add_argument(
+        "--final-autogluon-topk",
+        type=int,
+        default=1,
+        help="Re-evaluate top-k proxy pipelines with final AutoGluon (default: 1)",
+    )
+    parser.add_argument(
+        "--dataset378-profile",
+        choices=["off", "conservative", "scaling_only"],
+        default="off",
+        help=(
+            "Apply dataset-specific option constraints only when dataset_id=378. "
+            "Use conservative or scaling_only to reduce over-processing risk."
+        ),
     )
     parser.add_argument("--verbose", action="store_true", help="Match notebook-style progress output")
     return parser
@@ -371,18 +517,117 @@ def main() -> None:
             return load_dummy_dataset(dataset_id, verbose=args.verbose)
         raise ValueError(f"Unknown dataset source: {dataset_source}")
 
+    def _build_run_options(dataset_id: Any):
+        # Copy lists so per-run constraints do not mutate global defaults.
+        options = {step: list(vals) for step, vals in DEFAULT_PIPELINE_OPTIONS.items()}
+        profile_note = None
+        if args.dataset378_profile == "off":
+            return options, profile_note
+
+        try:
+            did = int(str(dataset_id))
+        except Exception:
+            did = None
+        if did != 378:
+            return options, profile_note
+
+        if args.dataset378_profile == "conservative":
+            options["imputation"] = ["none", "median", "most_frequent"]
+            options["outlier_removal"] = ["none"]
+            options["feature_selection"] = ["none", "variance_threshold"]
+            options["dimensionality_reduction"] = ["none"]
+            profile_note = (
+                "dataset378_profile=conservative "
+                "(imputation limited; outlier_removal and dim_reduction constrained)"
+            )
+            return options, profile_note
+
+        if args.dataset378_profile == "scaling_only":
+            options["imputation"] = ["none"]
+            options["outlier_removal"] = ["none"]
+            options["feature_selection"] = ["none"]
+            options["dimensionality_reduction"] = ["none"]
+            options["scaling"] = ["none", "standard", "minmax", "robust", "maxabs"]
+            profile_note = (
+                "dataset378_profile=scaling_only "
+                "(only scaling varies; all other preprocessing steps fixed to none)"
+            )
+            return options, profile_note
+
+        return options, profile_note
+
+    def _build_proxy_settings() -> dict:
+        if args.proxy_profile == "robust":
+            settings = {
+                "split_seeds": [42, 52, 62],
+                "active_step_penalty": 0.003,
+                "row_drop_penalty": 0.10,
+                "imputation_low_missing_penalty": 0.010,
+                "low_missing_threshold": 0.001,
+                "outlier_removal_penalty": 0.007,
+                "dimred_small_feature_penalty": 0.008,
+                "dimred_small_feature_threshold": 120,
+                "verbose_components": bool(args.verbose),
+            }
+        else:
+            settings = {
+                "split_seeds": [42],
+                "active_step_penalty": 0.0,
+                "row_drop_penalty": 0.0,
+                "imputation_low_missing_penalty": 0.0,
+                "low_missing_threshold": 0.0,
+                "outlier_removal_penalty": 0.0,
+                "dimred_small_feature_penalty": 0.0,
+                "dimred_small_feature_threshold": 0,
+                "verbose_components": bool(args.verbose),
+            }
+
+        settings["classification_model"] = str(args.proxy_clf_model)
+        settings["regression_model"] = str(args.proxy_reg_model)
+        settings["logreg_max_iter"] = int(args.proxy_logreg_max_iter)
+
+        if args.proxy_seeds:
+            tokens = [t.strip() for t in str(args.proxy_seeds).split(",") if t.strip()]
+            parsed = []
+            for token in tokens:
+                try:
+                    parsed.append(int(token))
+                except ValueError:
+                    pass
+            if parsed:
+                settings["split_seeds"] = parsed
+        return settings
+
     output_dir = _get_output_dir()
     n_runs = len(dataset_ids)
     run_summaries = []
     search_enabled = args.use_aco or args.optimizer != "aco"
+    proxy_settings = _build_proxy_settings()
+    heuristic_top_k = int(args.heuristic_top_k) if args.heuristic_top_k is not None else int(args.k)
     if args.optimizer != "aco" and not args.use_aco and args.verbose:
         print("Info: --optimizer is non-ACO, enabling search flow (same as --use-aco).")
+    if args.verbose:
+        print(
+            "Proxy profile: "
+            f"{args.proxy_profile} (seeds={proxy_settings.get('split_seeds')}, "
+            f"final_autogluon_topk={max(1, int(args.final_autogluon_topk))})"
+        )
+        print(
+            "Search transfer/proxy setup: "
+            f"dataset_weighting={args.dataset_weighting}, "
+            f"heuristic_top_k={heuristic_top_k}, "
+            f"proxy_clf_model={proxy_settings.get('classification_model')}, "
+            f"proxy_reg_model={proxy_settings.get('regression_model')}"
+        )
 
     for run_idx, dataset_id in enumerate(dataset_ids, start=1):
         if n_runs > 1:
             print(f"\n=== Dataset {dataset_id} ({run_idx}/{n_runs}) ===")
 
         run_start = time.perf_counter()
+        run_options, run_profile_note = _build_run_options(dataset_id)
+        if run_profile_note:
+            print(f"  Applied profile: {run_profile_note}")
         try:
             dataset = _load_dataset_for_run(dataset_id)
             if dataset is None or "X" not in dataset or "y" not in dataset:
@@ -399,7 +644,7 @@ def main() -> None:
             recommendation = recommender.recommend(
                 new_dataset=test_dataset_df,
                 target_column="target",
-                options=DEFAULT_PIPELINE_OPTIONS,
+                options=run_options,
                 k=args.k,
                 eval_k=args.eval_k,
                 use_autogluon=True,
@@ -408,7 +653,34 @@ def main() -> None:
                     "n_ants": args.n_ants,
                     "n_iterations": args.n_iterations,
                     "seed": args.seed,
+                    "alpha": args.alpha,
+                    "beta": args.beta,
+                    "evaporation": args.evaporation,
+                    "dataset_weighting": args.dataset_weighting,
+                    "heuristic_top_k": heuristic_top_k,
                     "ordering_quick_time_limit": args.ordering_quick_time_limit,
+                    "dqn_epochs": args.dqn_epochs,
+                    "dqn_batch_size": args.dqn_batch_size,
+                    "dqn_lr": args.dqn_lr,
+                    "dqn_gamma": args.dqn_gamma,
+                    "dqn_target_update_interval": args.dqn_target_update,
+                    "dqn_loss_fn": args.dqn_loss_fn,
+                    "dqn_huber_delta": args.dqn_huber_delta,
+                    "dqn_grad_clip_norm": args.dqn_grad_clip_norm,
+                    "dqn_reward_clip": args.dqn_reward_clip,
+                    "dqn_target_q_clip": args.dqn_target_q_clip,
+                    "dqn_use_double_dqn": args.dqn_use_double_dqn,
+                    "dqn_updates_per_episode": args.dqn_updates_per_episode,
+                    "dqn_replay_warmup": args.dqn_replay_warmup,
+                    "dqn_order_policy": args.dqn_order_policy,
+                    "dqn_num_logic_orders": args.dqn_num_logic_orders,
+                    "dqn_order_updates_per_episode": args.dqn_order_updates_per_episode,
+                    "dqn_order_replay_warmup": args.dqn_order_replay_warmup,
+                    "dqn_order_epsilon_start": args.dqn_order_epsilon_start,
+                    "dqn_order_epsilon_end": args.dqn_order_epsilon_end,
+                    "dqn_epsilon_start": args.dqn_epsilon_start,
+                    "dqn_epsilon_end": args.dqn_epsilon_end,
+                    "dqn_warmstart_weight": args.dqn_warmstart_weight,
                 },
                 time_limit_per_model=args.time_limit,
                 metafeatures_func=_mf_func,
@@ -417,6 +689,8 @@ def main() -> None:
                 order_strategy=args.order_strategy,
                 optimizer=args.optimizer,
                 sample_budget=args.sample_budget,
+                proxy_settings=proxy_settings,
+                final_autogluon_topk=args.final_autogluon_topk,
             )
         except Exception as exc:
             elapsed = time.perf_counter() - run_start
@@ -445,6 +719,23 @@ def main() -> None:
             os.makedirs(run_output_dir, exist_ok=True)
 
         rec_path = os.path.join(run_output_dir, "recommendation.json")
+        recommendation["search_options"] = run_options
+        recommendation["dataset_profile"] = args.dataset378_profile
+        recommendation["search_hyperparams"] = {
+            "k": int(args.k),
+            "heuristic_top_k": int(heuristic_top_k),
+            "dataset_weighting": str(args.dataset_weighting),
+            "optimizer": str(args.optimizer),
+            "n_ants": int(args.n_ants),
+            "n_iterations": int(args.n_iterations),
+            "alpha": float(args.alpha),
+            "beta": float(args.beta),
+            "evaporation": float(args.evaporation),
+            "proxy_clf_model": str(proxy_settings.get("classification_model")),
+            "proxy_reg_model": str(proxy_settings.get("regression_model")),
+            "proxy_split_seeds": list(proxy_settings.get("split_seeds", [])),
+            "proxy_profile": str(args.proxy_profile),
+        }
         with open(rec_path, "w", encoding="utf-8") as f:
             json.dump(recommendation, f, indent=2, default=str)
 
@@ -465,6 +756,8 @@ def main() -> None:
 
         print("\nFinal recommendation")
         print(f"  Dataset: {dataset_tag}")
+        if run_profile_note:
+            print(f"  Profile: {args.dataset378_profile}")
         print(f"  Pipeline: {_format_pipeline(pipeline_cfg)}")
         if proxy_score is not None:
             print(f"  Proxy score: {float(proxy_score):.4f}")
@@ -502,6 +795,7 @@ def main() -> None:
                 "recommendation_path": rec_path,
                 "history_path": history_path,
                 "plot_path": plot_path,
+                "dataset_profile": args.dataset378_profile,
             }
         )
 

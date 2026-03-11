@@ -12,11 +12,17 @@ from sklearn.metrics.pairwise import cosine_similarity
 from ..config import DEFAULT_ORDERING_CONSTRAINTS, DEFAULT_PIPELINE_OPTIONS
 from ..utils.logging import get_logger
 from ..metalearning.metric import train_siamese_regression_metric, save_metric as save_metric_file, load_metric as load_metric_file
+from ..metalearning.dqn_policy import (
+    DQNPolicyConfig,
+    WarmStartDQNPolicy,
+    WarmStartOrderPolicy,
+    build_action_offsets,
+)
 from ..search.heuristics import compute_aco_heuristic
 from ..search.aco import search_pipelines_aco
 from ..search.optimizers import search_pipelines_with_optimizer
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
-from ..search.ordering import OrderSearchConfig, propose_orders
+from ..search.ordering import OrderSearchConfig, all_topological_orders, heuristic_score_order, propose_orders
 
 logger = get_logger(__name__)
 
@@ -209,6 +215,7 @@ class MetaPipelineRecommender:
         target_column: str,
         new_metafeatures: np.ndarray,
         options: Dict[str, List[str]],
+        proxy_settings: Optional[Dict[str, Any]] = None,
         n_pipelines: int = 3,
         n_ants: int = 3,
         n_iterations: int = 5,
@@ -217,6 +224,7 @@ class MetaPipelineRecommender:
         beta: float = 2.0,
         evaporation: float = 0.2,
         dataset_weighting: str = "equality",
+        heuristic_top_k: int = 10,
         time_limit_per_model: int = 3000,
         local_search: bool = False,
         metafeatures_func=None,
@@ -232,6 +240,7 @@ class MetaPipelineRecommender:
             new_metafeatures,
             options,
             dataset_weighting=dataset_weighting,
+            top_k=max(1, int(heuristic_top_k)),
             use_top_pipelines_from_metric=True,
             recommend_kwargs={
                 "new_dataset": new_dataset,
@@ -253,8 +262,18 @@ class MetaPipelineRecommender:
                     cfg_with_order = dict(cfg)
                     cfg_with_order["step_order"] = list(step_order)
                     sampled_with_order.append(cfg_with_order)
-                return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_with_order)
-            return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_configs)
+                return self._evaluate_candidates_with_simple_models(
+                    new_dataset,
+                    target_column,
+                    sampled_with_order,
+                    proxy_settings=proxy_settings,
+                )
+            return self._evaluate_candidates_with_simple_models(
+                new_dataset,
+                target_column,
+                sampled_configs,
+                proxy_settings=proxy_settings,
+            )
 
         result = search_pipelines_aco(
             options=options,
@@ -289,11 +308,18 @@ class MetaPipelineRecommender:
             verbose=self.verbose,
         )
 
-    def _evaluate_candidates_with_simple_models(self, dataset, target_column, candidate_configs):
+    def _evaluate_candidates_with_simple_models(
+        self,
+        dataset,
+        target_column,
+        candidate_configs,
+        proxy_settings: Optional[Dict[str, Any]] = None,
+    ):
         return evaluate_candidates_simple(
             dataset=dataset,
             target_column=target_column,
             candidate_configs=candidate_configs,
+            proxy_settings=proxy_settings,
             verbose=self.verbose,
         )
 
@@ -303,6 +329,7 @@ class MetaPipelineRecommender:
         new_dataset: Any,
         target_column: str,
         options: Dict[str, List[str]],
+        proxy_settings: Optional[Dict[str, Any]] = None,
         n_pipelines: int = 3,
         sample_budget: int = 100,
         seed: int = 42,
@@ -315,8 +342,18 @@ class MetaPipelineRecommender:
                     cfg_with_order = dict(cfg)
                     cfg_with_order["step_order"] = list(step_order)
                     sampled_with_order.append(cfg_with_order)
-                return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_with_order)
-            return self._evaluate_candidates_with_simple_models(new_dataset, target_column, sampled_configs)
+                return self._evaluate_candidates_with_simple_models(
+                    new_dataset,
+                    target_column,
+                    sampled_with_order,
+                    proxy_settings=proxy_settings,
+                )
+            return self._evaluate_candidates_with_simple_models(
+                new_dataset,
+                target_column,
+                sampled_configs,
+                proxy_settings=proxy_settings,
+            )
 
         return search_pipelines_with_optimizer(
             optimizer=optimizer,
@@ -327,6 +364,295 @@ class MetaPipelineRecommender:
             n_pipelines=n_pipelines,
             verbose=self.verbose,
         )
+
+    def _search_pipelines_dqn(
+        self,
+        new_dataset: Any,
+        target_column: str,
+        new_metafeatures: np.ndarray,
+        options: Dict[str, List[str]],
+        proxy_settings: Optional[Dict[str, Any]] = None,
+        n_pipelines: int = 3,
+        sample_budget: int = 100,
+        seed: int = 42,
+        dataset_weighting: str = "equality",
+        heuristic_top_k: int = 10,
+        time_limit_per_model: int = 3000,
+        metafeatures_func=None,
+        dqn_params: Optional[Dict[str, Any]] = None,
+        enable_internal_order_policy: bool = True,
+    ):
+        params = dqn_params or {}
+        dqn_cfg = DQNPolicyConfig(
+            hidden_dim=int(params.get("dqn_hidden_dim", 128)),
+            lr=float(params.get("dqn_lr", 3e-4)),
+            gamma=float(params.get("dqn_gamma", 0.95)),
+            epochs=int(params.get("dqn_epochs", 80)),
+            batch_size=int(params.get("dqn_batch_size", 64)),
+            target_update_interval=int(params.get("dqn_target_update_interval", 5)),
+            warmstart_weight=float(params.get("dqn_warmstart_weight", 0.5)),
+            loss_fn=str(params.get("dqn_loss_fn", "huber")),
+            huber_delta=float(params.get("dqn_huber_delta", 1.0)),
+            grad_clip_norm=float(params.get("dqn_grad_clip_norm", 5.0)),
+            reward_clip=float(params.get("dqn_reward_clip", 1.0)),
+            target_q_clip=float(params.get("dqn_target_q_clip", 5.0)),
+            use_double_dqn=bool(params.get("dqn_use_double_dqn", True)),
+        )
+
+        base_order = list(options.keys())
+        constraints = [
+            (a, b)
+            for a, b in DEFAULT_ORDERING_CONSTRAINTS
+            if a in base_order and b in base_order
+        ]
+
+        order_policy_mode = str(params.get("dqn_order_policy", "ctxpipe")).lower().strip()
+        max_logic_orders = int(params.get("dqn_num_logic_orders", 6))
+
+        def _build_ctxpipe_like_orders() -> List[List[str]]:
+            all_orders = all_topological_orders(base_order, constraints, limit=None)
+            fixed_prefix = [s for s in ("imputation", "encoding") if s in base_order]
+            if fixed_prefix:
+                filtered = [o for o in all_orders if o[: len(fixed_prefix)] == fixed_prefix]
+                all_orders = filtered if filtered else all_orders
+            all_orders.sort(key=heuristic_score_order, reverse=True)
+            return all_orders[: max(1, max_logic_orders)]
+
+        if enable_internal_order_policy and order_policy_mode == "ctxpipe":
+            logic_orders = _build_ctxpipe_like_orders()
+        else:
+            logic_orders = [base_order]
+
+        policies_by_order: List[WarmStartDQNPolicy] = []
+        eta_by_order: List[Dict[str, np.ndarray]] = []
+        replay_by_order: List[List[List[Dict[str, Any]]]] = []
+        for order in logic_orders:
+            ordered_options = {step: options[step] for step in order}
+            _offsets, history_dim = build_action_offsets(ordered_options)
+            state_dim = int(len(new_metafeatures) + history_dim)
+            policies_by_order.append(
+                WarmStartDQNPolicy(
+                    options=ordered_options,
+                    state_dim=state_dim,
+                    config=dqn_cfg,
+                )
+            )
+            replay_by_order.append([[] for _ in order])
+            eta_by_order.append(
+                self._compute_aco_heuristic(
+                    new_metafeatures,
+                    ordered_options,
+                    dataset_weighting=dataset_weighting,
+                    top_k=max(1, int(heuristic_top_k)),
+                    use_top_pipelines_from_metric=True,
+                    recommend_kwargs={
+                        "new_dataset": new_dataset,
+                        "target_column": target_column,
+                        "options": ordered_options,
+                        "k": 5,
+                        "eval_k": 3,
+                        "use_aco": False,
+                        "time_limit_per_model": time_limit_per_model,
+                        "use_autogluon": False,
+                        "metafeatures_func": metafeatures_func,
+                    },
+                )
+            )
+
+        order_prior = np.ones(len(logic_orders), dtype=np.float32)
+        if len(logic_orders) > 1:
+            vals = []
+            for order_idx, order in enumerate(logic_orders):
+                eta = eta_by_order[order_idx]
+                score = 0.0
+                for pos, step in enumerate(order, start=1):
+                    v = eta.get(step)
+                    if v is None or len(v) == 0:
+                        continue
+                    score += float(np.max(v)) / float(pos)
+                vals.append(score)
+            vals_arr = np.asarray(vals, dtype=np.float32)
+            mn = float(np.min(vals_arr))
+            mx = float(np.max(vals_arr))
+            if mx - mn > 1e-12:
+                order_prior = (vals_arr - mn) / (mx - mn + 1e-12)
+            else:
+                order_prior = np.ones_like(vals_arr, dtype=np.float32)
+
+        order_policy: Optional[WarmStartOrderPolicy] = None
+        order_replay: List[Dict[str, Any]] = []
+        if len(logic_orders) > 1:
+            order_policy = WarmStartOrderPolicy(
+                state_dim=int(len(new_metafeatures)),
+                order_dim=len(logic_orders),
+                hidden_dim=max(16, dqn_cfg.hidden_dim // 2),
+                lr=dqn_cfg.lr,
+                gamma=dqn_cfg.gamma,
+                reward_clip=dqn_cfg.reward_clip,
+                target_q_clip=dqn_cfg.target_q_clip,
+                grad_clip_norm=dqn_cfg.grad_clip_norm,
+                use_double_dqn=dqn_cfg.use_double_dqn,
+                huber_delta=dqn_cfg.huber_delta,
+            )
+
+        # Online proxy-reward training loop (same proxy signal as ACORec).
+        # This lets RL optimize directly against the current dataset's proxy objective.
+        eps_start = float(params.get("dqn_epsilon_start", 0.35))
+        eps_end = float(params.get("dqn_epsilon_end", 0.05))
+        updates_per_episode = int(params.get("dqn_updates_per_episode", params.get("dqn_epochs", 1)))
+        replay_warmup = int(params.get("dqn_replay_warmup", 16))
+        target_sync = max(1, int(params.get("dqn_target_update_interval", 5)))
+        order_eps_start = float(params.get("dqn_order_epsilon_start", eps_start))
+        order_eps_end = float(params.get("dqn_order_epsilon_end", eps_end))
+        order_updates = int(params.get("dqn_order_updates_per_episode", updates_per_episode))
+        order_warmup = int(params.get("dqn_order_replay_warmup", replay_warmup))
+
+        rng = np.random.RandomState(seed)
+        evaluated: Dict[Tuple[Any, ...], Tuple[Dict[str, Any], float]] = {}
+        unsorted_results: List[Tuple[Dict[str, Any], float]] = []
+        history: List[Dict[str, Any]] = []
+        running_best: Optional[float] = None
+
+        max_attempts = max(sample_budget * 5, sample_budget)
+        episodes = int(sample_budget)
+        for i in range(max_attempts):
+            if len(evaluated) >= episodes:
+                break
+            frac = float(len(evaluated)) / float(max(1, episodes - 1))
+            eps = eps_start + (eps_end - eps_start) * frac
+            order_eps = order_eps_start + (order_eps_end - order_eps_start) * frac
+            if order_policy is not None:
+                order_idx = order_policy.sample_order(
+                    metafeatures=new_metafeatures.astype(np.float32),
+                    order_context=order_prior,
+                    rng=rng,
+                    epsilon=max(0.0, min(1.0, order_eps)),
+                )
+            else:
+                order_idx = 0
+
+            step_order = logic_orders[order_idx]
+            ordered_options = {step: options[step] for step in step_order}
+            policy = policies_by_order[order_idx]
+            eta = eta_by_order[order_idx]
+            cfg = policy.sample_pipeline(
+                metafeatures=new_metafeatures.astype(np.float32),
+                warm_context=eta,
+                rng=rng,
+                epsilon=max(0.0, min(1.0, eps)),
+            )
+            key = (order_idx, tuple((step, cfg.get(step)) for step in step_order))
+            if key in evaluated:
+                continue
+
+            cfg_with_order = dict(cfg)
+            cfg_with_order["step_order"] = list(step_order)
+            _best, _best_score, sorted_eval, _unsorted_eval = self._evaluate_candidates_with_simple_models(
+                new_dataset,
+                target_column,
+                [cfg_with_order],
+                proxy_settings=proxy_settings,
+            )
+            if not sorted_eval:
+                continue
+            score = float(sorted_eval[0][1])
+            evaluated[key] = (cfg_with_order, score)
+            unsorted_results.append((cfg_with_order, score))
+
+            # Convert this evaluated episode into transitions.
+            offsets, history_dim = build_action_offsets(ordered_options)
+            episode_history = np.zeros(history_dim, dtype=np.float32)
+            for step_idx, step in enumerate(step_order):
+                action = ordered_options[step].index(cfg_with_order[step])
+                state = np.concatenate([new_metafeatures.astype(np.float32), episode_history]).astype(np.float32)
+                context = np.asarray(eta.get(step), dtype=np.float32)
+
+                next_history = episode_history.copy()
+                next_history[offsets[step] + action] = 1.0
+                next_state = np.concatenate([new_metafeatures.astype(np.float32), next_history]).astype(np.float32)
+
+                done = step_idx == (len(step_order) - 1)
+                reward = score if done else 0.0
+                next_context = (
+                    np.asarray(eta.get(step_order[step_idx + 1]), dtype=np.float32)
+                    if not done
+                    else np.zeros((1,), dtype=np.float32)
+                )
+
+                replay_by_order[order_idx][step_idx].append(
+                    {
+                        "state": state,
+                        "context": context,
+                        "action": int(action),
+                        "reward": float(reward),
+                        "done": bool(done),
+                        "next_state": next_state,
+                        "next_context": next_context,
+                    }
+                )
+                episode_history = next_history
+
+            step_policy_stats: Dict[str, Any] = {"updates": 0, "mean_loss": None, "last_loss": None}
+            if len(evaluated) >= replay_warmup:
+                step_policy_stats = policy.learn_from_replay(
+                    replay_by_step=replay_by_order[order_idx],
+                    rng=rng,
+                    n_updates=updates_per_episode,
+                )
+                if len(evaluated) % target_sync == 0:
+                    policy.sync_target()
+
+            order_policy_stats: Dict[str, Any] = {"updates": 0, "mean_loss": None, "last_loss": None}
+            if order_policy is not None:
+                state = new_metafeatures.astype(np.float32)
+                context = order_prior.astype(np.float32)
+                order_replay.append(
+                    {
+                        "state": state,
+                        "context": context,
+                        "action": int(order_idx),
+                        "reward": float(score),
+                        "done": True,
+                        "next_state": state,
+                        "next_context": context,
+                    }
+                )
+                if len(order_replay) >= order_warmup:
+                    order_policy_stats = order_policy.learn_from_replay(
+                        replay=order_replay,
+                        rng=rng,
+                        n_updates=order_updates,
+                        batch_size=int(params.get("dqn_order_batch_size", dqn_cfg.batch_size)),
+                    )
+                    if len(order_replay) % target_sync == 0:
+                        order_policy.sync_target()
+
+            if running_best is None or score > running_best:
+                running_best = score
+            history.append(
+                {
+                    "iteration": len(evaluated),
+                    "episode_score": float(score),
+                    "best_score": running_best,
+                    "epsilon": float(max(0.0, min(1.0, eps))),
+                    "order_epsilon": float(max(0.0, min(1.0, order_eps))),
+                    "order_idx": int(order_idx),
+                    "order": list(step_order),
+                    "policy_updates": int(step_policy_stats.get("updates", 0) or 0),
+                    "policy_mean_loss": step_policy_stats.get("mean_loss"),
+                    "policy_last_loss": step_policy_stats.get("last_loss"),
+                    "order_policy_updates": int(order_policy_stats.get("updates", 0) or 0),
+                    "order_policy_mean_loss": order_policy_stats.get("mean_loss"),
+                    "order_policy_last_loss": order_policy_stats.get("last_loss"),
+                }
+            )
+
+        sorted_results = sorted(unsorted_results, key=lambda x: x[1], reverse=True)
+
+        if not sorted_results:
+            return [], [], history
+
+        return sorted_results[:n_pipelines], unsorted_results, history
 
     def recommend(
         self,
@@ -346,6 +672,8 @@ class MetaPipelineRecommender:
         order_constraints: Optional[List[Tuple[str, str]]] = None,
         optimizer: str = "aco",
         sample_budget: int = 100,
+        proxy_settings: Optional[Dict[str, Any]] = None,
+        final_autogluon_topk: int = 1,
     ) -> Dict[str, Any]:
         if metafeatures_func is None:
             raise ValueError("metafeatures_func must be provided")
@@ -400,13 +728,36 @@ class MetaPipelineRecommender:
                         target_column,
                         new_mf_scaled,
                         ordered_options,
+                        proxy_settings=proxy_settings,
                         n_pipelines=k,
                         n_ants=aco_params.get("n_ants", 10),
                         n_iterations=aco_params.get("n_iterations", 10),
                         seed=aco_seed + order_idx - 1,
+                        alpha=float(aco_params.get("alpha", 1.0)),
+                        beta=float(aco_params.get("beta", 2.0)),
+                        evaporation=float(aco_params.get("evaporation", 0.2)),
+                        dataset_weighting=str(aco_params.get("dataset_weighting", "equality")),
+                        heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
                         time_limit_per_model=time_limit_per_model,
                         metafeatures_func=metafeatures_func,
                         step_order=order,
+                    )
+                elif optimizer_name == "dqn":
+                    aco_results, aco_unsorted_res, aco_history = self._search_pipelines_dqn(
+                        new_dataset=new_dataset,
+                        target_column=target_column,
+                        new_metafeatures=new_mf_scaled,
+                        options=ordered_options,
+                        proxy_settings=proxy_settings,
+                        n_pipelines=k,
+                        sample_budget=sample_budget,
+                        seed=aco_seed + order_idx - 1,
+                        dataset_weighting=str(aco_params.get("dataset_weighting", "equality")),
+                        heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
+                        time_limit_per_model=time_limit_per_model,
+                        metafeatures_func=metafeatures_func,
+                        dqn_params=aco_params,
+                        enable_internal_order_policy=not search_ordering,
                     )
                 else:
                     aco_results, aco_unsorted_res, aco_history = self._search_pipelines_optimizer(
@@ -414,6 +765,7 @@ class MetaPipelineRecommender:
                         new_dataset=new_dataset,
                         target_column=target_column,
                         options=ordered_options,
+                        proxy_settings=proxy_settings,
                         n_pipelines=k,
                         sample_budget=sample_budget,
                         seed=aco_seed + order_idx - 1,
@@ -507,8 +859,17 @@ class MetaPipelineRecommender:
                             {
                                 "iteration": global_iteration,
                                 "best_score": hist.get("best_score"),
-                                "order_index": order_idx,
-                                "step_order": list(order),
+                                "episode_score": hist.get("episode_score"),
+                                "epsilon": hist.get("epsilon"),
+                                "order_epsilon": hist.get("order_epsilon"),
+                                "order_index": int(hist.get("order_idx", order_idx)),
+                                "step_order": hist.get("order", list(order)),
+                                "policy_updates": hist.get("policy_updates"),
+                                "policy_mean_loss": hist.get("policy_mean_loss"),
+                                "policy_last_loss": hist.get("policy_last_loss"),
+                                "order_policy_updates": hist.get("order_policy_updates"),
+                                "order_policy_mean_loss": hist.get("order_policy_mean_loss"),
+                                "order_policy_last_loss": hist.get("order_policy_last_loss"),
                             }
                         )
                         global_iteration += 1
@@ -558,10 +919,15 @@ class MetaPipelineRecommender:
             if use_autogluon:
                 if AUTOGLUON_AVAILABLE and target_column is not None:
                     try:
+                        topk = max(1, int(final_autogluon_topk))
+                        if aco_results:
+                            ag_candidates = [dict(cfg) for cfg, _sc in aco_results[:topk]]
+                        else:
+                            ag_candidates = [best_pipeline]
                         ag_best_cfg, ag_score, ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
                             new_dataset,
                             target_column,
-                            [best_pipeline],
+                            ag_candidates,
                             time_limit_per_model=time_limit_per_model,
                         )
                         if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
@@ -598,6 +964,15 @@ class MetaPipelineRecommender:
                     "selection_metric": "autogluon_quick_or_proxy" if used_order_level_scoring else "proxy",
                 },
                 "ordering_iteration_results": order_iteration_results if search_ordering else [],
+                "proxy_settings": proxy_settings or {},
+                "final_autogluon_topk": max(1, int(final_autogluon_topk)),
+                "aco_hyperparams": {
+                    "alpha": float(aco_params.get("alpha", 1.0)),
+                    "beta": float(aco_params.get("beta", 2.0)),
+                    "evaporation": float(aco_params.get("evaporation", 0.2)),
+                    "dataset_weighting": str(aco_params.get("dataset_weighting", "equality")),
+                    "heuristic_top_k": int(aco_params.get("heuristic_top_k", k)),
+                },
             }
 
         sims: List[Tuple[Any, float]] = []

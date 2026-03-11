@@ -8,13 +8,93 @@ import pandas as pd
 
 from sklearn.metrics import accuracy_score, r2_score
 from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import (
+    ExtraTreesClassifier,
+    HistGradientBoostingClassifier,
+    RandomForestClassifier,
+    RandomForestRegressor,
+)
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.svm import LinearSVC
 
 from ..data.splits import split_train_val_test
 from ..preprocessing.preprocessor import Preprocessor
 from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _normalize_proxy_settings(proxy_settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    cfg = dict(proxy_settings or {})
+    seeds = cfg.get("split_seeds", [42])
+    if isinstance(seeds, int):
+        seeds = [int(seeds)]
+    elif isinstance(seeds, (tuple, list)):
+        seeds = [int(s) for s in seeds]
+    else:
+        seeds = [42]
+    if not seeds:
+        seeds = [42]
+    cfg["split_seeds"] = seeds
+
+    cfg.setdefault("active_step_penalty", 0.0)
+    cfg.setdefault("row_drop_penalty", 0.0)
+    cfg.setdefault("imputation_low_missing_penalty", 0.0)
+    cfg.setdefault("low_missing_threshold", 0.0)
+    cfg.setdefault("outlier_removal_penalty", 0.0)
+    cfg.setdefault("dimred_small_feature_penalty", 0.0)
+    cfg.setdefault("dimred_small_feature_threshold", 0)
+    cfg.setdefault("verbose_components", False)
+    cfg.setdefault("classification_model", "logreg")
+    cfg.setdefault("regression_model", "ensemble")
+    cfg.setdefault("logreg_max_iter", 3000)
+    return cfg
+
+
+def _count_active_steps(cfg: Dict[str, Any]) -> int:
+    steps = [
+        "imputation",
+        "scaling",
+        "outlier_removal",
+        "feature_selection",
+        "dimensionality_reduction",
+    ]
+    return sum(1 for step in steps if cfg.get(step) not in (None, "none"))
+
+
+def _proxy_penalty(
+    cfg: Dict[str, Any],
+    *,
+    n_rows_before: int,
+    n_rows_after: int,
+    n_features_before: int,
+    missing_ratio: float,
+    proxy_cfg: Dict[str, Any],
+) -> float:
+    penalty = 0.0
+    penalty += float(proxy_cfg["active_step_penalty"]) * float(_count_active_steps(cfg))
+
+    row_drop = 0.0
+    if n_rows_before > 0 and n_rows_after >= 0:
+        row_drop = max(0.0, (float(n_rows_before) - float(n_rows_after)) / float(n_rows_before))
+    penalty += float(proxy_cfg["row_drop_penalty"]) * row_drop
+
+    if (
+        missing_ratio <= float(proxy_cfg["low_missing_threshold"])
+        and cfg.get("imputation") not in (None, "none")
+    ):
+        penalty += float(proxy_cfg["imputation_low_missing_penalty"])
+
+    if cfg.get("outlier_removal") not in (None, "none"):
+        penalty += float(proxy_cfg["outlier_removal_penalty"])
+
+    if (
+        cfg.get("dimensionality_reduction") not in (None, "none")
+        and n_features_before <= int(proxy_cfg["dimred_small_feature_threshold"])
+    ):
+        penalty += float(proxy_cfg["dimred_small_feature_penalty"])
+
+    return float(max(0.0, penalty))
 
 
 def _normalize_dataset(dataset: Any, target_column: str) -> pd.DataFrame:
@@ -249,11 +329,17 @@ def evaluate_candidates_simple(
     dataset: Any,
     target_column: str,
     candidate_configs: List[Dict[str, Any]],
+    proxy_settings: Optional[Dict[str, Any]] = None,
     verbose: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     df = _normalize_dataset(dataset, target_column)
     if target_column not in df.columns:
         raise ValueError(f"target_column {target_column} not found")
+
+    proxy_cfg = _normalize_proxy_settings(proxy_settings)
+    split_seeds = proxy_cfg["split_seeds"]
+    missing_ratio = float(df.drop(columns=[target_column]).isna().to_numpy().mean()) if len(df.columns) > 1 else 0.0
+    n_features_before = int(df.drop(columns=[target_column]).shape[1]) if len(df.columns) > 1 else 0
 
     y_all = df[target_column]
     problem_type, _eval_metric = _detect_problem_type(y_all)
@@ -265,6 +351,109 @@ def evaluate_candidates_simple(
 
     results: List[Tuple[Dict[str, Any], float]] = []
 
+    def _score_regression_proxy(
+        X_train_p: pd.DataFrame,
+        y_train_p: pd.Series,
+        X_val_p: pd.DataFrame,
+        y_val_p: pd.Series,
+        *,
+        model_name: str,
+    ) -> Optional[float]:
+        name = str(model_name).lower().strip()
+        models: List[Any] = []
+        if name == "linear":
+            models = [LinearRegression()]
+        elif name == "random_forest":
+            models = [RandomForestRegressor(n_estimators=100, max_depth=12, random_state=42)]
+        else:  # "ensemble" default
+            models = [
+                LinearRegression(),
+                RandomForestRegressor(n_estimators=50, max_depth=10, random_state=42),
+            ]
+
+        scores: List[float] = []
+        for model in models:
+            try:
+                model.fit(X_train_p, y_train_p)
+                pred = model.predict(X_val_p)
+                scores.append(float(r2_score(y_val_p, pred)))
+            except Exception as exc:
+                logger.debug("Regression proxy model %s failed: %s", type(model).__name__, exc)
+        if not scores:
+            return None
+        if name == "ensemble":
+            return float(np.mean(scores))
+        return float(scores[0])
+
+    def _score_classification_proxy(
+        X_train_p: pd.DataFrame,
+        y_train_p: pd.Series,
+        X_val_p: pd.DataFrame,
+        y_val_p: pd.Series,
+        *,
+        model_name: str,
+        logreg_max_iter: int,
+    ) -> Optional[float]:
+        name = str(model_name).lower().strip()
+        if name == "logreg":
+            best = -np.inf
+            for C in (0.01, 0.1, 1.0):
+                for class_weight in (None, "balanced"):
+                    try:
+                        clf = LogisticRegression(
+                            C=C,
+                            solver="lbfgs",
+                            class_weight=class_weight,
+                            max_iter=max(200, int(logreg_max_iter)),
+                            random_state=42,
+                        )
+                        clf.fit(X_train_p, y_train_p)
+                        pred = clf.predict(X_val_p)
+                        best = max(best, float(accuracy_score(y_val_p, pred)))
+                    except Exception:
+                        continue
+            if np.isfinite(best):
+                return float(best)
+            return None
+
+        if name == "linear_svm":
+            clf = LinearSVC(C=1.0, class_weight="balanced", max_iter=5000, random_state=42)
+        elif name == "random_forest":
+            clf = RandomForestClassifier(
+                n_estimators=200,
+                max_depth=None,
+                class_weight="balanced_subsample",
+                random_state=42,
+                n_jobs=-1,
+            )
+        elif name == "extra_trees":
+            clf = ExtraTreesClassifier(
+                n_estimators=300,
+                max_depth=None,
+                class_weight="balanced",
+                random_state=42,
+                n_jobs=-1,
+            )
+        elif name == "knn":
+            clf = KNeighborsClassifier(n_neighbors=7, weights="distance")
+        elif name == "hist_gbdt":
+            clf = HistGradientBoostingClassifier(
+                max_depth=None,
+                learning_rate=0.1,
+                max_iter=200,
+                random_state=42,
+            )
+        else:
+            raise ValueError(f"Unsupported classification proxy model: {model_name}")
+
+        try:
+            clf.fit(X_train_p, y_train_p)
+            pred = clf.predict(X_val_p)
+            return float(accuracy_score(y_val_p, pred))
+        except Exception as exc:
+            logger.debug("Classification proxy model %s failed: %s", type(clf).__name__, exc)
+            return None
+
     for cfg in candidate_configs:
         if "name" not in cfg or cfg.get("name") is None:
             cfg["name"] = str(cfg)
@@ -274,102 +463,114 @@ def evaluate_candidates_simple(
             X = df.drop(columns=[target_column]).copy()
             y = df[target_column].copy()
 
-            X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y)
+            seed_scores: List[float] = []
+            seed_raw_scores: List[float] = []
+            seed_penalties: List[float] = []
 
-            pre = _make_preprocessor(cfg)
-            result = pre.fit_transform(X_train, y_train)
-            if isinstance(result, tuple):
-                X_train_p, y_train_p = result
-            else:
-                X_train_p = result
-                y_train_p = y_train.reset_index(drop=True)
+            for split_seed in split_seeds:
+                X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=int(split_seed))
 
-            X_val_p = pre.transform(X_val)
-            X_test_p = pre.transform(X_test)
-
-            y_val_p = y_val.reset_index(drop=True)
-            y_test_p = y_test.reset_index(drop=True)
-
-            if X_train_p.shape[0] == 0:
-                if verbose:
-                    print(f"    ✗ {name} produced empty TRAIN data")
+                pre = _make_preprocessor(cfg)
+                result = pre.fit_transform(X_train, y_train)
+                if isinstance(result, tuple):
+                    X_train_p, y_train_p = result
                 else:
-                    logger.info("%s produced empty TRAIN data", name)
-                continue
-            if X_val_p.shape[0] == 0:
-                if verbose:
-                    print(f"    ✗ {name} produced empty VAL data")
+                    X_train_p = result
+                    y_train_p = y_train.reset_index(drop=True)
+
+                X_val_p = pre.transform(X_val)
+                X_test_p = pre.transform(X_test)
+
+                y_val_p = y_val.reset_index(drop=True)
+                y_test_p = y_test.reset_index(drop=True)
+
+                if X_train_p.shape[0] == 0:
+                    if verbose:
+                        print(f"    ✗ {name} produced empty TRAIN data")
+                    else:
+                        logger.info("%s produced empty TRAIN data", name)
+                    seed_scores = []
+                    break
+                if X_val_p.shape[0] == 0:
+                    if verbose:
+                        print(f"    ✗ {name} produced empty VAL data")
+                    else:
+                        logger.info("%s produced empty VAL data", name)
+                    seed_scores = []
+                    break
+                if X_test_p.shape[0] == 0:
+                    if verbose:
+                        print(f"    ✗ {name} produced empty TEST data")
+                    else:
+                        logger.info("%s produced empty TEST data", name)
+                    seed_scores = []
+                    break
+                if len(X_train_p) != len(y_train_p):
+                    if verbose:
+                        print(f"    ✗ {name} - TRAIN X/y length mismatch")
+                    else:
+                        logger.info("%s - TRAIN X/y length mismatch", name)
+                    seed_scores = []
+                    break
+                if len(X_val_p) != len(y_val_p):
+                    if verbose:
+                        print(f"    ✗ {name} - VAL X/y length mismatch")
+                    else:
+                        logger.info("%s - VAL X/y length mismatch", name)
+                    seed_scores = []
+                    break
+
+                if problem_type == "regression":
+                    raw_score = _score_regression_proxy(
+                        X_train_p,
+                        y_train_p,
+                        X_val_p,
+                        y_val_p,
+                        model_name=str(proxy_cfg.get("regression_model", "ensemble")),
+                    )
+                    if raw_score is None:
+                        seed_scores = []
+                        break
                 else:
-                    logger.info("%s produced empty VAL data", name)
-                continue
-            if X_test_p.shape[0] == 0:
-                if verbose:
-                    print(f"    ✗ {name} produced empty TEST data")
-                else:
-                    logger.info("%s produced empty TEST data", name)
-                continue
-            if len(X_train_p) != len(y_train_p):
-                if verbose:
-                    print(f"    ✗ {name} - TRAIN X/y length mismatch")
-                else:
-                    logger.info("%s - TRAIN X/y length mismatch", name)
-                continue
-            if len(X_val_p) != len(y_val_p):
-                if verbose:
-                    print(f"    ✗ {name} - VAL X/y length mismatch")
-                else:
-                    logger.info("%s - VAL X/y length mismatch", name)
+                    raw_score = _score_classification_proxy(
+                        X_train_p,
+                        y_train_p,
+                        X_val_p,
+                        y_val_p,
+                        model_name=str(proxy_cfg.get("classification_model", "logreg")),
+                        logreg_max_iter=int(proxy_cfg.get("logreg_max_iter", 3000)),
+                    )
+                    if raw_score is None:
+                        seed_scores = []
+                        break
+
+                penalty = _proxy_penalty(
+                    cfg=cfg,
+                    n_rows_before=len(X_train),
+                    n_rows_after=len(X_train_p),
+                    n_features_before=n_features_before,
+                    missing_ratio=missing_ratio,
+                    proxy_cfg=proxy_cfg,
+                )
+                adjusted_score = float(raw_score - penalty)
+                seed_raw_scores.append(raw_score)
+                seed_penalties.append(penalty)
+                seed_scores.append(adjusted_score)
+
+            if not seed_scores:
                 continue
 
-            if problem_type == "regression":
-                models = [
-                    LinearRegression(),
-                    RandomForestRegressor(n_estimators=50, max_depth=10, random_state=42),
-                ]
-                scores = []
-                for model in models:
-                    try:
-                        model.fit(X_train_p, y_train_p)
-                        pred = model.predict(X_val_p)
-                        scores.append(r2_score(y_val_p, pred))
-                    except Exception as exc:
-                        logger.debug("Model %s failed: %s", type(model).__name__, exc)
-                if not scores:
-                    continue
-                score = float(np.mean(scores))
-            else:
-                logreg_grid = {
-                    "C": [0.01, 0.1, 1.0],
-                    "solver": ["lbfgs"],
-                    "class_weight": [None, "balanced"],
-                }
-                scores = []
-                for C in logreg_grid["C"]:
-                    for solver in logreg_grid["solver"]:
-                        for cw in logreg_grid["class_weight"]:
-                            try:
-                                clf = LogisticRegression(
-                                    C=C,
-                                    solver=solver,
-                                    penalty="l2",
-                                    multi_class="auto",
-                                    class_weight=cw,
-                                    max_iter=1000,
-                                    n_jobs=-1,
-                                    random_state=42,
-                                )
-                                clf.fit(X_train_p, y_train_p)
-                                pred = clf.predict(X_val_p)
-                                scores.append(accuracy_score(y_val_p, pred))
-                            except Exception:
-                                pass
-                if not scores:
-                    continue
-                score = float(max(scores))
-
+            score = float(np.mean(seed_scores))
             results.append((cfg, score))
             if verbose:
-                print(f"    ✓ {name} -> {score:.4f}")
+                if proxy_cfg.get("verbose_components", False):
+                    print(
+                        f"    ✓ {name} -> {score:.4f} "
+                        f"(raw={np.mean(seed_raw_scores):.4f}, penalty={np.mean(seed_penalties):.4f}, "
+                        f"seeds={len(seed_scores)})"
+                    )
+                else:
+                    print(f"    ✓ {name} -> {score:.4f}")
         except Exception as exc:
             if verbose:
                 print(f"    ✗ Error evaluating cfg {name}: {exc}")
@@ -378,7 +579,7 @@ def evaluate_candidates_simple(
             continue
 
     if not results:
-        if verbose:
+        if verbose and len(candidate_configs) > 1:
             print("❌ No candidate produced valid evaluation results")
         return None, np.nan, [], []
 
