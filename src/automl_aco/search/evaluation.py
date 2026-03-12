@@ -19,6 +19,7 @@ from sklearn.svm import LinearSVC
 
 from ..data.splits import split_train_val_test
 from ..preprocessing.preprocessor import Preprocessor
+from ..utils.operator_spec import base_operator_name
 from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -340,6 +341,7 @@ def evaluate_candidates_simple(
     split_seeds = proxy_cfg["split_seeds"]
     missing_ratio = float(df.drop(columns=[target_column]).isna().to_numpy().mean()) if len(df.columns) > 1 else 0.0
     n_features_before = int(df.drop(columns=[target_column]).shape[1]) if len(df.columns) > 1 else 0
+    has_missing = bool(missing_ratio > 0.0)
 
     y_all = df[target_column]
     problem_type, _eval_metric = _detect_problem_type(y_all)
@@ -459,6 +461,13 @@ def evaluate_candidates_simple(
             cfg["name"] = str(cfg)
         name = cfg["name"]
 
+        # Fast reject: this search space does not include NaN-tolerant downstream estimators.
+        # If data has missing values and no imputation is selected, the config is invalid by design.
+        if has_missing and base_operator_name(cfg.get("imputation", "none")) == "none":
+            if verbose:
+                print(f"    ✗ {name} skipped: missing values require non-'none' imputation")
+            continue
+
         try:
             X = df.drop(columns=[target_column]).copy()
             y = df[target_column].copy()
@@ -575,7 +584,7 @@ def evaluate_candidates_simple(
             if verbose:
                 print(f"    ✗ Error evaluating cfg {name}: {exc}")
             else:
-                logger.exception("Error evaluating cfg %s: %s", name, exc)
+                logger.warning("Error evaluating cfg %s: %s", name, exc)
             continue
 
     if not results:

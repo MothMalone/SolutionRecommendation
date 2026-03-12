@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.metrics.pairwise import cosine_similarity
 
 from ..utils.logging import get_logger
+from ..utils.operator_spec import base_operator_name
 
 logger = get_logger(__name__)
 
@@ -87,10 +88,14 @@ def compute_aco_heuristic(
     for step, values in options.items():
         arr = [eps] * len(values)
         for i, val in enumerate(values):
+            val_base = base_operator_name(val)
             matched = [
                 perf_val
                 for pname, perf_val in pipeline_perf_mean.items()
-                if (cfg_map.get(pname) is not None and cfg_map[pname].get(step) == val)
+                if (
+                    cfg_map.get(pname) is not None
+                    and base_operator_name(cfg_map[pname].get(step)) == val_base
+                )
             ]
             if matched:
                 arr[i] = float(np.mean(matched)) + eps

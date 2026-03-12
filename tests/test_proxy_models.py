@@ -48,3 +48,22 @@ def test_proxy_classification_models_run():
         assert best_cfg is not None
         assert results
         assert np.isfinite(best_score)
+
+
+def test_missing_data_with_no_imputation_is_fast_rejected():
+    dataset = _make_dataset()
+    dataset.loc[:10, "f0"] = np.nan
+    cfg = _base_cfg()
+    cfg["imputation"] = "none"
+
+    best_cfg, best_score, results, _unsorted = evaluate_candidates_simple(
+        dataset=dataset,
+        target_column="target",
+        candidate_configs=[cfg],
+        proxy_settings={"classification_model": "logreg", "split_seeds": [42]},
+        verbose=False,
+    )
+
+    assert best_cfg is None
+    assert not results
+    assert np.isnan(best_score)

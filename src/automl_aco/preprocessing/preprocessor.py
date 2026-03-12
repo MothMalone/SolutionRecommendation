@@ -21,6 +21,7 @@ except Exception:  # pragma: no cover - optional dependency
     ce = None
 
 from ..config import DEFAULT_PREPROCESSOR_ORDER
+from ..utils.operator_spec import parse_operator_spec
 
 
 class Preprocessor:
@@ -156,11 +157,17 @@ class Preprocessor:
         return pd.DataFrame(arr, index=index, columns=recovered_cols)
 
     def _fit_imputation(self, X_num, X_cat):
-        method = self.config["imputation"]
+        method_raw = self.config["imputation"]
+        method, params = parse_operator_spec(method_raw)
 
         if X_num is not None and method != "none":
             if method == "knn":
-                self.num_imputer = KNNImputer(n_neighbors=min(5, len(X_num) - 1))
+                try:
+                    k = int(float(params.get("k", 5)))
+                except Exception:
+                    k = 5
+                k = max(1, k)
+                self.num_imputer = KNNImputer(n_neighbors=min(k, len(X_num) - 1))
             elif method in ["mean", "median", "most_frequent", "constant"]:
                 self.num_imputer = SimpleImputer(strategy=method)
             else:
@@ -206,7 +213,8 @@ class Preprocessor:
     # 2. Outlier removal
     # -----------------------------
     def _fit_outlier_removal(self, X_num, X_cat, y):
-        method = self.config["outlier_removal"]
+        method_raw = self.config["outlier_removal"]
+        method, params = parse_operator_spec(method_raw)
         if X_num is None or method == "none":
             return X_num, X_cat, y
 
@@ -218,20 +226,38 @@ class Preprocessor:
             y = y.reset_index(drop=True)
 
         if method == "iqr":
+            try:
+                iqr_k = float(params.get("k", 1.5))
+            except Exception:
+                iqr_k = 1.5
             mask = pd.Series(True, index=X_num.index)
             for col in X_num.columns:
                 q1, q3 = X_num[col].quantile([0.25, 0.75])
                 iqr = q3 - q1
                 if iqr > 0:
-                    mask &= (X_num[col] >= q1 - 1.5 * iqr) & (X_num[col] <= q3 + 1.5 * iqr)
+                    mask &= (X_num[col] >= q1 - iqr_k * iqr) & (X_num[col] <= q3 + iqr_k * iqr)
         elif method == "zscore":
+            try:
+                z_thr = float(params.get("z", 3.0))
+            except Exception:
+                z_thr = 3.0
             z = np.abs(zscore(X_num))
-            mask = pd.Series((z < 3).all(axis=1), index=X_num.index)
+            mask = pd.Series((z < z_thr).all(axis=1), index=X_num.index)
         elif method == "lof":
-            lof = LocalOutlierFactor(n_neighbors=20)
+            try:
+                lof_n = int(float(params.get("n", 20)))
+            except Exception:
+                lof_n = 20
+            lof_n = max(2, min(lof_n, max(2, len(X_num) - 1)))
+            lof = LocalOutlierFactor(n_neighbors=lof_n)
             mask = pd.Series(lof.fit_predict(X_num) == 1, index=X_num.index)
         elif method == "isolation_forest":
-            iso = IsolationForest(contamination=0.05, random_state=42)
+            try:
+                contamination = float(params.get("c", params.get("contamination", 0.05)))
+            except Exception:
+                contamination = 0.05
+            contamination = float(np.clip(contamination, 1e-4, 0.5))
+            iso = IsolationForest(contamination=contamination, random_state=42)
             mask = pd.Series(iso.fit_predict(X_num) == 1, index=X_num.index)
         else:
             mask = pd.Series(True, index=X_num.index)
@@ -345,10 +371,9 @@ class Preprocessor:
     # 3. Encoding
     # -----------------------------
     def _fit_encoding(self, X_cat):
-        if X_cat is None or self.config["encoding"] == "none":
+        method, _params = parse_operator_spec(self.config["encoding"])
+        if X_cat is None or method == "none":
             return X_cat
-
-        method = self.config["encoding"]
 
         if method == "onehot":
             try:
@@ -393,7 +418,8 @@ class Preprocessor:
     # 4. Feature selection
     # -----------------------------
     def _fit_feature_selection(self, X_num, X_cat, y):
-        fs = self.config["feature_selection"]
+        fs_raw = self.config["feature_selection"]
+        fs, params = parse_operator_spec(fs_raw)
 
         self.selector = None
         self.selected_columns_ = None
@@ -422,10 +448,19 @@ class Preprocessor:
             self.cat_columns_ = X_cat.columns
 
         if fs == "variance_threshold":
-            self.selector = VarianceThreshold(threshold=0.01)
+            try:
+                threshold = float(params.get("t", params.get("threshold", 0.01)))
+            except Exception:
+                threshold = 0.01
+            threshold = max(0.0, threshold)
+            self.selector = VarianceThreshold(threshold=threshold)
             self.selector.fit(X_all)
         else:
-            k = min(20, X_all.shape[1])
+            try:
+                k = int(float(params.get("k", 20)))
+            except Exception:
+                k = 20
+            k = max(1, min(k, X_all.shape[1]))
             if fs == "k_best":
                 self.selector = SelectKBest(f_classif, k=k)
                 self.selector.fit(X_all, y.values.ravel())
@@ -492,7 +527,7 @@ class Preprocessor:
     # 5. Scaling
     # -----------------------------
     def _fit_scaling(self, X):
-        method = self.config["scaling"]
+        method, _params = parse_operator_spec(self.config["scaling"])
         if X is None or method == "none":
             return X
 
@@ -516,12 +551,17 @@ class Preprocessor:
     # 6. Dimensionality Reduction
     # -----------------------------
     def _fit_dim_reduction(self, X):
-        dr = self.config["dimensionality_reduction"]
+        dr_raw = self.config["dimensionality_reduction"]
+        dr, params = parse_operator_spec(dr_raw)
         if X is None or dr == "none" or X.shape[1] <= 1 or len(X) < 2:
             self.reducer = None
             return X
 
-        n_components = min(10, X.shape[1], len(X) - 1)
+        try:
+            requested_n = int(float(params.get("n", 10)))
+        except Exception:
+            requested_n = 10
+        n_components = max(1, min(requested_n, X.shape[1], len(X) - 1))
 
         if dr == "pca":
             self.reducer = PCA(n_components=n_components)

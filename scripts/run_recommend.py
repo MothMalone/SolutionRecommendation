@@ -38,6 +38,7 @@ from automl_aco.data.loaders import (
 )
 from automl_aco.data.metafeatures import extract_enhanced_metafeatures
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
+from automl_aco.utils.operator_spec import base_operator_name
 from automl_aco.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
@@ -255,6 +256,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Apply dataset-specific option constraints only when dataset_id=378. "
             "Use conservative or scaling_only to reduce over-processing risk."
         ),
+    )
+    parser.add_argument(
+        "--operator-param-search",
+        action="store_true",
+        help="Enable parameterized operator tokens (e.g., knn@k=7, pca@n=20) in search space.",
+    )
+    parser.add_argument(
+        "--operator-param-grid",
+        choices=["light", "full"],
+        default="light",
+        help="Grid size for parameterized operator search.",
     )
     parser.add_argument("--verbose", action="store_true", help="Match notebook-style progress output")
     return parser
@@ -521,6 +533,57 @@ def main() -> None:
         # Copy lists so per-run constraints do not mutate global defaults.
         options = {step: list(vals) for step, vals in DEFAULT_PIPELINE_OPTIONS.items()}
         profile_note = None
+
+        if args.operator_param_search:
+            # Parameterized operator tokens remain discrete choices and are scored inline by the same proxy.
+            if args.operator_param_grid == "full":
+                options["imputation"] = [
+                    "none", "mean", "median", "most_frequent", "constant",
+                    "knn@k=3", "knn@k=5", "knn@k=7", "knn@k=11",
+                ]
+                options["outlier_removal"] = [
+                    "none",
+                    "iqr@k=1.0", "iqr@k=1.5", "iqr@k=2.0",
+                    "zscore@z=2.5", "zscore@z=3.0", "zscore@z=3.5",
+                    "lof@n=10", "lof@n=20", "lof@n=30",
+                    "isolation_forest@c=0.02", "isolation_forest@c=0.05", "isolation_forest@c=0.1",
+                ]
+                options["feature_selection"] = [
+                    "none",
+                    "variance_threshold@t=0.0", "variance_threshold@t=0.01", "variance_threshold@t=0.05",
+                    "k_best@k=10", "k_best@k=20", "k_best@k=40",
+                    "mutual_info@k=10", "mutual_info@k=20", "mutual_info@k=40",
+                ]
+                options["dimensionality_reduction"] = [
+                    "none",
+                    "pca@n=5", "pca@n=10", "pca@n=20",
+                    "svd@n=5", "svd@n=10", "svd@n=20",
+                ]
+            else:
+                options["imputation"] = [
+                    "none", "mean", "median", "most_frequent", "constant",
+                    "knn@k=3", "knn@k=7",
+                ]
+                options["outlier_removal"] = [
+                    "none",
+                    "iqr@k=1.5",
+                    "zscore@z=3.0",
+                    "lof@n=20",
+                    "isolation_forest@c=0.05",
+                ]
+                options["feature_selection"] = [
+                    "none",
+                    "variance_threshold@t=0.01",
+                    "k_best@k=20",
+                    "mutual_info@k=20",
+                ]
+                options["dimensionality_reduction"] = [
+                    "none",
+                    "pca@n=10",
+                    "svd@n=10",
+                ]
+            profile_note = f"operator_param_search={args.operator_param_grid}"
+
         if args.dataset378_profile == "off":
             return options, profile_note
 
@@ -555,6 +618,19 @@ def main() -> None:
             return options, profile_note
 
         return options, profile_note
+
+    def _adapt_options_to_dataset(options: dict, X: pd.DataFrame):
+        notes = []
+        out = {k: list(v) for k, v in options.items()}
+        has_missing = bool(X.isna().to_numpy().any())
+        if has_missing and "imputation" in out:
+            before = len(out["imputation"])
+            out["imputation"] = [v for v in out["imputation"] if base_operator_name(v) != "none"]
+            if len(out["imputation"]) == 0:
+                out["imputation"] = ["mean"]
+            if len(out["imputation"]) != before:
+                notes.append("removed imputation=none (dataset has missing values)")
+        return out, notes
 
     def _build_proxy_settings() -> dict:
         if args.proxy_profile == "robust":
@@ -625,9 +701,6 @@ def main() -> None:
             print(f"\n=== Dataset {dataset_id} ({run_idx}/{n_runs}) ===")
 
         run_start = time.perf_counter()
-        run_options, run_profile_note = _build_run_options(dataset_id)
-        if run_profile_note:
-            print(f"  Applied profile: {run_profile_note}")
         try:
             dataset = _load_dataset_for_run(dataset_id)
             if dataset is None or "X" not in dataset or "y" not in dataset:
@@ -635,6 +708,12 @@ def main() -> None:
 
             X = dataset["X"]
             y = dataset["y"]
+            run_options, run_profile_note = _build_run_options(dataset_id)
+            run_options, run_option_notes = _adapt_options_to_dataset(run_options, X)
+            if run_profile_note:
+                print(f"  Applied profile: {run_profile_note}")
+            for note in run_option_notes:
+                print(f"  Auto option guard: {note}")
             test_dataset_df = X.copy()
             test_dataset_df["target"] = y
 
@@ -735,6 +814,8 @@ def main() -> None:
             "proxy_reg_model": str(proxy_settings.get("regression_model")),
             "proxy_split_seeds": list(proxy_settings.get("split_seeds", [])),
             "proxy_profile": str(args.proxy_profile),
+            "operator_param_search": bool(args.operator_param_search),
+            "operator_param_grid": str(args.operator_param_grid),
         }
         with open(rec_path, "w", encoding="utf-8") as f:
             json.dump(recommendation, f, indent=2, default=str)
@@ -756,8 +837,10 @@ def main() -> None:
 
         print("\nFinal recommendation")
         print(f"  Dataset: {dataset_tag}")
-        if run_profile_note:
-            print(f"  Profile: {args.dataset378_profile}")
+        if args.dataset378_profile != "off":
+            print(f"  Dataset378 profile: {args.dataset378_profile}")
+        if args.operator_param_search:
+            print(f"  Operator-param profile: {args.operator_param_grid}")
         print(f"  Pipeline: {_format_pipeline(pipeline_cfg)}")
         if proxy_score is not None:
             print(f"  Proxy score: {float(proxy_score):.4f}")

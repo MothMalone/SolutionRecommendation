@@ -67,3 +67,34 @@ def test_heuristic_similarity_top_k_prefers_nearest_dataset():
     )
 
     assert eta["imputation"][0] > eta["imputation"][1]
+
+
+def test_heuristic_matches_parameterized_operator_to_base_history():
+    performance_matrix = pd.DataFrame(
+        [[0.9, 0.8], [0.3, 0.2]],
+        index=["p_knn", "p_none"],
+        columns=["d1", "d2"],
+    )
+    metafeatures_df = pd.DataFrame(
+        [[0.0, 1.0], [0.0, 1.0]],
+        index=["d1", "d2"],
+        columns=["f1", "f2"],
+    )
+    pipeline_configs = [
+        {"name": "p_knn", "imputation": "knn"},
+        {"name": "p_none", "imputation": "none"},
+    ]
+    options = {"imputation": ["none", "knn@k=3", "knn@k=7"]}
+
+    eta = compute_aco_heuristic(
+        performance_matrix=performance_matrix,
+        metafeatures_df=metafeatures_df,
+        pipeline_configs=pipeline_configs,
+        options=options,
+        new_metafeatures=np.array([0.0, 1.0], dtype=float),
+        dataset_weighting="equality",
+        use_top_pipelines_from_metric=False,
+    )
+
+    assert eta["imputation"][1] > eta["imputation"][0]
+    assert eta["imputation"][2] > eta["imputation"][0]
