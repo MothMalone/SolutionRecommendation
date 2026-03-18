@@ -101,11 +101,16 @@ class MetaPipelineRecommender:
         self.pipeline_configs = pipeline_configs
         self.pipeline_options = pipeline_options or dict(DEFAULT_PIPELINE_OPTIONS)
 
+        self.metafeatures_df = self._sanitize_numeric_frame(self.metafeatures_df, frame_name="metafeatures")
+        self.performance_matrix = self._sanitize_numeric_frame(self.performance_matrix, frame_name="performance_matrix")
+
         if self.performance_matrix.notna().sum().sum() == 0:
             raise ValueError(
                 "Performance matrix has no scores for the aligned datasets. "
                 "This usually means the metafeatures file does not match the performance matrix dataset IDs."
             )
+        if self.metafeatures_df.notna().sum().sum() == 0:
+            raise ValueError("Metafeatures are all missing/non-finite after numeric sanitization.")
 
         self.imputer = SimpleImputer(strategy="mean")
         self.scaler = MinMaxScaler()
@@ -123,6 +128,17 @@ class MetaPipelineRecommender:
         self.projector = None
         self.metric_type = None
         self.metric_params = None
+
+    def _sanitize_numeric_frame(self, frame: pd.DataFrame, frame_name: str) -> pd.DataFrame:
+        """Coerce to numeric and replace non-finite values so sklearn imputers can fit safely."""
+        numeric = frame.apply(pd.to_numeric, errors="coerce")
+        inf_mask = np.isinf(numeric.to_numpy(dtype=float, copy=False))
+        inf_count = int(inf_mask.sum())
+        if inf_count:
+            numeric = numeric.replace([np.inf, -np.inf], np.nan)
+        if self.verbose and inf_count:
+            print(f"Sanitized {inf_count} inf values in {frame_name} -> NaN")
+        return numeric
 
     def encode_pipeline_config(self, pipe_config: Dict[str, Any], options: Optional[Dict[str, List[str]]] = None) -> np.ndarray:
         opts = options or self.pipeline_options

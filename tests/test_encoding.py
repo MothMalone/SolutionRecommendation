@@ -15,3 +15,14 @@ def test_encode_pipeline_config():
 
     expected = np.array([0, 1, 1, 0], dtype=float)
     assert np.array_equal(encoding, expected)
+
+
+def test_recommender_sanitizes_infinite_metafeatures():
+    perf = pd.DataFrame([[0.8, 0.7]], index=["p1"], columns=[1, 2])
+    meta = pd.DataFrame(
+        [[np.inf, 0.2], [0.2, -np.inf]],
+        index=[1, 2],
+        columns=["f1", "f2"],
+    )
+    recommender = MetaPipelineRecommender(perf, meta, pipeline_configs=[{"name": "p1"}])
+    assert np.isfinite(recommender.metafeatures_imputed).all()
