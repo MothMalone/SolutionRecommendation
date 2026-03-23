@@ -50,6 +50,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metafeatures", required=False, help="Path to metafeatures CSV")
     parser.add_argument("--pipeline-configs", required=False, help="Path to pipeline configs JSON")
     parser.add_argument(
+        "--pipeline-override",
+        required=False,
+        help=(
+            "Comma-separated step=choice list to force the pipeline. "
+            "Example: imputation=none,encoding=none,scaling=standard,outlier_removal=iqr,"
+            "feature_selection=k_best,dimensionality_reduction=pca"
+        ),
+    )
+    parser.add_argument(
         "--dataset-source",
         choices=["openml", "kaggle", "csv", "dummy"],
         default=None,
@@ -286,6 +295,24 @@ def main() -> None:
             warnings.filterwarnings("ignore", category=RuntimeWarning, module="sklearn")
         except Exception:
             pass
+
+    def _parse_pipeline_override(raw: Optional[str]) -> Optional[dict]:
+        if raw is None:
+            return None
+        parsed = {}
+        for token in str(raw).split(","):
+            if "=" not in token:
+                continue
+            step, val = token.split("=", 1)
+            step = step.strip()
+            val = val.strip()
+            if step:
+                parsed[step] = val
+        return parsed or None
+
+    pipeline_override = _parse_pipeline_override(getattr(args, "pipeline_override", None))
+    if pipeline_override and args.verbose:
+        print(f"Pipeline override: {pipeline_override}")
 
     use_kaggle = args.kaggle or os.path.isdir("/kaggle/working")
 
@@ -534,6 +561,12 @@ def main() -> None:
         options = {step: list(vals) for step, vals in DEFAULT_PIPELINE_OPTIONS.items()}
         profile_note = None
 
+        if pipeline_override:
+            for step, choice in pipeline_override.items():
+                options[step] = [choice]
+            profile_note = "pipeline_override"
+            return options, profile_note
+
         if args.operator_param_search:
             # Parameterized operator tokens remain discrete choices and are scored inline by the same proxy.
             if args.operator_param_grid == "full":
@@ -620,6 +653,8 @@ def main() -> None:
         return options, profile_note
 
     def _adapt_options_to_dataset(options: dict, X: pd.DataFrame):
+        if pipeline_override:
+            return {k: list(v) for k, v in options.items()}, []
         notes = []
         out = {k: list(v) for k, v in options.items()}
         has_missing = bool(X.isna().to_numpy().any())
@@ -680,7 +715,13 @@ def main() -> None:
     search_enabled = args.use_aco or args.optimizer != "aco"
     proxy_settings = _build_proxy_settings()
     heuristic_top_k = int(args.heuristic_top_k) if args.heuristic_top_k is not None else int(args.k)
-    if args.optimizer != "aco" and not args.use_aco and args.verbose:
+    if args.optimizer == "aco" and not args.use_aco:
+        # Legacy behavior required --use-aco even when optimizer=aco.
+        # Auto-enable to match user intent and avoid accidental prediction-only runs.
+        search_enabled = True
+        if args.verbose:
+            print("Info: optimizer=aco selected; enabling search flow (legacy --use-aco is optional).")
+    elif args.optimizer != "aco" and not args.use_aco and args.verbose:
         print("Info: --optimizer is non-ACO, enabling search flow (same as --use-aco).")
     if args.verbose:
         print(
@@ -884,11 +925,29 @@ def main() -> None:
 
     if n_runs > 1:
         ok_runs = [r for r in run_summaries if r.get("status") == "ok"]
-        avg_time = float(np.mean([r["elapsed_seconds"] for r in ok_runs])) if ok_runs else None
-        avg_proxy = float(np.mean([r["proxy_score"] for r in ok_runs if isinstance(r.get("proxy_score"), (int, float))])) if ok_runs else None
-        avg_final = float(np.mean([r["final_score"] for r in ok_runs if isinstance(r.get("final_score"), (int, float))])) if ok_runs else None
-        ag_runs = [r for r in ok_runs if r.get("final_method") == "autogluon" and isinstance(r.get("final_score"), (int, float))]
-        avg_ag = float(np.mean([r["final_score"] for r in ag_runs])) if ag_runs else None
+        times = [r["elapsed_seconds"] for r in ok_runs if isinstance(r.get("elapsed_seconds"), (int, float))]
+        proxy_scores = [
+            r["proxy_score"]
+            for r in ok_runs
+            if isinstance(r.get("proxy_score"), (int, float)) and np.isfinite(r.get("proxy_score"))
+        ]
+        final_scores = [
+            r["final_score"]
+            for r in ok_runs
+            if isinstance(r.get("final_score"), (int, float)) and np.isfinite(r.get("final_score"))
+        ]
+        ag_scores = [
+            r["final_score"]
+            for r in ok_runs
+            if r.get("final_method") == "autogluon"
+            and isinstance(r.get("final_score"), (int, float))
+            and np.isfinite(r.get("final_score"))
+        ]
+
+        avg_time = float(np.mean(times)) if times else None
+        avg_proxy = float(np.mean(proxy_scores)) if proxy_scores else None
+        avg_final = float(np.mean(final_scores)) if final_scores else None
+        avg_ag = float(np.mean(ag_scores)) if ag_scores else None
 
         aggregate = {
             "num_requested": n_runs,
