@@ -33,6 +33,36 @@ except Exception:  # pragma: no cover
     AUTOGLUON_AVAILABLE = False
 
 
+def _autogluon_runtime_error() -> Optional[str]:
+    try:
+        import numpy as _np
+    except Exception as exc:
+        return f"NumPy import failed: {exc}"
+    try:
+        major = int(str(_np.__version__).split(".")[0])
+    except Exception:
+        major = 0
+    if major >= 2:
+        return f"AutoGluon requires NumPy < 2.0 (found {_np.__version__})"
+    try:
+        from autogluon.tabular import TabularPredictor as _TabularPredictor  # noqa: F401
+        from autogluon.features.generators import IdentityFeatureGenerator as _IdentityFeatureGenerator  # noqa: F401
+    except Exception as exc:
+        return str(exc)
+    return None
+
+
+def _is_autogluon_unavailable_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    markers = (
+        "autogluon not available",
+        "requires numpy < 2.0",
+        "no module named 'autogluon'",
+        "numpy<2",
+    )
+    return any(m in msg for m in markers)
+
+
 class MetaPipelineRecommender:
     def __init__(
         self,
@@ -768,6 +798,16 @@ class MetaPipelineRecommender:
 
         options = options or self.pipeline_options
         aco_params = aco_params or {}
+        require_autogluon = bool(aco_params.get("require_autogluon", True))
+
+        if use_autogluon and require_autogluon:
+            ag_err = _autogluon_runtime_error()
+            if ag_err is not None:
+                raise RuntimeError(
+                    "AutoGluon is required for evaluation but is unavailable. "
+                    f"Reason: {ag_err}. "
+                    "Install compatible dependencies (e.g., requirements-kaggle.txt) and retry."
+                )
 
         new_mf = metafeatures_func(new_dataset)
         new_mf_df = pd.DataFrame([new_mf]).reindex(columns=self.metafeatures_df.columns, fill_value=0)
@@ -777,6 +817,7 @@ class MetaPipelineRecommender:
         if use_aco:
             base_order = list(options.keys())
             aco_seed = int(aco_params.get("seed", 42))
+            autogluon_runtime_enabled = bool(AUTOGLUON_AVAILABLE)
             optimizer_name = optimizer.lower().strip()
             if optimizer_name == "":
                 optimizer_name = "aco"
@@ -802,7 +843,7 @@ class MetaPipelineRecommender:
             run_quick_order_eval = bool(
                 search_ordering
                 and use_autogluon
-                and AUTOGLUON_AVAILABLE
+                and autogluon_runtime_enabled
                 and target_column is not None
             )
             quick_order_eval_time_limit = int(aco_params.get("ordering_quick_time_limit", 30))
@@ -910,17 +951,37 @@ class MetaPipelineRecommender:
                             order_autogluon_error = "No valid quick AutoGluon result"
                     except Exception as exc:
                         order_autogluon_error = str(exc)
-                        if self.verbose:
-                            print(
-                                f"Ordering Iter {order_idx}/{len(candidate_orders)} "
-                                f"quick AutoGluon failed: {exc}"
-                            )
+                        if _is_autogluon_unavailable_error(exc):
+                            if require_autogluon:
+                                raise RuntimeError(
+                                    "AutoGluon is required but unavailable during quick ordering evaluation. "
+                                    f"Reason: {exc}"
+                                ) from exc
+                            autogluon_runtime_enabled = False
+                            run_quick_order_eval = False
+                            if self.verbose:
+                                print(
+                                    f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                    "quick AutoGluon unavailable; continuing with proxy-only ordering."
+                                )
+                            else:
+                                logger.info(
+                                    "Quick AutoGluon unavailable for ordering iteration %s; "
+                                    "continuing with proxy-only ordering.",
+                                    order_idx,
+                                )
                         else:
-                            logger.warning(
-                                "Quick AutoGluon failed for ordering iteration %s: %s",
-                                order_idx,
-                                exc,
-                            )
+                            if self.verbose:
+                                print(
+                                    f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                    f"quick AutoGluon failed: {exc}"
+                                )
+                            else:
+                                logger.warning(
+                                    "Quick AutoGluon failed for ordering iteration %s: %s",
+                                    order_idx,
+                                    exc,
+                                )
 
                 order_selection_score = (
                     order_autogluon_score
@@ -1017,7 +1078,7 @@ class MetaPipelineRecommender:
 
             final_eval = {"method": "proxy", "score": float(best_score)}
             if use_autogluon:
-                if AUTOGLUON_AVAILABLE and target_column is not None:
+                if autogluon_runtime_enabled and target_column is not None:
                     try:
                         topk = max(1, int(final_autogluon_topk))
                         if aco_results:
@@ -1040,8 +1101,41 @@ class MetaPipelineRecommender:
                                 "error": "No candidate produced valid AutoGluon evaluation results",
                             }
                     except Exception as exc:
-                        logger.warning("AutoGluon final evaluation failed: %s", exc)
-                        final_eval = {"method": "autogluon_failed", "score": float(best_score), "error": str(exc)}
+                        if _is_autogluon_unavailable_error(exc):
+                            if require_autogluon:
+                                raise RuntimeError(
+                                    "AutoGluon is required but unavailable during final evaluation. "
+                                    f"Reason: {exc}"
+                                ) from exc
+                            autogluon_runtime_enabled = False
+                            if self.verbose:
+                                print("Final AutoGluon unavailable; falling back to simple-model final evaluation.")
+                            else:
+                                logger.info(
+                                    "AutoGluon unavailable at final evaluation; "
+                                    "falling back to simple-model final evaluation."
+                                )
+                            topk = max(1, int(final_autogluon_topk))
+                            if aco_results:
+                                fallback_candidates = [dict(cfg) for cfg, _sc in aco_results[:topk]]
+                            else:
+                                fallback_candidates = [best_pipeline]
+                            simple_best_cfg, simple_best_score, simple_all, _simple_unsorted = (
+                                self._evaluate_candidates_with_simple_models(
+                                    new_dataset,
+                                    target_column,
+                                    fallback_candidates,
+                                    proxy_settings=proxy_settings,
+                                )
+                            )
+                            if simple_best_cfg is not None and simple_all and np.isfinite(simple_best_score):
+                                best_pipeline = simple_best_cfg
+                                final_eval = {"method": "simple_models_fallback", "score": float(simple_best_score)}
+                            else:
+                                final_eval = {"method": "autogluon_unavailable", "score": float(best_score), "error": str(exc)}
+                        else:
+                            logger.warning("AutoGluon final evaluation failed: %s", exc)
+                            final_eval = {"method": "autogluon_failed", "score": float(best_score), "error": str(exc)}
                 else:
                     final_eval = {"method": "autogluon_unavailable", "score": float(best_score)}
             return {
@@ -1081,6 +1175,7 @@ class MetaPipelineRecommender:
                         aco_params.get("heuristic_transfer_method", "weighted_topk_topl")
                     ),
                     "score_direction": str(aco_params.get("score_direction", "higher_is_better")),
+                    "require_autogluon": bool(aco_params.get("require_autogluon", True)),
                 },
             }
 

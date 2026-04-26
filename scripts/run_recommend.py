@@ -297,6 +297,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Re-evaluate top-k proxy pipelines with final AutoGluon (default: 1)",
     )
     parser.add_argument(
+        "--require-autogluon",
+        dest="require_autogluon",
+        action="store_true",
+        help="Require AutoGluon for evaluation and fail fast if unavailable (default).",
+    )
+    parser.add_argument(
+        "--allow-autogluon-fallback",
+        dest="require_autogluon",
+        action="store_false",
+        help="Allow fallback to simple-model final evaluation if AutoGluon is unavailable.",
+    )
+    parser.set_defaults(require_autogluon=True)
+    parser.add_argument(
         "--dataset378-profile",
         choices=["off", "conservative", "scaling_only"],
         default="off",
@@ -781,6 +794,7 @@ def main() -> None:
             f"sim_temperature={float(args.heuristic_similarity_temperature)}, "
             f"eta_floor={float(args.heuristic_eta_floor)}, "
             f"score_direction={args.score_direction}, "
+            f"require_autogluon={bool(args.require_autogluon)}, "
             f"proxy_clf_model={proxy_settings.get('classification_model')}, "
             f"proxy_reg_model={proxy_settings.get('regression_model')}"
         )
@@ -831,6 +845,7 @@ def main() -> None:
                     "heuristic_similarity_temperature": float(args.heuristic_similarity_temperature),
                     "heuristic_eta_floor": float(args.heuristic_eta_floor),
                     "score_direction": str(args.score_direction),
+                    "require_autogluon": bool(args.require_autogluon),
                     "query_dataset_id": dataset_id,
                     "ordering_quick_time_limit": args.ordering_quick_time_limit,
                     "dqn_epochs": args.dqn_epochs,
@@ -904,6 +919,7 @@ def main() -> None:
             "heuristic_similarity_temperature": float(args.heuristic_similarity_temperature),
             "heuristic_eta_floor": float(args.heuristic_eta_floor),
             "score_direction": str(args.score_direction),
+            "require_autogluon": bool(args.require_autogluon),
             "optimizer": str(args.optimizer),
             "n_ants": int(args.n_ants),
             "n_iterations": int(args.n_iterations),
