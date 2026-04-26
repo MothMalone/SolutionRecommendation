@@ -73,6 +73,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         required=False,
         help="Dataset ids for batch runs (comma-separated and/or space-separated)",
     )
+    parser.add_argument(
+        "--openml-local-folder",
+        required=False,
+        default=None,
+        help=(
+            "Optional local folder for OpenML fallback files (e.g., 1520.csv or 1520.csv.zip). "
+            "Used only when --dataset-source openml and API fetch fails."
+        ),
+    )
     parser.add_argument("--kaggle-data-folder", default=KAGGLE_DATA_FOLDER, help="Kaggle data folder for csv by id")
     parser.add_argument("--kaggle-target-column", default="target", help="Target column for kaggle CSVs")
     parser.add_argument("--kaggle-root", default=KAGGLE_REPO_ROOT, help="Kaggle repo root path")
@@ -567,7 +576,11 @@ def main() -> None:
 
     def _load_dataset_for_run(dataset_id: Any):
         if dataset_source == "openml":
-            return load_openml_dataset(dataset_id, verbose=args.verbose)
+            return load_openml_dataset(
+                dataset_id,
+                verbose=args.verbose,
+                local_data_folder=args.openml_local_folder,
+            )
         if dataset_source == "kaggle":
             return load_kaggle_dataset(
                 dataset_id,
