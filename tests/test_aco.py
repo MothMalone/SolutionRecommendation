@@ -1,6 +1,7 @@
 import numpy as np
+import pytest
 
-from automl_aco.search.aco import search_pipelines_aco
+from automl_aco.search.aco import compute_sampling_probabilities, search_pipelines_aco
 
 
 def _make_eta(options):
@@ -41,3 +42,53 @@ def test_aco_returns_k_pipelines():
     )
 
     assert len(final) == 2
+
+
+def test_compute_sampling_probabilities_are_finite_and_normalized():
+    probs = compute_sampling_probabilities(
+        pheromone=np.array([1.0, 2.0, 3.0], dtype=float),
+        eta_step=np.array([0.2, 0.5, 1.0], dtype=float),
+        alpha=1.0,
+        beta=2.0,
+    )
+    assert np.isfinite(probs).all()
+    assert np.isclose(float(np.sum(probs)), 1.0)
+    assert (probs > 0.0).all()
+
+
+def test_aco_rejects_mismatched_eta_shape():
+    options = {"imputation": ["none", "mean"]}
+    eta = {"imputation": np.array([1.0], dtype=float)}
+    evaluate_fn = _dummy_evaluate_factory(options)
+
+    with pytest.raises(ValueError):
+        search_pipelines_aco(
+            options=options,
+            evaluate_fn=evaluate_fn,
+            eta=eta,
+            n_pipelines=1,
+            n_ants=1,
+            n_iterations=1,
+            seed=7,
+        )
+
+
+def test_aco_sanitizes_non_finite_eta_and_runs():
+    options = {"imputation": ["none", "mean"], "scaling": ["none", "standard"]}
+    eta = {
+        "imputation": np.array([np.nan, 0.0], dtype=float),
+        "scaling": np.array([1.0, np.nan], dtype=float),
+    }
+    evaluate_fn = _dummy_evaluate_factory(options)
+
+    final, _unsorted = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate_fn,
+        eta=eta,
+        n_pipelines=1,
+        n_ants=2,
+        n_iterations=2,
+        seed=11,
+    )
+
+    assert len(final) == 1

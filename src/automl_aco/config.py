@@ -121,7 +121,13 @@ class ACOParams:
     alpha: float = 1.0
     beta: float = 2.0
     evaporation: float = 0.2
-    dataset_weighting: str = "equality"
+    dataset_weighting: str = "similarity"
+    heuristic_transfer_method: str = "weighted_topk_topl"
+    heuristic_top_k: int = 10
+    heuristic_top_l: int = 3
+    heuristic_similarity_temperature: float = 1.0
+    heuristic_eta_floor: float = 0.05
+    score_direction: str = "higher_is_better"
     time_limit_per_model: int = 120
     local_search: bool = False
     top_k_pheromone: int = 3

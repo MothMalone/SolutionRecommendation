@@ -29,6 +29,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--similarity-target",
+        choices=[
+            "rank_cosine",
+            "row_zscore_cosine",
+            "row_minmax_cosine",
+            "legacy_global_zscore_cosine",
+        ],
+        default="rank_cosine",
+        help="Ground-truth similarity target used to train the metric.",
+    )
+    parser.add_argument(
+        "--score-direction",
+        choices=["higher_is_better", "lower_is_better"],
+        default="higher_is_better",
+        help="Whether performance-matrix values are scores or losses.",
+    )
     return parser
 
 
@@ -47,6 +64,8 @@ def main() -> None:
         epochs=args.epochs,
         lr=args.lr,
         seed=args.seed,
+        similarity_target=args.similarity_target,
+        score_direction=args.score_direction,
     )
 
     output_path = args.output or recommender.default_metric_path()

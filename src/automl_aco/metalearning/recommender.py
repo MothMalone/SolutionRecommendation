@@ -165,6 +165,8 @@ class MetaPipelineRecommender:
             epochs=kwargs.get("epochs", 100),
             lr=kwargs.get("lr", 1e-3),
             seed=kwargs.get("seed", 42),
+            similarity_target=kwargs.get("similarity_target", "rank_cosine"),
+            score_direction=kwargs.get("score_direction", "higher_is_better"),
         )
         self.embedder = model.embedder
         self.projector = model.projector
@@ -202,17 +204,53 @@ class MetaPipelineRecommender:
         self.metric_params = model.params
         return path
 
+    def _compute_dataset_similarities(self, new_metafeatures: np.ndarray) -> List[Tuple[Any, float]]:
+        sims: List[Tuple[Any, float]] = []
+        if self.metric_type == "regression" and self.embedder is not None and self.projector is not None:
+            try:
+                import torch
+            except Exception as exc:  # pragma: no cover
+                raise RuntimeError("torch is required for metric similarity") from exc
+
+            with torch.no_grad():
+                known_mf_scaled = self.scaler.transform(self.imputer.transform(self.metafeatures_df))
+                known_tensor = torch.tensor(known_mf_scaled, dtype=torch.float32)
+                new_tensor = torch.tensor(new_metafeatures.reshape(1, -1), dtype=torch.float32)
+
+                emb_known = self.embedder(known_tensor)
+                emb_new = self.embedder(new_tensor).squeeze(0)
+
+                emb_known = emb_known / (emb_known.norm(dim=1, keepdim=True) + 1e-8)
+                emb_new = emb_new / (emb_new.norm() + 1e-8)
+
+                for ds_id, h_known in zip(self.metafeatures_df.index, emb_known):
+                    inter = (emb_new * h_known).unsqueeze(0)
+                    sim = float(self.projector(inter).item())
+                    sims.append((ds_id, sim))
+            return sims
+
+        known = self.metafeatures_scaled
+        cosines = cosine_similarity(known, new_metafeatures.reshape(1, -1)).ravel()
+        return list(zip(self.metafeatures_df.index, cosines))
+
     def _compute_aco_heuristic(
         self,
         new_metafeatures: np.ndarray,
         options: Dict[str, List[str]],
-        dataset_weighting: str = "equality",
+        dataset_weighting: str = "similarity",
         top_k: int = 10,
         use_top_pipelines_from_metric: bool = True,
         recommend_kwargs: Optional[Dict[str, Any]] = None,
+        top_l: int = 3,
+        similarity_temperature: float = 1.0,
+        eta_floor: float = 0.05,
+        heuristic_transfer_method: str = "weighted_topk_topl",
+        score_direction: str = "higher_is_better",
+        query_dataset_id: Optional[Any] = None,
     ) -> Dict[str, np.ndarray]:
+        dataset_similarity_scores = dict(self._compute_dataset_similarities(new_metafeatures))
         return compute_aco_heuristic(
-            performance_matrix=self.performance_matrix,
+            performance_matrix=self.performance_matrix_imputed,
             metafeatures_df=self.metafeatures_df,
             pipeline_configs=self.pipeline_configs,
             options=options,
@@ -223,6 +261,14 @@ class MetaPipelineRecommender:
             recommend_func=self.recommend if use_top_pipelines_from_metric else None,
             recommend_kwargs=recommend_kwargs,
             metafeatures_scaled=self.metafeatures_scaled,
+            dataset_similarity_scores=dataset_similarity_scores,
+            top_l=top_l,
+            similarity_temperature=similarity_temperature,
+            eta_floor=eta_floor,
+            heuristic_transfer_method=heuristic_transfer_method,
+            score_direction=score_direction,
+            query_dataset_id=query_dataset_id,
+            verbose=self.verbose,
         )
 
     def _search_pipelines_aco(
@@ -239,8 +285,14 @@ class MetaPipelineRecommender:
         alpha: float = 1.0,
         beta: float = 2.0,
         evaporation: float = 0.2,
-        dataset_weighting: str = "equality",
+        dataset_weighting: str = "similarity",
         heuristic_top_k: int = 10,
+        heuristic_top_l: int = 3,
+        heuristic_similarity_temperature: float = 1.0,
+        heuristic_eta_floor: float = 0.05,
+        heuristic_transfer_method: str = "weighted_topk_topl",
+        score_direction: str = "higher_is_better",
+        query_dataset_id: Optional[Any] = None,
         time_limit_per_model: int = 3000,
         local_search: bool = False,
         metafeatures_func=None,
@@ -269,7 +321,15 @@ class MetaPipelineRecommender:
                 "use_autogluon": False,
                 "metafeatures_func": metafeatures_func,
             },
+            top_l=max(1, int(heuristic_top_l)),
+            similarity_temperature=float(heuristic_similarity_temperature),
+            eta_floor=float(heuristic_eta_floor),
+            heuristic_transfer_method=str(heuristic_transfer_method),
+            score_direction=str(score_direction),
+            query_dataset_id=query_dataset_id,
         )
+        if self.verbose:
+            print("Phase 3 handoff: received transferred eta_norm for ACO sampling.")
 
         def _evaluate(sampled_configs):
             if step_order:
@@ -391,8 +451,14 @@ class MetaPipelineRecommender:
         n_pipelines: int = 3,
         sample_budget: int = 100,
         seed: int = 42,
-        dataset_weighting: str = "equality",
+        dataset_weighting: str = "similarity",
         heuristic_top_k: int = 10,
+        heuristic_top_l: int = 3,
+        heuristic_similarity_temperature: float = 1.0,
+        heuristic_eta_floor: float = 0.05,
+        heuristic_transfer_method: str = "weighted_topk_topl",
+        score_direction: str = "higher_is_better",
+        query_dataset_id: Optional[Any] = None,
         time_limit_per_model: int = 3000,
         metafeatures_func=None,
         dqn_params: Optional[Dict[str, Any]] = None,
@@ -472,6 +538,12 @@ class MetaPipelineRecommender:
                         "use_autogluon": False,
                         "metafeatures_func": metafeatures_func,
                     },
+                    top_l=max(1, int(heuristic_top_l)),
+                    similarity_temperature=float(heuristic_similarity_temperature),
+                    eta_floor=float(heuristic_eta_floor),
+                    heuristic_transfer_method=str(heuristic_transfer_method),
+                    score_direction=str(score_direction),
+                    query_dataset_id=query_dataset_id,
                 )
             )
 
@@ -752,8 +824,14 @@ class MetaPipelineRecommender:
                         alpha=float(aco_params.get("alpha", 1.0)),
                         beta=float(aco_params.get("beta", 2.0)),
                         evaporation=float(aco_params.get("evaporation", 0.2)),
-                        dataset_weighting=str(aco_params.get("dataset_weighting", "equality")),
+                        dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
                         heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
+                        heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
+                        heuristic_similarity_temperature=float(aco_params.get("heuristic_similarity_temperature", 1.0)),
+                        heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                        heuristic_transfer_method=str(aco_params.get("heuristic_transfer_method", "weighted_topk_topl")),
+                        score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                        query_dataset_id=aco_params.get("query_dataset_id"),
                         time_limit_per_model=time_limit_per_model,
                         metafeatures_func=metafeatures_func,
                         step_order=order,
@@ -768,8 +846,14 @@ class MetaPipelineRecommender:
                         n_pipelines=k,
                         sample_budget=sample_budget,
                         seed=aco_seed + order_idx - 1,
-                        dataset_weighting=str(aco_params.get("dataset_weighting", "equality")),
+                        dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
                         heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
+                        heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
+                        heuristic_similarity_temperature=float(aco_params.get("heuristic_similarity_temperature", 1.0)),
+                        heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                        heuristic_transfer_method=str(aco_params.get("heuristic_transfer_method", "weighted_topk_topl")),
+                        score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                        query_dataset_id=aco_params.get("query_dataset_id"),
                         time_limit_per_model=time_limit_per_model,
                         metafeatures_func=metafeatures_func,
                         dqn_params=aco_params,
@@ -986,37 +1070,21 @@ class MetaPipelineRecommender:
                     "alpha": float(aco_params.get("alpha", 1.0)),
                     "beta": float(aco_params.get("beta", 2.0)),
                     "evaporation": float(aco_params.get("evaporation", 0.2)),
-                    "dataset_weighting": str(aco_params.get("dataset_weighting", "equality")),
+                    "dataset_weighting": str(aco_params.get("dataset_weighting", "similarity")),
                     "heuristic_top_k": int(aco_params.get("heuristic_top_k", k)),
+                    "heuristic_top_l": int(aco_params.get("heuristic_top_l", 3)),
+                    "heuristic_similarity_temperature": float(
+                        aco_params.get("heuristic_similarity_temperature", 1.0)
+                    ),
+                    "heuristic_eta_floor": float(aco_params.get("heuristic_eta_floor", 0.05)),
+                    "heuristic_transfer_method": str(
+                        aco_params.get("heuristic_transfer_method", "weighted_topk_topl")
+                    ),
+                    "score_direction": str(aco_params.get("score_direction", "higher_is_better")),
                 },
             }
 
-        sims: List[Tuple[Any, float]] = []
-        if self.metric_type == "regression" and self.embedder is not None:
-            try:
-                import torch
-            except Exception as exc:  # pragma: no cover
-                raise RuntimeError("torch is required for metric similarity") from exc
-
-            with torch.no_grad():
-                known_mf_scaled = self.scaler.transform(self.imputer.transform(self.metafeatures_df))
-                known_tensor = torch.tensor(known_mf_scaled, dtype=torch.float32)
-                new_tensor = torch.tensor(new_mf_scaled.reshape(1, -1), dtype=torch.float32)
-
-                emb_known = self.embedder(known_tensor)
-                emb_new = self.embedder(new_tensor).squeeze(0)
-
-                emb_known = emb_known / (emb_known.norm(dim=1, keepdim=True) + 1e-8)
-                emb_new = emb_new / (emb_new.norm() + 1e-8)
-
-                for ds_id, h_known in zip(self.metafeatures_df.index, emb_known):
-                    inter = (emb_new * h_known).unsqueeze(0)
-                    sim = float(self.projector(inter).item())
-                    sims.append((ds_id, sim))
-        else:
-            known = self.metafeatures_scaled
-            cosines = cosine_similarity(known, new_mf_scaled.reshape(1, -1)).ravel()
-            sims = list(zip(self.metafeatures_df.index, cosines))
+        sims = self._compute_dataset_similarities(new_mf_scaled)
 
         sims = sorted(sims, key=lambda x: x[1], reverse=True)
         top_datasets = [ds for ds, _ in sims[:k]]

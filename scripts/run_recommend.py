@@ -87,8 +87,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset-weighting",
         choices=["equality", "similarity"],
-        default="equality",
-        help="How to weight historical datasets when transferring heuristic",
+        default="similarity",
+        help="How to weight top-K neighbors when transferring Phase-2 heuristic",
+    )
+    parser.add_argument(
+        "--heuristic-top-l",
+        type=int,
+        default=3,
+        help="Top-L historical pipelines selected per neighbor for Phase-2 transfer",
+    )
+    parser.add_argument(
+        "--heuristic-transfer-method",
+        choices=["weighted_topk_topl", "legacy_weighted_average"],
+        default="weighted_topk_topl",
+        help="Phase-2 heuristic transfer algorithm",
+    )
+    parser.add_argument(
+        "--heuristic-similarity-temperature",
+        type=float,
+        default=1.0,
+        help="Softmax temperature for similarity weighting over top-K neighbors",
+    )
+    parser.add_argument(
+        "--heuristic-eta-floor",
+        type=float,
+        default=0.05,
+        help="Positive floor for per-step eta normalization",
+    )
+    parser.add_argument(
+        "--score-direction",
+        choices=["higher_is_better", "lower_is_better"],
+        default="higher_is_better",
+        help="Direction of performance-matrix values used in transfer.",
     )
     parser.add_argument("--eval-k", type=int, default=3, help="Number of top pipelines to evaluate")
     parser.add_argument("--n-ants", type=int, default=10)
@@ -733,6 +763,11 @@ def main() -> None:
             "Search transfer/proxy setup: "
             f"dataset_weighting={args.dataset_weighting}, "
             f"heuristic_top_k={heuristic_top_k}, "
+            f"heuristic_top_l={int(args.heuristic_top_l)}, "
+            f"transfer_method={args.heuristic_transfer_method}, "
+            f"sim_temperature={float(args.heuristic_similarity_temperature)}, "
+            f"eta_floor={float(args.heuristic_eta_floor)}, "
+            f"score_direction={args.score_direction}, "
             f"proxy_clf_model={proxy_settings.get('classification_model')}, "
             f"proxy_reg_model={proxy_settings.get('regression_model')}"
         )
@@ -778,6 +813,12 @@ def main() -> None:
                     "evaporation": args.evaporation,
                     "dataset_weighting": args.dataset_weighting,
                     "heuristic_top_k": heuristic_top_k,
+                    "heuristic_top_l": int(args.heuristic_top_l),
+                    "heuristic_transfer_method": str(args.heuristic_transfer_method),
+                    "heuristic_similarity_temperature": float(args.heuristic_similarity_temperature),
+                    "heuristic_eta_floor": float(args.heuristic_eta_floor),
+                    "score_direction": str(args.score_direction),
+                    "query_dataset_id": dataset_id,
                     "ordering_quick_time_limit": args.ordering_quick_time_limit,
                     "dqn_epochs": args.dqn_epochs,
                     "dqn_batch_size": args.dqn_batch_size,
@@ -844,7 +885,12 @@ def main() -> None:
         recommendation["search_hyperparams"] = {
             "k": int(args.k),
             "heuristic_top_k": int(heuristic_top_k),
+            "heuristic_top_l": int(args.heuristic_top_l),
             "dataset_weighting": str(args.dataset_weighting),
+            "heuristic_transfer_method": str(args.heuristic_transfer_method),
+            "heuristic_similarity_temperature": float(args.heuristic_similarity_temperature),
+            "heuristic_eta_floor": float(args.heuristic_eta_floor),
+            "score_direction": str(args.score_direction),
             "optimizer": str(args.optimizer),
             "n_ants": int(args.n_ants),
             "n_iterations": int(args.n_iterations),

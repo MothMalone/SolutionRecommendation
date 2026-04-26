@@ -8,6 +8,7 @@ import numpy as np
 from ..utils.logging import get_logger
 
 logger = get_logger(__name__)
+EPS = 1e-8
 
 
 def _freeze_value(value: Any) -> Any:
@@ -25,6 +26,21 @@ def _freeze_value(value: Any) -> Any:
 
 def _cfg_key(cfg: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
     return tuple(sorted((k, _freeze_value(v)) for k, v in cfg.items()))
+
+
+def compute_sampling_probabilities(
+    pheromone: np.ndarray,
+    eta_step: np.ndarray,
+    alpha: float,
+    beta: float,
+) -> np.ndarray:
+    pheromone_arr = np.asarray(pheromone, dtype=float)
+    eta_arr = np.asarray(eta_step, dtype=float)
+    probs = (pheromone_arr ** float(alpha)) * (eta_arr ** float(beta))
+    if probs.sum() <= 0 or not np.isfinite(probs).all():
+        return np.ones_like(pheromone_arr, dtype=float) / max(1, len(pheromone_arr))
+    probs = probs / probs.sum()
+    return probs
 
 
 def search_pipelines_aco(
@@ -49,6 +65,18 @@ def search_pipelines_aco(
     rng = np.random.RandomState(seed)
 
     step_order = list(options.keys())
+    safe_eta: Dict[str, np.ndarray] = {}
+    for step in step_order:
+        raw_eta = np.asarray(eta[step], dtype=float)
+        if raw_eta.shape[0] != len(options[step]):
+            raise ValueError(f"eta[{step!r}] size {raw_eta.shape[0]} does not match options size {len(options[step])}")
+        arr = raw_eta.copy()
+        arr[~np.isfinite(arr)] = EPS
+        arr[arr <= 0] = EPS
+        safe_eta[step] = arr
+    eta = safe_eta
+    if verbose:
+        print("Phase 3 search: using transferred eta_norm with positive finite entries.")
 
     pheromones = {step: np.ones(len(vals), dtype=float) for step, vals in options.items()}
     k_conditional_pheromones: Dict[Tuple[str, Tuple[Any, ...]], np.ndarray] = {}
@@ -65,17 +93,17 @@ def search_pipelines_aco(
 
     def sample_config() -> Dict[str, Any]:
         cfg: Dict[str, Any] = {}
-        history: List[Tuple[str, int]] = []
+        path_history: List[Tuple[str, int]] = []
         for step in step_order:
             eta_step = eta[step]
-            if len(history) >= markov_order:
-                context = tuple(history[-markov_order:])
+            if len(path_history) >= markov_order:
+                context = tuple(path_history[-markov_order:])
                 k_pher = get_k_pheromone(step, context)
-                probs_k = (k_pher ** alpha) * (eta_step ** beta)
-                probs_m = (pheromones[step] ** alpha) * (eta_step ** beta)
+                probs_k = compute_sampling_probabilities(k_pher, eta_step, alpha=alpha, beta=beta)
+                probs_m = compute_sampling_probabilities(pheromones[step], eta_step, alpha=alpha, beta=beta)
                 probs = lambda_smooth * probs_k + (1 - lambda_smooth) * probs_m
             else:
-                probs = (pheromones[step] ** alpha) * (eta_step ** beta)
+                probs = compute_sampling_probabilities(pheromones[step], eta_step, alpha=alpha, beta=beta)
 
             if probs.sum() <= 0 or not np.isfinite(probs).all():
                 probs = np.ones(len(options[step])) / len(options[step])
@@ -84,7 +112,7 @@ def search_pipelines_aco(
 
             idx = rng.choice(len(options[step]), p=probs)
             cfg[step] = options[step][idx]
-            history.append((step, idx))
+            path_history.append((step, idx))
         return cfg
 
     for iteration in range(n_iterations):

@@ -17,6 +17,16 @@ class MetricModel:
     params: Dict[str, Any]
 
 
+SIMILARITY_TARGET_CHOICES = {
+    "rank_cosine",
+    "row_zscore_cosine",
+    "row_minmax_cosine",
+    "legacy_global_zscore_cosine",
+}
+
+SCORE_DIRECTION_CHOICES = {"higher_is_better", "lower_is_better"}
+
+
 def _require_torch():
     try:
         import torch  # type: ignore
@@ -42,6 +52,84 @@ def build_metric_models(input_dim: int, hidden_dim: int, embed_dim: int):
     return embedder, projector
 
 
+def _validate_score_direction(score_direction: str) -> str:
+    direction = str(score_direction).strip().lower()
+    if direction not in SCORE_DIRECTION_CHOICES:
+        raise ValueError(
+            f"Unsupported score_direction={score_direction!r}. "
+            f"Expected one of {sorted(SCORE_DIRECTION_CHOICES)}."
+        )
+    return direction
+
+
+def _to_higher_is_better(perf_profiles: np.ndarray, score_direction: str) -> np.ndarray:
+    direction = _validate_score_direction(score_direction)
+    arr = np.asarray(perf_profiles, dtype=float)
+    if direction == "lower_is_better":
+        arr = -arr
+    return arr
+
+
+def _row_rank_normalize(perf_profiles: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    n_rows, n_cols = perf_profiles.shape
+    if n_cols == 0:
+        return np.zeros_like(perf_profiles, dtype=float)
+    if n_cols == 1:
+        return np.ones((n_rows, 1), dtype=float)
+
+    out = np.zeros_like(perf_profiles, dtype=float)
+    denom = float(n_cols - 1)
+    for i in range(n_rows):
+        # Rank preserves relative preferences and suppresses absolute-scale effects.
+        row = pd.Series(perf_profiles[i], copy=False)
+        ranks = row.rank(method="average", ascending=True).to_numpy(dtype=float, copy=False)
+        out[i, :] = (ranks - 1.0) / max(denom, eps)
+    return out
+
+
+def _row_zscore_normalize(perf_profiles: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    row_mean = np.mean(perf_profiles, axis=1, keepdims=True)
+    row_std = np.std(perf_profiles, axis=1, keepdims=True)
+    denom = np.where(row_std > eps, row_std, 1.0)
+    normalized = (perf_profiles - row_mean) / denom
+    normalized[row_std.ravel() <= eps, :] = 0.0
+    return normalized
+
+
+def _row_minmax_normalize(perf_profiles: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    row_min = np.min(perf_profiles, axis=1, keepdims=True)
+    row_max = np.max(perf_profiles, axis=1, keepdims=True)
+    span = row_max - row_min
+    denom = np.where(span > eps, span, 1.0)
+    normalized = (perf_profiles - row_min) / denom
+    normalized[span.ravel() <= eps, :] = 0.5
+    return normalized
+
+
+def build_similarity_target_matrix(
+    perf_profiles: np.ndarray,
+    similarity_target: str = "rank_cosine",
+    score_direction: str = "higher_is_better",
+) -> np.ndarray:
+    target = str(similarity_target).strip().lower()
+    if target not in SIMILARITY_TARGET_CHOICES:
+        raise ValueError(
+            f"Unsupported similarity_target={similarity_target!r}. "
+            f"Expected one of {sorted(SIMILARITY_TARGET_CHOICES)}."
+        )
+
+    oriented = _to_higher_is_better(perf_profiles, score_direction=score_direction)
+    if target == "legacy_global_zscore_cosine":
+        transformed = StandardScaler().fit_transform(oriented)
+    elif target == "row_zscore_cosine":
+        transformed = _row_zscore_normalize(oriented)
+    elif target == "row_minmax_cosine":
+        transformed = _row_minmax_normalize(oriented)
+    else:
+        transformed = _row_rank_normalize(oriented)
+    return cosine_similarity(transformed)
+
+
 def train_siamese_regression_metric(
     metafeatures_df: pd.DataFrame,
     performance_matrix_imputed: pd.DataFrame,
@@ -50,6 +138,8 @@ def train_siamese_regression_metric(
     epochs: int = 100,
     lr: float = 1e-3,
     seed: int = 42,
+    similarity_target: str = "rank_cosine",
+    score_direction: str = "higher_is_better",
 ) -> MetricModel:
     torch = _require_torch()
     import torch.nn as nn
@@ -74,8 +164,11 @@ def train_siamese_regression_metric(
 
     mf_scaled = pd.DataFrame(meta_aligned).fillna(0).values.astype(np.float32)
     perf_profiles = perf_aligned.T.values
-    perf_profiles_std = StandardScaler().fit_transform(perf_profiles)
-    S_perf = cosine_similarity(perf_profiles_std)
+    S_perf = build_similarity_target_matrix(
+        perf_profiles=perf_profiles,
+        similarity_target=similarity_target,
+        score_direction=score_direction,
+    )
 
     N, d = mf_scaled.shape
     pairs = [(i, j) for i in range(N) for j in range(i + 1, N)]
@@ -103,7 +196,13 @@ def train_siamese_regression_metric(
         loss.backward()
         optimizer.step()
 
-    params = {"input_dim": d, "hidden_dim": hidden_dim, "embed_dim": embed_dim}
+    params = {
+        "input_dim": d,
+        "hidden_dim": hidden_dim,
+        "embed_dim": embed_dim,
+        "similarity_target": str(similarity_target),
+        "score_direction": str(score_direction),
+    }
     return MetricModel(embedder=embedder, projector=projector, params=params)
 
 

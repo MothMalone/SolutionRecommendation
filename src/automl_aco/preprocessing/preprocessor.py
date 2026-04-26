@@ -25,7 +25,6 @@ from ..utils.operator_spec import parse_operator_spec
 
 
 class Preprocessor:
-    """Leak-free preprocessor matching the notebook behavior."""
 
     def __init__(self, config: Dict[str, str], step_order: Optional[List[str]] = None):
         self.config = config
@@ -143,7 +142,6 @@ class Preprocessor:
             return pd.DataFrame(arr, index=index, columns=cols)
 
         # Some sklearn versions drop columns that are entirely missing at fit-time.
-        # Reconstruct surviving column names from imputer.statistics_ when possible.
         recovered_cols = None
         stats = getattr(imputer, "statistics_", None)
         if stats is not None and len(stats) == len(cols):
