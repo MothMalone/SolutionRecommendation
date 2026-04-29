@@ -10,6 +10,11 @@ from sklearn.preprocessing import LabelEncoder
 from sklearn.utils import shuffle
 from sklearn.datasets import fetch_openml
 
+try:
+    import openml as openml_api  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    openml_api = None
+
 
 def load_dummy_dataset(dataset_id: Any, verbose: bool = False) -> Dict[str, Any]:
     if verbose:
@@ -97,14 +102,66 @@ def _load_local_openml_csv(dataset_id: Any, local_data_folder: str) -> Optional[
     return None
 
 
+def _load_openml_dataset_direct_api(dataset_id: Any) -> Optional[Tuple[pd.DataFrame, pd.Series]]:
+    """Load OpenML dataset via openml-python API when available."""
+    if openml_api is None:
+        return None
+
+    dataset = openml_api.datasets.get_dataset(dataset_id, download_data=True)
+    target_attr = getattr(dataset, "default_target_attribute", None)
+    X, y, _categorical, _attributes = dataset.get_data(
+        target=target_attr,
+        dataset_format="dataframe",
+    )
+    if not isinstance(X, pd.DataFrame):
+        X = pd.DataFrame(X)
+
+    if y is None:
+        target_column = _detect_target_column(X)
+        y = X[target_column].copy()
+        X = X.drop(columns=[target_column]).copy()
+    elif isinstance(y, pd.DataFrame):
+        if y.shape[1] == 0:
+            raise ValueError(f"OpenML dataset {dataset_id} returned empty target frame")
+        y = y.iloc[:, 0].copy()
+    elif not isinstance(y, pd.Series):
+        y = pd.Series(y)
+    else:
+        y = y.copy()
+
+    return X.copy(), y
+
+
 def load_openml_dataset(
     dataset_id: Any,
     test_dataset_ids: Optional[list] = None,
     verbose: bool = False,
     local_data_folder: Optional[str] = None,
+    use_direct_api: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Load OpenML dataset with optional local-file fallback."""
+    direct_api_error: Optional[Exception] = None
+    sklearn_error: Optional[Exception] = None
     try:
+        if use_direct_api:
+            try:
+                direct_loaded = _load_openml_dataset_direct_api(dataset_id=dataset_id)
+                if direct_loaded is not None:
+                    X_direct, y_direct = direct_loaded
+                    return _prepare_dataset_from_xy(
+                        X=X_direct,
+                        y=y_direct,
+                        dataset_id=dataset_id,
+                        test_dataset_ids=test_dataset_ids,
+                        max_samples_if_test=100000,
+                        max_samples_default=5000,
+                        verbose=verbose,
+                    )
+            except Exception as exc:
+                direct_api_error = exc
+                if verbose:
+                    print(f"Direct OpenML API load failed for dataset {dataset_id}: {exc}")
+
         try:
             dataset = fetch_openml(data_id=dataset_id, as_frame=True, parser="auto")
         except ValueError as e:
@@ -125,6 +182,7 @@ def load_openml_dataset(
             verbose=verbose,
         )
     except Exception as e:
+        sklearn_error = e
         if local_data_folder:
             local_df = _load_local_openml_csv(dataset_id=dataset_id, local_data_folder=local_data_folder)
             if local_df is not None:
@@ -150,7 +208,11 @@ def load_openml_dataset(
                     if verbose:
                         print(f"Local fallback processing failed for dataset {dataset_id}: {local_exc}")
         if verbose:
-            print(f"Failed to load dataset {dataset_id}: {e}")
+            if direct_api_error is not None:
+                print(f"Failed to load dataset {dataset_id} via sklearn fetch_openml: {sklearn_error}")
+                print(f"Earlier direct OpenML API error for dataset {dataset_id}: {direct_api_error}")
+            else:
+                print(f"Failed to load dataset {dataset_id}: {e}")
         return None
 
 
