@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+import re
 
 import numpy as np
 import pandas as pd
@@ -18,11 +19,24 @@ SCORE_DIRECTION_CHOICES = {"higher_is_better", "lower_is_better"}
 
 
 def _normalize_dataset_id(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        f = float(value)
+        if np.isfinite(f) and abs(f - round(f)) <= 1e-9:
+            return str(int(round(f)))
+        return str(value).strip()
+
     text = str(value).strip()
-    if text.startswith("D_"):
-        text = text[2:]
-    if text.startswith("Dataset_"):
-        text = text.split("_", 1)[1]
+    float_like = re.fullmatch(r"([0-9]+)\.0+", text)
+    if float_like:
+        return float_like.group(1)
+
+    prefixed = re.fullmatch(r"(?i)(?:d|dataset|openml)[_\-: ]*([0-9]+)", text)
+    if prefixed:
+        return prefixed.group(1)
     return text
 
 

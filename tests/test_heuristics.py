@@ -25,6 +25,12 @@ def test_select_top_k_neighbors_excludes_query_dataset():
     assert [ds for ds, _ in top] == ["d2", "d3"]
 
 
+def test_select_top_k_neighbors_excludes_query_dataset_with_id_formats():
+    sims = [("248.0", 0.95), ("openml_184", 0.9), ("D_378", 0.8)]
+    top = select_top_k_neighbors(sims, top_k=3, query_dataset_id=248)
+    assert [ds for ds, _ in top] == ["openml_184", "D_378"]
+
+
 def test_select_top_l_pipelines_per_neighbor_respects_l():
     performance_matrix = pd.DataFrame(
         [[0.9, 0.2], [0.7, 0.3], [0.1, 0.95]],

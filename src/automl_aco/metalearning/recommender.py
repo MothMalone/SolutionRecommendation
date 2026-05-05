@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 import numpy as np
 import pandas as pd
@@ -80,11 +81,24 @@ class MetaPipelineRecommender:
         self.verbose = verbose
 
         def _normalize_id(val: Any) -> str:
+            if pd.isna(val):
+                return ""
+            if isinstance(val, (int, np.integer)):
+                return str(int(val))
+            if isinstance(val, (float, np.floating)):
+                f = float(val)
+                if np.isfinite(f) and abs(f - round(f)) <= 1e-9:
+                    return str(int(round(f)))
+                return str(val).strip()
+
             s = str(val).strip()
-            if s.startswith("D_"):
-                s = s[2:]
-            if s.startswith("Dataset_"):
-                s = s.split("_", 1)[1]
+            float_like = re.fullmatch(r"([0-9]+)\.0+", s)
+            if float_like:
+                return float_like.group(1)
+
+            prefixed = re.fullmatch(r"(?i)(?:d|dataset|openml)[_\-: ]*([0-9]+)", s)
+            if prefixed:
+                return prefixed.group(1)
             return s
 
         perf_cols = list(self.performance_matrix.columns)

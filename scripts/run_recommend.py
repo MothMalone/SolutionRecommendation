@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import warnings
@@ -48,6 +49,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run pipeline recommendation")
     parser.add_argument("--performance-matrix", required=False, help="Path to performance matrix CSV")
     parser.add_argument("--metafeatures", required=False, help="Path to metafeatures CSV")
+    parser.add_argument(
+        "--metafeatures-id-column",
+        required=False,
+        default=None,
+        help=(
+            "Optional column name in metafeatures CSV to use as dataset id "
+            "(e.g., dataset_id, did). If omitted, auto-detected."
+        ),
+    )
     parser.add_argument("--pipeline-configs", required=False, help="Path to pipeline configs JSON")
     parser.add_argument(
         "--pipeline-override",
@@ -393,9 +403,13 @@ def main() -> None:
         metafeatures_path = args.metafeatures
     else:
         if use_kaggle:
-            repo_meta = os.path.join(args.kaggle_root, "aco", "dataset_feats.csv")
-            repo_meta_alt = os.path.join(args.kaggle_root, "data", "openml", "dataset_feats.csv")
-            metafeatures_path = pick_existing("metafeatures", [repo_meta, repo_meta_alt, KAGGLE_METAFEATURES_PATH])
+            # Prefer the broader openml metafeature file when both exist.
+            repo_meta_primary = os.path.join(args.kaggle_root, "data", "openml", "dataset_feats.csv")
+            repo_meta_secondary = os.path.join(args.kaggle_root, "aco", "dataset_feats.csv")
+            metafeatures_path = pick_existing(
+                "metafeatures",
+                [repo_meta_primary, repo_meta_secondary, KAGGLE_METAFEATURES_PATH],
+            )
         else:
             metafeatures_path = pick_existing(
                 "metafeatures",
@@ -419,39 +433,87 @@ def main() -> None:
             )
 
     perf = pd.read_csv(performance_matrix_path, index_col=0)
-    meta = pd.read_csv(metafeatures_path, index_col=0)
+    meta_raw = pd.read_csv(metafeatures_path)
     if args.verbose:
         print(f"Loaded performance matrix: {performance_matrix_path}")
         print(f"Loaded metafeatures: {metafeatures_path}")
         print(f"Loaded pipeline configs: {pipeline_configs_path}")
 
     def _normalize_id(val: object) -> str:
+        if pd.isna(val):
+            return ""
+        if isinstance(val, (int, np.integer)):
+            return str(int(val))
+        if isinstance(val, (float, np.floating)):
+            f = float(val)
+            if np.isfinite(f) and abs(f - round(f)) <= 1e-9:
+                return str(int(round(f)))
+            return str(val).strip()
+
         s = str(val).strip()
-        if s.startswith("D_"):
-            s = s[2:]
-        if s.startswith("Dataset_"):
-            s = s.split("_", 1)[1]
+        float_like = re.fullmatch(r"([0-9]+)\.0+", s)
+        if float_like:
+            return float_like.group(1)
+
+        prefixed = re.fullmatch(r"(?i)(?:d|dataset|openml)[_\-: ]*([0-9]+)", s)
+        if prefixed:
+            return prefixed.group(1)
         return s
+
+    def _meta_overlap_count(meta_index_like: pd.Series, perf_df: pd.DataFrame) -> int:
+        perf_norm = {_normalize_id(c) for c in perf_df.columns}
+        vals = meta_index_like.astype(str).map(_normalize_id)
+        return len(set(vals) & perf_norm)
 
     def _maybe_set_meta_index(meta_df: pd.DataFrame, perf_df: pd.DataFrame) -> pd.DataFrame:
         perf_norm = {_normalize_id(c) for c in perf_df.columns}
-        candidate_cols = ["dataset_id", "did", "id", "Unnamed: 0"]
-        best_col = None
-        best_overlap = 0
+        best_overlap = _meta_overlap_count(pd.Series(meta_df.index.astype(str)), perf_df)
+        best_source = ("index", None)
+
+        candidate_cols = list(meta_df.columns)
+        explicit_col = str(args.metafeatures_id_column).strip() if args.metafeatures_id_column else None
+        if explicit_col:
+            if explicit_col not in meta_df.columns:
+                raise ValueError(
+                    f"--metafeatures-id-column={explicit_col!r} not found in metafeatures columns: "
+                    f"{list(meta_df.columns)[:15]}"
+                )
+            candidate_cols = [explicit_col]
+        else:
+            prioritized = ["dataset_id", "did", "openml_id", "id", "Dataset", "dataset", "Unnamed: 0"]
+            candidate_cols = [c for c in prioritized if c in meta_df.columns] + [
+                c for c in meta_df.columns if c not in prioritized
+            ]
+
         for col in candidate_cols:
-            if col in meta_df.columns:
-                vals = meta_df[col].astype(str).map(_normalize_id)
-                overlap = len(set(vals) & perf_norm)
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_col = col
-        if best_col is not None and best_overlap > 0:
+            overlap = _meta_overlap_count(meta_df[col], perf_df)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_source = ("column", col)
+
+        if best_source[0] == "column" and best_source[1] is not None and best_overlap > 0:
+            best_col = str(best_source[1])
             if args.verbose:
                 print(f"Using metafeatures id column: {best_col} (overlap={best_overlap})")
             meta_df = meta_df.set_index(best_col)
+        elif args.verbose:
+            print(f"Using metafeatures index as dataset id (overlap={best_overlap})")
+
+        perf_count = len(perf_norm)
+        overlap_ratio = float(best_overlap) / max(perf_count, 1)
+        low_absolute = perf_count >= 200 and best_overlap < 100
+        low_relative = overlap_ratio < 0.25
+        if low_absolute or low_relative:
+            raise ValueError(
+                "Low metafeature/performance alignment detected. "
+                f"overlap={best_overlap}, perf_datasets={perf_count}, ratio={overlap_ratio:.3f}. "
+                "This usually means the metafeatures file index/ID column is wrong "
+                "(for example, a row-number index was loaded instead of dataset IDs). "
+                "Pass the correct file or use --metafeatures-id-column."
+            )
         return meta_df
 
-    meta = _maybe_set_meta_index(meta, perf)
+    meta = _maybe_set_meta_index(meta_raw, perf)
 
     if pipeline_configs_path:
         with open(pipeline_configs_path, "r", encoding="utf-8") as f:
