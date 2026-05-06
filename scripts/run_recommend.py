@@ -735,15 +735,30 @@ def main() -> None:
             import matplotlib.pyplot as plt
         except Exception:
             return None
-        iters = [h["iteration"] for h in history if h.get("best_score") is not None]
-        scores = [h["best_score"] for h in history if h.get("best_score") is not None]
-        if not iters:
+
+        iters = [h.get("iteration", idx + 1) for idx, h in enumerate(history)]
+        raw_scores = [h.get("best_score") for h in history]
+
+        filled = []
+        last = None
+        for score in raw_scores:
+            if score is None or (isinstance(score, (int, float)) and not np.isfinite(score)):
+                filled.append(last)
+            else:
+                last = float(score)
+                filled.append(last)
+
+        if all(val is None for val in filled):
             return None
+
+        scores = [np.nan if val is None else val for val in filled]
+
         plt.figure(figsize=(6, 4))
         plt.plot(iters, scores, marker="o")
         plt.xlabel("Iteration")
         plt.ylabel("Best Score")
         plt.title("ACO Best Score per Iteration")
+        plt.ylim(0, 1.0)
         plt.grid(True, alpha=0.3)
         out_path = os.path.join(output_dir, "aco_progress.png")
         plt.savefig(out_path, dpi=150, bbox_inches="tight")
