@@ -16,9 +16,7 @@ def main() -> int:
         {"name": "sim_T0p25_floor0p05", "flags": ["--dataset-weighting", "similarity", "--heuristic-similarity-temperature", "0.25", "--heuristic-eta-floor", "0.05"]},
         {"name": "sim_T1_floor0p05", "flags": ["--dataset-weighting", "similarity", "--heuristic-similarity-temperature", "1.0", "--heuristic-eta-floor", "0.05"]},  # default-like
         {"name": "sim_T2_floor0p05", "flags": ["--dataset-weighting", "similarity", "--heuristic-similarity-temperature", "2.0", "--heuristic-eta-floor", "0.05"]},
-        {"name": "sim_T1_floor0p01", "flags": ["--dataset-weighting", "similarity", "--heuristic-similarity-temperature", "1.0", "--heuristic-eta-floor", "0.01"]},
-        {"name": "sim_T1_floor0p10", "flags": ["--dataset-weighting", "similarity", "--heuristic-similarity-temperature", "1.0", "--heuristic-eta-floor", "0.10"]},
-        {"name": "equal_floor0p05", "flags": ["--dataset-weighting", "equality", "--heuristic-similarity-temperature", "1.0", "--heuristic-eta-floor", "0.05"]},
+        {"name": "equal_T1_floor0p05", "flags": ["--dataset-weighting", "equality", "--heuristic-similarity-temperature", "1.0", "--heuristic-eta-floor", "0.05"]},
     ]
     return run_sensitivity_suite(args=args, suite_name="rq3_transfer_weighting", variants=variants)
 
