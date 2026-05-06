@@ -13,13 +13,15 @@ def main() -> int:
     args = parser.parse_args()
 
     variants = [
-        {"name": "K3_L1", "flags": ["--heuristic-top-k", "3", "--heuristic-top-l", "1"]},
+        # Sweep K with fixed L=3.
         {"name": "K3_L3", "flags": ["--heuristic-top-k", "3", "--heuristic-top-l", "3"]},
-        {"name": "K5_L1", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "1"]},
         {"name": "K5_L3", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "3"]},  # default-like
         {"name": "K10_L3", "flags": ["--heuristic-top-k", "10", "--heuristic-top-l", "3"]},
         {"name": "K20_L3", "flags": ["--heuristic-top-k", "20", "--heuristic-top-l", "3"]},
-        {"name": "K10_L5", "flags": ["--heuristic-top-k", "10", "--heuristic-top-l", "5"]},
+        # Sweep L with fixed K=5.
+        {"name": "K5_L1", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "1"]},
+        {"name": "K5_L3", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "3"]},
+        {"name": "K5_L5", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "5"]},
     ]
     return run_sensitivity_suite(args=args, suite_name="rq3_transfer_neighbors", variants=variants)
 
