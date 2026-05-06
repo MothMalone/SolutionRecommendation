@@ -146,6 +146,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--beta", type=float, default=2.0, help="ACO beta: heuristic importance")
     parser.add_argument("--evaporation", type=float, default=0.2, help="ACO pheromone evaporation rate")
     parser.add_argument(
+        "--top-k-pheromone",
+        type=int,
+        default=3,
+        help="Top-k sampled pipelines per iteration used for pheromone reinforcement (ACO only)",
+    )
+    parser.add_argument(
+        "--aco-weight-method",
+        choices=["rank", "linear", "exponential", "reciprocal", "power_rank", "uniform"],
+        default="rank",
+        help="Weighting scheme for pheromone reinforcement among selected pipelines (ACO only)",
+    )
+    parser.add_argument(
+        "--aco-markov-order",
+        type=int,
+        default=2,
+        help="k-order context for conditional pheromone sampling (ACO only)",
+    )
+    parser.add_argument(
+        "--aco-lambda-smooth",
+        type=float,
+        default=0.7,
+        help="Interpolation weight between conditional/global pheromone sampling (ACO only)",
+    )
+    parser.add_argument(
         "--optimizer",
         choices=["aco", "dqn", "random", "ga", "sa", "greedy", "mcts", "beam", "tpe", "exhaustive"],
         default="aco",
@@ -531,6 +555,83 @@ def main() -> None:
             }
         ]
 
+    def _infer_pipeline_config_from_name(pipeline_name: str) -> dict:
+        # Heuristic backfill for historical pipeline names present in the
+        # performance matrix but absent from pipeline_configs.json.
+        # This keeps Phase-2 transfer informative instead of collapsing to
+        # uniform eta when name-to-config mapping is missing.
+        token = str(pipeline_name).strip().lower()
+        cfg = {
+            "name": str(pipeline_name),
+            "imputation": "none",
+            "scaling": "none",
+            "encoding": "onehot",
+            "feature_selection": "none",
+            "outlier_removal": "none",
+            "dimensionality_reduction": "none",
+        }
+
+        if "knn" in token:
+            cfg["imputation"] = "knn"
+        elif "mostfreq" in token or "most_frequent" in token:
+            cfg["imputation"] = "most_frequent"
+        elif "constant" in token:
+            cfg["imputation"] = "constant"
+        elif "median" in token:
+            cfg["imputation"] = "median"
+        elif "mean" in token:
+            cfg["imputation"] = "mean"
+
+        if "no_scale" in token:
+            cfg["scaling"] = "none"
+        elif "robust" in token:
+            cfg["scaling"] = "robust"
+        elif "minmax" in token:
+            cfg["scaling"] = "minmax"
+        elif "maxabs" in token:
+            cfg["scaling"] = "maxabs"
+        elif "standard" in token:
+            cfg["scaling"] = "standard"
+        elif "uniform" in token or "quantile" in token:
+            # Quantile/uniform-style transforms are not explicit operators in
+            # current search space; minmax is the closest scale-normalizing proxy.
+            cfg["scaling"] = "minmax"
+
+        if "mutualinfo" in token or "mutual_info" in token:
+            cfg["feature_selection"] = "mutual_info"
+        elif "kbest" in token or "k_best" in token:
+            cfg["feature_selection"] = "k_best"
+        elif "variance" in token:
+            cfg["feature_selection"] = "variance_threshold"
+
+        if "iforest" in token or "isolation" in token:
+            cfg["outlier_removal"] = "isolation_forest"
+        elif "zscore" in token:
+            cfg["outlier_removal"] = "zscore"
+        elif "iqr" in token:
+            cfg["outlier_removal"] = "iqr"
+        elif "lof" in token:
+            cfg["outlier_removal"] = "lof"
+
+        if "pca" in token:
+            cfg["dimensionality_reduction"] = "pca"
+        elif "svd" in token:
+            cfg["dimensionality_reduction"] = "svd"
+
+        return cfg
+
+    existing_names = {str(cfg.get("name")) for cfg in pipeline_configs if isinstance(cfg, dict) and "name" in cfg}
+    missing_pipeline_names = [str(name) for name in perf.index if str(name) not in existing_names]
+    if missing_pipeline_names:
+        inferred = [_infer_pipeline_config_from_name(name) for name in missing_pipeline_names]
+        pipeline_configs = list(pipeline_configs) + inferred
+        if args.verbose:
+            sample = ", ".join(missing_pipeline_names[:8])
+            print(
+                "Augmented pipeline configs for unmatched performance-matrix rows: "
+                f"+{len(inferred)} inferred (sample: {sample})"
+            )
+
     dataset_source = args.dataset_source
     if dataset_source is None:
         if args.dataset_csv:
@@ -855,6 +956,10 @@ def main() -> None:
             f"transfer_method={args.heuristic_transfer_method}, "
             f"sim_temperature={float(args.heuristic_similarity_temperature)}, "
             f"eta_floor={float(args.heuristic_eta_floor)}, "
+            f"top_k_pheromone={int(args.top_k_pheromone)}, "
+            f"weight_method={args.aco_weight_method}, "
+            f"markov_order={int(args.aco_markov_order)}, "
+            f"lambda_smooth={float(args.aco_lambda_smooth)}, "
             f"score_direction={args.score_direction}, "
             f"require_autogluon={bool(args.require_autogluon)}, "
             f"proxy_clf_model={proxy_settings.get('classification_model')}, "
@@ -900,6 +1005,10 @@ def main() -> None:
                     "alpha": args.alpha,
                     "beta": args.beta,
                     "evaporation": args.evaporation,
+                    "top_k_pheromone": int(args.top_k_pheromone),
+                    "weight_method": str(args.aco_weight_method),
+                    "markov_order": int(args.aco_markov_order),
+                    "lambda_smooth": float(args.aco_lambda_smooth),
                     "dataset_weighting": args.dataset_weighting,
                     "heuristic_top_k": heuristic_top_k,
                     "heuristic_top_l": int(args.heuristic_top_l),
@@ -988,6 +1097,10 @@ def main() -> None:
             "alpha": float(args.alpha),
             "beta": float(args.beta),
             "evaporation": float(args.evaporation),
+            "top_k_pheromone": int(args.top_k_pheromone),
+            "weight_method": str(args.aco_weight_method),
+            "markov_order": int(args.aco_markov_order),
+            "lambda_smooth": float(args.aco_lambda_smooth),
             "proxy_clf_model": str(proxy_settings.get("classification_model")),
             "proxy_reg_model": str(proxy_settings.get("regression_model")),
             "proxy_split_seeds": list(proxy_settings.get("split_seeds", [])),
