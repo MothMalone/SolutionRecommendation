@@ -92,3 +92,52 @@ def test_aco_sanitizes_non_finite_eta_and_runs():
     )
 
     assert len(final) == 1
+
+
+def test_aco_return_history_contains_iteration_records_only():
+    options = {
+        "imputation": ["none", "mean"],
+        "scaling": ["none", "standard"],
+        "feature_selection": ["none", "k_best"],
+    }
+    eta = _make_eta(options)
+    evaluate_fn = _dummy_evaluate_factory(options)
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate_fn,
+        eta=eta,
+        n_pipelines=2,
+        n_ants=2,
+        n_iterations=4,
+        seed=42,
+        return_history=True,
+    )
+
+    assert len(history) > 1
+    assert all(isinstance(row, dict) for row in history)
+    assert all("iteration" in row and "best_score" in row for row in history)
+
+
+def test_aco_history_carries_forward_when_no_new_configs_sampled():
+    options = {
+        "imputation": ["none"],
+        "scaling": ["none"],
+    }
+    eta = _make_eta(options)
+    evaluate_fn = _dummy_evaluate_factory(options)
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate_fn,
+        eta=eta,
+        n_pipelines=1,
+        n_ants=3,
+        n_iterations=4,
+        seed=42,
+        return_history=True,
+    )
+
+    assert len(history) == 4
+    assert [row.get("iteration") for row in history] == [1, 2, 3, 4]
+    assert all(row.get("best_score") == history[0].get("best_score") for row in history)

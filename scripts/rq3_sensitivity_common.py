@@ -223,10 +223,25 @@ def run_sensitivity_suite(
 
         proc = subprocess.run(command, env=env, check=False)
         row["return_code"] = int(proc.returncode)
-        row["status"] = "ok" if proc.returncode == 0 else "failed"
+        execution_status = "ok" if proc.returncode == 0 else "failed"
+        row["execution_status"] = execution_status
 
         summary = _read_summary(variant_dir)
-        row.update(summary)
+        summary_status = str(summary.get("status", "missing_summary"))
+        row.update({k: v for k, v in summary.items() if k != "status"})
+        row["summary_status"] = summary_status
+
+        num_failed = summary.get("num_failed")
+        if execution_status == "failed":
+            row["status"] = "failed"
+        elif summary_status == "ok":
+            if isinstance(num_failed, (int, float)) and int(num_failed) > 0:
+                row["status"] = "partial_failed"
+            else:
+                row["status"] = "ok"
+        else:
+            # Single-dataset runs do not emit recommendations_summary.json.
+            row["status"] = "ok_no_summary"
         rows.append(row)
 
     results_df = pd.DataFrame(rows)
@@ -240,6 +255,7 @@ def run_sensitivity_suite(
     print(f"  {results_csv}")
     print(f"  {results_json}")
 
-    failed = int((results_df.get("status") == "failed").sum()) if not results_df.empty else 0
+    if results_df.empty:
+        return 0
+    failed = int(results_df["status"].isin(["failed", "partial_failed"]).sum())
     return 1 if failed > 0 else 0
-

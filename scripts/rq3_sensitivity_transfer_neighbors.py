@@ -20,7 +20,6 @@ def main() -> int:
         {"name": "K20_L3", "flags": ["--heuristic-top-k", "20", "--heuristic-top-l", "3"]},
         # Sweep L with fixed K=5.
         {"name": "K5_L1", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "1"]},
-        {"name": "K5_L3", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "3"]},
         {"name": "K5_L5", "flags": ["--heuristic-top-k", "5", "--heuristic-top-l", "5"]},
     ]
     return run_sensitivity_suite(args=args, suite_name="rq3_transfer_neighbors", variants=variants)

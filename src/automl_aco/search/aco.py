@@ -124,6 +124,15 @@ def search_pipelines_aco(
                 sampled.append(cfg)
 
         if not sampled:
+            carry_best = None
+            if eval_cache:
+                carry_best = float(max(sc for _cfg, sc in eval_cache.values()))
+            history.append({"iteration": iteration + 1, "best_score": carry_best})
+            logger.info(
+                "ACO Iter %s/%s - No new unique configuration sampled",
+                iteration + 1,
+                n_iterations,
+            )
             continue
 
         best_cfg, best_score, eval_results, unsorted_res = evaluate_fn(sampled)
@@ -170,15 +179,15 @@ def search_pipelines_aco(
             weights = np.ones_like(scores, dtype=float)
 
         for (cfg, _score), weight in zip(selected, weights):
-            history: List[Tuple[str, int]] = []
+            path_context: List[Tuple[str, int]] = []
             for step in step_order:
                 val_idx = options[step].index(cfg[step])
                 pheromones[step][val_idx] += weight
-                if len(history) >= markov_order:
-                    context = tuple(history[-markov_order:])
+                if len(path_context) >= markov_order:
+                    context = tuple(path_context[-markov_order:])
                     k_pher = get_k_pheromone(step, context)
                     k_pher[val_idx] += weight
-                history.append((step, val_idx))
+                path_context.append((step, val_idx))
 
         candidate_pipelines.extend(unsorted_res)
         history.append({"iteration": iteration + 1, "best_score": float(best_score)})

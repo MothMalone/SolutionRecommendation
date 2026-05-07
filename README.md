@@ -149,6 +149,17 @@ For batch runs, summary metrics are saved to `recommendations_summary.json`:
 - average final score
 - average AutoGluon score (runs where final method is `autogluon`)
 
+Explain ablation outputs (quantization / fallback / tie-vs-baseline diagnostics):
+
+```bash
+python -m scripts.rq3_explain_sensitivity \
+  --suite-dir outputs/ablation_budget/rq3_budget
+```
+
+This generates:
+- `ablation_explain_rows.csv` (dataset-level diagnostics and explanation labels)
+- `ablation_explain_summary.csv` (variant-level win/tie/loss + AutoGluon usage rate)
+
 Run multiple datasets in one command:
 
 ```bash
