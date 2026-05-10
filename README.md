@@ -160,6 +160,19 @@ This generates:
 - `ablation_explain_rows.csv` (dataset-level diagnostics and explanation labels)
 - `ablation_explain_summary.csv` (variant-level win/tie/loss + AutoGluon usage rate)
 
+For long Kaggle runs, you can shard/resume sensitivity suites:
+
+```bash
+python -m scripts.rq3_sensitivity_budget \
+  --dataset-ids 27 1047 248 1387 1054 \
+  --variants ants5_iter5 ants10_iter10 \
+  --resume \
+  --output-root /kaggle/working/rq3_sensitivity
+```
+
+`--variants` runs only named variants. `--resume` loads existing `sensitivity_results.*` and skips completed variants.
+Results are flushed after each variant, so progress survives session timeouts.
+
 Run multiple datasets in one command:
 
 ```bash

@@ -72,6 +72,17 @@ def build_common_parser(description: str) -> argparse.ArgumentParser:
     parser.add_argument("--allow-autogluon-fallback", action="store_true", help="Allow fallback if AG unavailable")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing")
+    parser.add_argument(
+        "--variants",
+        nargs="*",
+        default=None,
+        help="Optional subset of variant names to run (e.g., ants5_iter5 ants10_iter10)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from existing sensitivity_results files and skip completed variants",
+    )
     return parser
 
 
@@ -177,6 +188,35 @@ def run_sensitivity_suite(
     suite_name: str,
     variants: Sequence[Mapping[str, Any]],
 ) -> int:
+    def _save_rows(rows_payload: List[Dict[str, Any]], out_dir: Path) -> None:
+        results_df_local = pd.DataFrame(rows_payload)
+        results_csv_local = out_dir / "sensitivity_results.csv"
+        results_json_local = out_dir / "sensitivity_results.json"
+        results_df_local.to_csv(results_csv_local, index=False)
+        with open(results_json_local, "w", encoding="utf-8") as f:
+            json.dump(rows_payload, f, indent=2, default=str)
+
+    def _load_existing_rows(out_dir: Path) -> List[Dict[str, Any]]:
+        existing_json = out_dir / "sensitivity_results.json"
+        existing_csv = out_dir / "sensitivity_results.csv"
+
+        if existing_json.exists():
+            try:
+                with open(existing_json, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+                if isinstance(payload, list):
+                    return [row for row in payload if isinstance(row, dict)]
+            except Exception:
+                pass
+
+        if existing_csv.exists():
+            try:
+                df = pd.read_csv(existing_csv)
+                return df.to_dict(orient="records")
+            except Exception:
+                pass
+        return []
+
     paths = resolve_default_paths(args)
     base_command = _build_base_command(args, paths)
 
@@ -184,16 +224,44 @@ def run_sensitivity_suite(
     suite_dir = output_root / suite_name
     suite_dir.mkdir(parents=True, exist_ok=True)
 
+    selected_variants = list(variants)
+    requested_variant_names = [str(v) for v in (args.variants or []) if str(v).strip()]
+    if requested_variant_names:
+        requested_set = set(requested_variant_names)
+        selected_variants = [variant for variant in variants if str(variant.get("name")) in requested_set]
+        missing = sorted(requested_set - {str(v.get("name")) for v in selected_variants})
+        if missing:
+            print(f"Warning: unknown variants requested and ignored: {missing}")
+
     rows: List[Dict[str, Any]] = []
-    for idx, variant in enumerate(variants, start=1):
+    if args.resume:
+        rows = _load_existing_rows(suite_dir)
+        if rows:
+            print(f"Loaded {len(rows)} existing rows from {suite_dir}")
+    rows_by_variant: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        name = str(row.get("variant", "")).strip()
+        if name:
+            rows_by_variant[name] = row
+
+    terminal_statuses = {"ok", "ok_no_summary", "partial_failed", "failed", "dry_run"}
+
+    for idx, variant in enumerate(selected_variants, start=1):
         variant_name = str(variant["name"])
         extra_flags = [str(x) for x in variant.get("flags", [])]
         variant_dir = suite_dir / variant_name
         variant_dir.mkdir(parents=True, exist_ok=True)
 
+        if args.resume:
+            existing_row = rows_by_variant.get(variant_name)
+            existing_status = str(existing_row.get("status", "")) if isinstance(existing_row, dict) else ""
+            if existing_status in terminal_statuses:
+                print(f"\n[{idx}/{len(selected_variants)}] {suite_name}:{variant_name} (resume: skip status={existing_status})")
+                continue
+
         command = list(base_command) + extra_flags + ["--output-dir", str(variant_dir)]
         command_str = " ".join(shlex.quote(token) for token in command)
-        print(f"\n[{idx}/{len(variants)}] {suite_name}:{variant_name}")
+        print(f"\n[{idx}/{len(selected_variants)}] {suite_name}:{variant_name}")
         print(command_str)
 
         row: Dict[str, Any] = {
@@ -206,7 +274,9 @@ def run_sensitivity_suite(
 
         if args.dry_run:
             row["status"] = "dry_run"
-            rows.append(row)
+            rows_by_variant[variant_name] = row
+            rows = [rows_by_variant[name] for name in sorted(rows_by_variant.keys())]
+            _save_rows(rows, suite_dir)
             continue
 
         env = os.environ.copy()
@@ -242,14 +312,14 @@ def run_sensitivity_suite(
         else:
             # Single-dataset runs do not emit recommendations_summary.json.
             row["status"] = "ok_no_summary"
-        rows.append(row)
+        rows_by_variant[variant_name] = row
+        rows = [rows_by_variant[name] for name in sorted(rows_by_variant.keys())]
+        _save_rows(rows, suite_dir)
 
+    rows = [rows_by_variant[name] for name in sorted(rows_by_variant.keys())]
     results_df = pd.DataFrame(rows)
     results_csv = suite_dir / "sensitivity_results.csv"
     results_json = suite_dir / "sensitivity_results.json"
-    results_df.to_csv(results_csv, index=False)
-    with open(results_json, "w", encoding="utf-8") as f:
-        json.dump(rows, f, indent=2, default=str)
 
     print("\nSaved sensitivity results:")
     print(f"  {results_csv}")
