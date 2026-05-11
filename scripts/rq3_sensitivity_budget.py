@@ -14,9 +14,11 @@ def main() -> int:
 
     variants = [
         {"name": "ants5_iter5", "flags": ["--n-ants", "5", "--n-iterations", "5"]},
-        {"name": "ants10_iter10", "flags": ["--n-ants", "10", "--n-iterations", "10"]},  # default-like
+        {"name": "ants5_iter15", "flags": ["--n-ants", "5", "--n-iterations", "15"]},
+        {"name": "ants5_iter20", "flags": ["--n-ants", "5", "--n-iterations", "20"]},
+        {"name": "ants5_iter10", "flags": ["--n-ants", "5", "--n-iterations", "10"]},  # default-like
+        {"name": "ants10_iter10", "flags": ["--n-ants", "10", "--n-iterations", "10"]},
         {"name": "ants15_iter10", "flags": ["--n-ants", "15", "--n-iterations", "10"]},
-        {"name": "ants10_iter15", "flags": ["--n-ants", "10", "--n-iterations", "15"]},
         {"name": "ants20_iter10", "flags": ["--n-ants", "20", "--n-iterations", "10"]},
     ]
     return run_sensitivity_suite(args=args, suite_name="rq3_budget", variants=variants)
