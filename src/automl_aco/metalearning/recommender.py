@@ -24,6 +24,7 @@ from ..search.aco import search_pipelines_aco
 from ..search.optimizers import search_pipelines_with_optimizer
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
 from ..search.ordering import OrderSearchConfig, all_topological_orders, heuristic_score_order, propose_orders
+from ..utils.operator_spec import base_operator_name
 
 logger = get_logger(__name__)
 
@@ -348,7 +349,9 @@ class MetaPipelineRecommender:
         use_all_iter_pipelines: bool = False,
         weight_method: str = "rank",
         markov_order: int = 2,
-        lambda_smooth: float = 0.7,
+        lambda_smooth: float = 0.0,
+        early_stop_rounds: int = 0,
+        min_improvement: float = 0.0,
         step_order: Optional[List[str]] = None,
     ):
         eta = self._compute_aco_heuristic(
@@ -414,6 +417,8 @@ class MetaPipelineRecommender:
             weight_method=weight_method,
             markov_order=markov_order,
             lambda_smooth=lambda_smooth,
+            early_stop_rounds=early_stop_rounds,
+            min_improvement=min_improvement,
             verbose=self.verbose,
             return_history=True,
         )
@@ -421,6 +426,404 @@ class MetaPipelineRecommender:
             return result
         final, unsorted = result
         return final, unsorted, []
+
+    def _per_feature_candidate_values(
+        self,
+        *,
+        step: str,
+        feature_kind: str,
+        options: Dict[str, List[str]],
+    ) -> List[str]:
+        raw_values = [str(v) for v in options.get(step, [])]
+        if not raw_values:
+            return ["none"]
+
+        def _dedup(vals: List[str]) -> List[str]:
+            seen = set()
+            out = []
+            for v in vals:
+                if v not in seen:
+                    seen.add(v)
+                    out.append(v)
+            return out
+
+        if step == "scaling":
+            if feature_kind != "numeric":
+                return ["none"]
+            return _dedup(raw_values)
+
+        if step == "encoding":
+            if feature_kind != "categorical":
+                return ["none"]
+            return _dedup(raw_values)
+
+        if step == "imputation":
+            if feature_kind == "categorical":
+                preferred = [v for v in raw_values if base_operator_name(v) in {"none", "most_frequent", "constant"}]
+                if preferred:
+                    return _dedup(preferred)
+            return _dedup(raw_values)
+
+        return ["none"]
+
+    def _search_pipelines_aco_per_feature(
+        self,
+        *,
+        new_dataset: Any,
+        target_column: str,
+        new_metafeatures: np.ndarray,
+        options: Dict[str, List[str]],
+        proxy_settings: Optional[Dict[str, Any]],
+        n_pipelines: int,
+        n_ants: int,
+        n_iterations: int,
+        seed: int,
+        alpha: float,
+        beta: float,
+        evaporation: float,
+        top_k_pheromone: int,
+        weight_method: str,
+        markov_order: int,
+        lambda_smooth: float,
+        use_all_iter_pipelines: bool,
+        step_order: Optional[List[str]],
+        dataset_weighting: str = "similarity",
+        heuristic_top_k: int = 10,
+        heuristic_top_l: int = 3,
+        heuristic_similarity_temperature: float = 1.0,
+        heuristic_eta_floor: float = 0.05,
+        heuristic_transfer_method: str = "weighted_topk_topl",
+        score_direction: str = "higher_is_better",
+        query_dataset_id: Optional[Any] = None,
+        time_limit_per_model: int = 3000,
+        metafeatures_func=None,
+        per_feature_steps: Optional[List[str]] = None,
+        per_feature_early_stop_rounds: int = 0,
+        per_feature_min_improvement: float = 0.0,
+        per_feature_feature_patience: int = 0,
+        per_feature_feature_min_improvement: float = 0.0,
+        per_feature_max_features: int = 0,
+    ) -> Tuple[
+        List[Tuple[Dict[str, Any], float]],
+        List[Tuple[Dict[str, Any], float]],
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+    ]:
+        if not isinstance(new_dataset, pd.DataFrame):
+            raise ValueError("Per-feature ACO mode requires new_dataset as DataFrame")
+        if target_column not in new_dataset.columns:
+            raise ValueError(f"Target column {target_column!r} missing from dataset")
+
+        X_df = new_dataset.drop(columns=[target_column]).copy()
+        if X_df.empty:
+            raise ValueError("Dataset has no feature columns for per-feature optimization")
+
+        features = [str(c) for c in X_df.columns]
+        kinds = {
+            str(c): ("numeric" if pd.api.types.is_numeric_dtype(X_df[c]) else "categorical")
+            for c in X_df.columns
+        }
+
+        def _choose_global(step: str, default: str = "none") -> str:
+            vals = [str(v) for v in options.get(step, [])]
+            if not vals:
+                return default
+            if len(vals) == 1:
+                return vals[0]
+            for v in vals:
+                if base_operator_name(v) == base_operator_name(default):
+                    return v
+            for v in vals:
+                if base_operator_name(v) == "none":
+                    return v
+            return vals[0]
+
+        outlier_choice = _choose_global("outlier_removal", default="none")
+        fs_choice = _choose_global("feature_selection", default="none")
+        dr_choice = _choose_global("dimensionality_reduction", default="none")
+        order = list(step_order) if isinstance(step_order, list) and step_order else list(options.keys())
+
+        # Keep Phase-1/2 transfer active: seed per-feature local eta from
+        # transferred global operator heuristic (eta_norm).
+        global_eta = self._compute_aco_heuristic(
+            new_metafeatures,
+            options,
+            dataset_weighting=dataset_weighting,
+            top_k=max(1, int(heuristic_top_k)),
+            use_top_pipelines_from_metric=True,
+            recommend_kwargs={
+                "new_dataset": new_dataset,
+                "target_column": target_column,
+                "options": options,
+                "k": 5,
+                "eval_k": 3,
+                "use_aco": False,
+                "time_limit_per_model": time_limit_per_model,
+                "use_autogluon": False,
+                "metafeatures_func": metafeatures_func,
+            },
+            top_l=max(1, int(heuristic_top_l)),
+            similarity_temperature=float(heuristic_similarity_temperature),
+            eta_floor=float(heuristic_eta_floor),
+            heuristic_transfer_method=str(heuristic_transfer_method),
+            score_direction=str(score_direction),
+            query_dataset_id=query_dataset_id,
+        )
+
+        imputation_map: Dict[str, str] = {}
+        scaling_map: Dict[str, str] = {}
+        encoding_map: Dict[str, str] = {}
+
+        encoding_defaults = [str(v) for v in options.get("encoding", []) if base_operator_name(v) != "none"]
+        default_encoding = encoding_defaults[0] if encoding_defaults else "onehot"
+        for col in features:
+            kind = kinds[col]
+            has_missing = bool(X_df[col].isna().any())
+            if kind == "numeric":
+                imputation_map[col] = "mean" if has_missing else "none"
+                scaling_map[col] = "none"
+                encoding_map[col] = "none"
+            else:
+                imputation_map[col] = "most_frequent" if has_missing else "none"
+                scaling_map[col] = "none"
+                encoding_map[col] = default_encoding
+
+        indep_steps = per_feature_steps or ["imputation", "scaling", "encoding"]
+        indep_steps = [s for s in indep_steps if s in {"imputation", "scaling", "encoding"}]
+        if not indep_steps:
+            indep_steps = ["imputation", "scaling", "encoding"]
+
+        feature_logs: List[Dict[str, Any]] = []
+        all_history: List[Dict[str, Any]] = []
+        all_unsorted: List[Tuple[Dict[str, Any], float]] = []
+        stage_best_score: Optional[float] = None
+        no_improve_features = 0
+        global_iter = 1
+
+        feature_sequence = list(features)
+        if int(per_feature_max_features) > 0:
+            feature_sequence = feature_sequence[: int(per_feature_max_features)]
+
+        for feat_idx, feature in enumerate(feature_sequence, start=1):
+            kind = kinds[feature]
+            local_options: Dict[str, List[str]] = {}
+            for step in indep_steps:
+                local_options[step] = self._per_feature_candidate_values(
+                    step=step,
+                    feature_kind=kind,
+                    options=options,
+                )
+            if not local_options:
+                continue
+
+            local_eta: Dict[str, np.ndarray] = {}
+            local_eta_by_choice: Dict[str, Dict[str, float]] = {}
+            for step, vals in local_options.items():
+                global_vals = [str(v) for v in options.get(step, [])]
+                step_eta = np.asarray(global_eta.get(step, np.ones(len(global_vals), dtype=float)), dtype=float)
+                eta_lookup: Dict[str, float] = {}
+                for idx, gval in enumerate(global_vals):
+                    if idx < len(step_eta):
+                        val = float(step_eta[idx])
+                        if np.isfinite(val) and val > 0 and gval not in eta_lookup:
+                            eta_lookup[gval] = val
+                local_arr = []
+                local_map: Dict[str, float] = {}
+                for v in vals:
+                    eta_v = float(eta_lookup.get(str(v), 1.0))
+                    local_arr.append(eta_v)
+                    local_map[str(v)] = eta_v
+                local_eta[step] = np.asarray(local_arr, dtype=float)
+                local_eta_by_choice[step] = local_map
+
+            def _build_full_cfg(local_cfg: Dict[str, Any], name: str) -> Dict[str, Any]:
+                imp = dict(imputation_map)
+                scl = dict(scaling_map)
+                enc = dict(encoding_map)
+                for step, val in local_cfg.items():
+                    if step == "imputation":
+                        imp[feature] = str(val)
+                    elif step == "scaling":
+                        scl[feature] = str(val)
+                    elif step == "encoding":
+                        enc[feature] = str(val)
+                cfg: Dict[str, Any] = {
+                    "imputation": imp,
+                    "scaling": scl,
+                    "encoding": enc,
+                    "outlier_removal": outlier_choice,
+                    "feature_selection": fs_choice,
+                    "dimensionality_reduction": dr_choice,
+                    "name": name,
+                }
+                if order:
+                    cfg["step_order"] = list(order)
+                return cfg
+
+            def _evaluate_local(sampled_cfgs: List[Dict[str, Any]]):
+                cands: List[Dict[str, Any]] = []
+                for j, cfg_local in enumerate(sampled_cfgs):
+                    ops = ",".join(f"{k}={v}" for k, v in cfg_local.items())
+                    full_cfg = _build_full_cfg(cfg_local, f"feature={feature}|{ops}|cand={j+1}")
+                    full_cfg["__local_cfg__"] = dict(cfg_local)
+                    cands.append(full_cfg)
+                best_cfg, best_score, eval_results, unsorted_results = self._evaluate_candidates_with_simple_models(
+                    new_dataset,
+                    target_column,
+                    cands,
+                    proxy_settings=proxy_settings,
+                )
+                if best_cfg is None or not eval_results:
+                    return None, np.nan, [], []
+
+                def _to_local(cfg: Dict[str, Any]) -> Dict[str, Any]:
+                    local = cfg.get("__local_cfg__")
+                    if isinstance(local, dict):
+                        return dict(local)
+                    return {k: v for k, v in cfg.items() if k in local_options}
+
+                eval_local = [(_to_local(cfg), float(sc)) for cfg, sc in eval_results]
+                unsorted_local = [(_to_local(cfg), float(sc)) for cfg, sc in unsorted_results]
+                best_local = _to_local(best_cfg)
+                return best_local, float(best_score), eval_local, unsorted_local
+
+            local_final, local_unsorted, local_history = search_pipelines_aco(
+                options=local_options,
+                evaluate_fn=_evaluate_local,
+                eta=local_eta,
+                n_pipelines=1,
+                n_ants=n_ants,
+                n_iterations=n_iterations,
+                seed=seed + feat_idx - 1,
+                alpha=alpha,
+                beta=beta,
+                evaporation=evaporation,
+                top_k_pheromone=top_k_pheromone,
+                use_all_iter_pipelines=use_all_iter_pipelines,
+                weight_method=weight_method,
+                markov_order=markov_order,
+                lambda_smooth=lambda_smooth,
+                early_stop_rounds=max(0, int(per_feature_early_stop_rounds)),
+                min_improvement=float(per_feature_min_improvement),
+                verbose=self.verbose,
+                return_history=True,
+            )
+
+            for row in local_history:
+                if isinstance(row, dict):
+                    all_history.append(
+                        {
+                            "iteration": global_iter,
+                            "feature_index": feat_idx,
+                            "feature": feature,
+                            "feature_kind": kind,
+                            "feature_local_iteration": row.get("iteration"),
+                            "best_score": row.get("best_score"),
+                        }
+                    )
+                    global_iter += 1
+
+            if local_final:
+                best_cfg, best_score = local_final[0]
+                if "imputation" in best_cfg:
+                    imputation_map[feature] = str(best_cfg.get("imputation"))
+                if "scaling" in best_cfg:
+                    scaling_map[feature] = str(best_cfg.get("scaling"))
+                if "encoding" in best_cfg:
+                    encoding_map[feature] = str(best_cfg.get("encoding"))
+                all_unsorted.append((_build_full_cfg(best_cfg, f"feature={feature}|selected"), float(best_score)))
+
+                feature_logs.append(
+                    {
+                        "feature_index": feat_idx,
+                        "feature": feature,
+                        "feature_kind": kind,
+                        "status": "optimized",
+                        "selected_ops": {
+                            "imputation": imputation_map.get(feature),
+                            "scaling": scaling_map.get(feature),
+                            "encoding": encoding_map.get(feature),
+                        },
+                        "best_score_after_feature": float(best_score),
+                        "local_history_points": len(local_history),
+                        "local_candidates": len(local_unsorted),
+                        "local_options": {k: list(v) for k, v in local_options.items()},
+                        "local_eta": local_eta_by_choice,
+                        "heuristic_source": "phase2_transferred_eta_norm",
+                    }
+                )
+
+                if stage_best_score is None or float(best_score) > (stage_best_score + float(per_feature_feature_min_improvement)):
+                    stage_best_score = float(best_score)
+                    no_improve_features = 0
+                else:
+                    no_improve_features += 1
+            else:
+                no_improve_features += 1
+                feature_logs.append(
+                    {
+                        "feature_index": feat_idx,
+                        "feature": feature,
+                        "feature_kind": kind,
+                        "status": "no_valid_candidate",
+                        "selected_ops": {
+                            "imputation": imputation_map.get(feature),
+                            "scaling": scaling_map.get(feature),
+                            "encoding": encoding_map.get(feature),
+                        },
+                        "local_history_points": len(local_history),
+                        "local_candidates": len(local_unsorted),
+                        "local_options": {k: list(v) for k, v in local_options.items()},
+                        "local_eta": local_eta_by_choice,
+                        "heuristic_source": "phase2_transferred_eta_norm",
+                    }
+                )
+
+            if int(per_feature_feature_patience) > 0 and no_improve_features >= int(per_feature_feature_patience):
+                feature_logs.append(
+                    {
+                        "feature_index": feat_idx,
+                        "feature": feature,
+                        "feature_kind": kind,
+                        "status": "early_stop_features",
+                        "reason": (
+                            "no_improvement_across_features "
+                            f"for {no_improve_features} consecutive features"
+                        ),
+                    }
+                )
+                break
+
+        final_cfg: Dict[str, Any] = {
+            "imputation": dict(imputation_map),
+            "scaling": dict(scaling_map),
+            "encoding": dict(encoding_map),
+            "outlier_removal": outlier_choice,
+            "feature_selection": fs_choice,
+            "dimensionality_reduction": dr_choice,
+            "name": "per_feature_independent_pipeline",
+        }
+        if order:
+            final_cfg["step_order"] = list(order)
+
+        final_best_cfg, final_best_score, final_all, _final_unsorted = self._evaluate_candidates_with_simple_models(
+            new_dataset,
+            target_column,
+            [final_cfg],
+            proxy_settings=proxy_settings,
+        )
+        if final_best_cfg is None or not final_all or not np.isfinite(final_best_score):
+            final_best_cfg = final_cfg
+            final_best_score = float(stage_best_score) if stage_best_score is not None else float("nan")
+        else:
+            final_best_cfg = final_best_cfg
+            final_best_score = float(final_best_score)
+
+        top = [(final_best_cfg, final_best_score)]
+        unsorted = list(all_unsorted)
+        if not unsorted:
+            unsorted = list(top)
+        return top[: max(1, int(n_pipelines))], unsorted, all_history, feature_logs
 
     def _evaluate_candidates_with_autogluon(self, dataset, target_column, candidate_configs, time_limit_per_model=300):
         return evaluate_candidates_autogluon(
@@ -838,6 +1241,74 @@ class MetaPipelineRecommender:
             optimizer_name = optimizer.lower().strip()
             if optimizer_name == "":
                 optimizer_name = "aco"
+            per_feature_mode = bool(aco_params.get("per_feature_independent_search", False))
+            if per_feature_mode and optimizer_name != "aco":
+                raise ValueError("per_feature_independent_search requires optimizer='aco'")
+
+            if per_feature_mode:
+                if target_column is None:
+                    raise ValueError("target_column is required for per-feature ACO search")
+                step_list = aco_params.get("per_feature_steps", ["imputation", "scaling", "encoding"])
+                if isinstance(step_list, str):
+                    parsed = [s.strip() for s in step_list.split(",") if s.strip()]
+                    step_list = parsed if parsed else ["imputation", "scaling", "encoding"]
+                elif isinstance(step_list, (tuple, list)):
+                    step_list = [str(s).strip() for s in step_list if str(s).strip()]
+                else:
+                    step_list = ["imputation", "scaling", "encoding"]
+
+                aco_results, aco_unsorted_res, all_history, per_feature_pipeline_log = self._search_pipelines_aco_per_feature(
+                    new_dataset=new_dataset,
+                    target_column=target_column,
+                    new_metafeatures=new_mf_scaled,
+                    options=options,
+                    proxy_settings=proxy_settings,
+                    n_pipelines=k,
+                    n_ants=int(aco_params.get("n_ants", 10)),
+                    n_iterations=int(aco_params.get("n_iterations", 10)),
+                    seed=aco_seed,
+                    alpha=float(aco_params.get("alpha", 1.0)),
+                    beta=float(aco_params.get("beta", 2.0)),
+                    evaporation=float(aco_params.get("evaporation", 0.2)),
+                    top_k_pheromone=int(aco_params.get("top_k_pheromone", 3)),
+                    weight_method=str(aco_params.get("weight_method", "rank")),
+                    markov_order=int(aco_params.get("markov_order", 2)),
+                    lambda_smooth=float(aco_params.get("lambda_smooth", 0.0)),
+                    use_all_iter_pipelines=bool(aco_params.get("use_all_iter_pipelines", False)),
+                    step_order=base_order,
+                    dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
+                    heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
+                    heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
+                    heuristic_similarity_temperature=float(
+                        aco_params.get("heuristic_similarity_temperature", 1.0)
+                    ),
+                    heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                    heuristic_transfer_method=str(aco_params.get("heuristic_transfer_method", "weighted_topk_topl")),
+                    score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                    query_dataset_id=aco_params.get("query_dataset_id"),
+                    time_limit_per_model=time_limit_per_model,
+                    metafeatures_func=metafeatures_func,
+                    per_feature_steps=step_list,
+                    per_feature_early_stop_rounds=int(aco_params.get("per_feature_early_stop_rounds", 0)),
+                    per_feature_min_improvement=float(aco_params.get("per_feature_min_improvement", 0.0)),
+                    per_feature_feature_patience=int(aco_params.get("per_feature_feature_patience", 0)),
+                    per_feature_feature_min_improvement=float(
+                        aco_params.get("per_feature_feature_min_improvement", 0.0)
+                    ),
+                    per_feature_max_features=int(aco_params.get("per_feature_max_features", 0)),
+                )
+                if not aco_results:
+                    raise RuntimeError("Per-feature ACO search produced no valid pipeline candidates.")
+
+                best_pipeline, best_score = aco_results[0]
+                all_top_results: List[Tuple[Dict[str, Any], float]] = []
+                order_iteration_results: List[Dict[str, Any]] = []
+                candidate_orders = [base_order]
+                run_quick_order_eval = False
+                quick_order_eval_time_limit = int(aco_params.get("ordering_quick_time_limit", 30))
+                used_order_level_scoring = False
+            else:
+                per_feature_pipeline_log = []
             if search_ordering:
                 constraints = order_constraints if order_constraints is not None else DEFAULT_ORDERING_CONSTRAINTS
                 constraints = [(a, b) for a, b in constraints if a in base_order and b in base_order]
@@ -852,212 +1323,224 @@ class MetaPipelineRecommender:
             else:
                 candidate_orders = [base_order]
 
-            all_top_results: List[Tuple[Dict[str, Any], float]] = []
-            all_unsorted_results: List[Tuple[Dict[str, Any], float]] = []
-            all_history: List[Dict[str, Any]] = []
-            order_iteration_results: List[Dict[str, Any]] = []
-            global_iteration = 1
-            run_quick_order_eval = bool(
-                search_ordering
-                and use_autogluon
-                and autogluon_runtime_enabled
-                and target_column is not None
-            )
-            quick_order_eval_time_limit = int(aco_params.get("ordering_quick_time_limit", 30))
-            quick_order_eval_time_limit = max(5, quick_order_eval_time_limit)
+            if not per_feature_mode:
+                all_top_results = []
+                all_unsorted_results = []
+                all_history = []
+                order_iteration_results = []
+                global_iteration = 1
+                run_quick_order_eval = bool(
+                    search_ordering
+                    and use_autogluon
+                    and autogluon_runtime_enabled
+                    and target_column is not None
+                )
+                quick_order_eval_time_limit = int(aco_params.get("ordering_quick_time_limit", 30))
+                quick_order_eval_time_limit = max(5, quick_order_eval_time_limit)
 
-            for order_idx, order in enumerate(candidate_orders, start=1):
-                ordered_options = {step: options[step] for step in order}
-                if optimizer_name == "aco":
-                    aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
-                        new_dataset,
-                        target_column,
-                        new_mf_scaled,
-                        ordered_options,
-                        proxy_settings=proxy_settings,
-                        n_pipelines=k,
-                        n_ants=aco_params.get("n_ants", 10),
-                        n_iterations=aco_params.get("n_iterations", 10),
-                        seed=aco_seed + order_idx - 1,
-                        alpha=float(aco_params.get("alpha", 1.0)),
-                        beta=float(aco_params.get("beta", 2.0)),
-                        evaporation=float(aco_params.get("evaporation", 0.2)),
-                        top_k_pheromone=int(aco_params.get("top_k_pheromone", 3)),
-                        weight_method=str(aco_params.get("weight_method", "rank")),
-                        markov_order=int(aco_params.get("markov_order", 2)),
-                        lambda_smooth=float(aco_params.get("lambda_smooth", 0.7)),
-                        dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
-                        heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
-                        heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
-                        heuristic_similarity_temperature=float(aco_params.get("heuristic_similarity_temperature", 1.0)),
-                        heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
-                        heuristic_transfer_method=str(aco_params.get("heuristic_transfer_method", "weighted_topk_topl")),
-                        score_direction=str(aco_params.get("score_direction", "higher_is_better")),
-                        query_dataset_id=aco_params.get("query_dataset_id"),
-                        time_limit_per_model=time_limit_per_model,
-                        metafeatures_func=metafeatures_func,
-                        step_order=order,
-                    )
-                elif optimizer_name == "dqn":
-                    aco_results, aco_unsorted_res, aco_history = self._search_pipelines_dqn(
-                        new_dataset=new_dataset,
-                        target_column=target_column,
-                        new_metafeatures=new_mf_scaled,
-                        options=ordered_options,
-                        proxy_settings=proxy_settings,
-                        n_pipelines=k,
-                        sample_budget=sample_budget,
-                        seed=aco_seed + order_idx - 1,
-                        dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
-                        heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
-                        heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
-                        heuristic_similarity_temperature=float(aco_params.get("heuristic_similarity_temperature", 1.0)),
-                        heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
-                        heuristic_transfer_method=str(aco_params.get("heuristic_transfer_method", "weighted_topk_topl")),
-                        score_direction=str(aco_params.get("score_direction", "higher_is_better")),
-                        query_dataset_id=aco_params.get("query_dataset_id"),
-                        time_limit_per_model=time_limit_per_model,
-                        metafeatures_func=metafeatures_func,
-                        dqn_params=aco_params,
-                        enable_internal_order_policy=not search_ordering,
-                    )
-                else:
-                    aco_results, aco_unsorted_res, aco_history = self._search_pipelines_optimizer(
-                        optimizer=optimizer_name,
-                        new_dataset=new_dataset,
-                        target_column=target_column,
-                        options=ordered_options,
-                        proxy_settings=proxy_settings,
-                        n_pipelines=k,
-                        sample_budget=sample_budget,
-                        seed=aco_seed + order_idx - 1,
-                        step_order=order,
-                    )
-
-                for cfg, score in aco_results:
-                    cfg2 = dict(cfg)
-                    cfg2["step_order"] = list(order)
-                    all_top_results.append((cfg2, float(score)))
-                for cfg, score in aco_unsorted_res:
-                    cfg2 = dict(cfg)
-                    cfg2["step_order"] = list(order)
-                    all_unsorted_results.append((cfg2, float(score)))
-                order_best_cfg: Optional[Dict[str, Any]] = None
-                order_proxy_score: Optional[float] = None
-                if aco_results:
-                    order_best_cfg = dict(aco_results[0][0])
-                    order_best_cfg["step_order"] = list(order)
-                    order_proxy_score = float(aco_results[0][1])
-
-                order_autogluon_score: Optional[float] = None
-                order_autogluon_error: Optional[str] = None
-                if run_quick_order_eval and order_best_cfg is not None:
-                    try:
-                        ag_cfg, ag_score, ag_results, _ = self._evaluate_candidates_with_autogluon(
+            if not per_feature_mode:
+                for order_idx, order in enumerate(candidate_orders, start=1):
+                    ordered_options = {step: options[step] for step in order}
+                    if optimizer_name == "aco":
+                        aco_results, aco_unsorted_res, aco_history = self._search_pipelines_aco(
                             new_dataset,
                             target_column,
-                            [order_best_cfg],
-                            time_limit_per_model=quick_order_eval_time_limit,
+                            new_mf_scaled,
+                            ordered_options,
+                            proxy_settings=proxy_settings,
+                            n_pipelines=k,
+                            n_ants=aco_params.get("n_ants", 10),
+                            n_iterations=aco_params.get("n_iterations", 10),
+                            seed=aco_seed + order_idx - 1,
+                            alpha=float(aco_params.get("alpha", 1.0)),
+                            beta=float(aco_params.get("beta", 2.0)),
+                            evaporation=float(aco_params.get("evaporation", 0.2)),
+                            top_k_pheromone=int(aco_params.get("top_k_pheromone", 3)),
+                            weight_method=str(aco_params.get("weight_method", "rank")),
+                            markov_order=int(aco_params.get("markov_order", 2)),
+                            lambda_smooth=float(aco_params.get("lambda_smooth", 0.0)),
+                            dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
+                            heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
+                            heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
+                            heuristic_similarity_temperature=float(
+                                aco_params.get("heuristic_similarity_temperature", 1.0)
+                            ),
+                            heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                            heuristic_transfer_method=str(
+                                aco_params.get("heuristic_transfer_method", "weighted_topk_topl")
+                            ),
+                            score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                            query_dataset_id=aco_params.get("query_dataset_id"),
+                            time_limit_per_model=time_limit_per_model,
+                            metafeatures_func=metafeatures_func,
+                            step_order=order,
+                            early_stop_rounds=int(aco_params.get("early_stop_rounds", 0)),
+                            min_improvement=float(aco_params.get("min_improvement", 0.0)),
                         )
-                        if ag_cfg is not None and ag_results and np.isfinite(ag_score):
-                            order_best_cfg = dict(ag_cfg)
-                            order_best_cfg["step_order"] = list(order)
-                            order_autogluon_score = float(ag_score)
-                            if self.verbose:
-                                print(
-                                    f"Ordering Iter {order_idx}/{len(candidate_orders)} "
-                                    f"quick AutoGluon: {order_autogluon_score:.4f}"
-                                )
-                        else:
-                            order_autogluon_error = "No valid quick AutoGluon result"
-                    except Exception as exc:
-                        order_autogluon_error = str(exc)
-                        if _is_autogluon_unavailable_error(exc):
-                            if require_autogluon:
-                                raise RuntimeError(
-                                    "AutoGluon is required but unavailable during quick ordering evaluation. "
-                                    f"Reason: {exc}"
-                                ) from exc
-                            autogluon_runtime_enabled = False
-                            run_quick_order_eval = False
-                            if self.verbose:
-                                print(
-                                    f"Ordering Iter {order_idx}/{len(candidate_orders)} "
-                                    "quick AutoGluon unavailable; continuing with proxy-only ordering."
-                                )
-                            else:
-                                logger.info(
-                                    "Quick AutoGluon unavailable for ordering iteration %s; "
-                                    "continuing with proxy-only ordering.",
-                                    order_idx,
-                                )
-                        else:
-                            if self.verbose:
-                                print(
-                                    f"Ordering Iter {order_idx}/{len(candidate_orders)} "
-                                    f"quick AutoGluon failed: {exc}"
-                                )
-                            else:
-                                logger.warning(
-                                    "Quick AutoGluon failed for ordering iteration %s: %s",
-                                    order_idx,
-                                    exc,
-                                )
+                    elif optimizer_name == "dqn":
+                        aco_results, aco_unsorted_res, aco_history = self._search_pipelines_dqn(
+                            new_dataset=new_dataset,
+                            target_column=target_column,
+                            new_metafeatures=new_mf_scaled,
+                            options=ordered_options,
+                            proxy_settings=proxy_settings,
+                            n_pipelines=k,
+                            sample_budget=sample_budget,
+                            seed=aco_seed + order_idx - 1,
+                            dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
+                            heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
+                            heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
+                            heuristic_similarity_temperature=float(
+                                aco_params.get("heuristic_similarity_temperature", 1.0)
+                            ),
+                            heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                            heuristic_transfer_method=str(
+                                aco_params.get("heuristic_transfer_method", "weighted_topk_topl")
+                            ),
+                            score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                            query_dataset_id=aco_params.get("query_dataset_id"),
+                            time_limit_per_model=time_limit_per_model,
+                            metafeatures_func=metafeatures_func,
+                            dqn_params=aco_params,
+                            enable_internal_order_policy=not search_ordering,
+                        )
+                    else:
+                        aco_results, aco_unsorted_res, aco_history = self._search_pipelines_optimizer(
+                            optimizer=optimizer_name,
+                            new_dataset=new_dataset,
+                            target_column=target_column,
+                            options=ordered_options,
+                            proxy_settings=proxy_settings,
+                            n_pipelines=k,
+                            sample_budget=sample_budget,
+                            seed=aco_seed + order_idx - 1,
+                            step_order=order,
+                        )
 
-                order_selection_score = (
-                    order_autogluon_score
-                    if order_autogluon_score is not None
-                    else order_proxy_score
-                )
-                order_iteration_results.append(
-                    {
-                        "iteration": order_idx,
-                        "order_index": order_idx,
-                        "step_order": list(order),
-                        "pipeline_config": order_best_cfg,
-                        "proxy_score": order_proxy_score,
-                        "autogluon_score": order_autogluon_score,
-                        "selection_score": order_selection_score,
-                        "autogluon_error": order_autogluon_error,
-                    }
-                )
+                    for cfg, score in aco_results:
+                        cfg2 = dict(cfg)
+                        cfg2["step_order"] = list(order)
+                        all_top_results.append((cfg2, float(score)))
+                    for cfg, score in aco_unsorted_res:
+                        cfg2 = dict(cfg)
+                        cfg2["step_order"] = list(order)
+                        all_unsorted_results.append((cfg2, float(score)))
+                    order_best_cfg: Optional[Dict[str, Any]] = None
+                    order_proxy_score: Optional[float] = None
+                    if aco_results:
+                        order_best_cfg = dict(aco_results[0][0])
+                        order_best_cfg["step_order"] = list(order)
+                        order_proxy_score = float(aco_results[0][1])
+                    order_autogluon_score: Optional[float] = None
+                    order_autogluon_error: Optional[str] = None
+                    if run_quick_order_eval and order_best_cfg is not None:
+                        try:
+                            ag_cfg, ag_score, ag_results, _ = self._evaluate_candidates_with_autogluon(
+                                new_dataset,
+                                target_column,
+                                [order_best_cfg],
+                                time_limit_per_model=quick_order_eval_time_limit,
+                            )
+                            if ag_cfg is not None and ag_results and np.isfinite(ag_score):
+                                order_best_cfg = dict(ag_cfg)
+                                order_best_cfg["step_order"] = list(order)
+                                order_autogluon_score = float(ag_score)
+                                if self.verbose:
+                                    print(
+                                        f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                        f"quick AutoGluon: {order_autogluon_score:.4f}"
+                                    )
+                            else:
+                                order_autogluon_error = "No valid quick AutoGluon result"
+                        except Exception as exc:
+                            order_autogluon_error = str(exc)
+                            if _is_autogluon_unavailable_error(exc):
+                                if require_autogluon:
+                                    raise RuntimeError(
+                                        "AutoGluon is required but unavailable during quick ordering evaluation. "
+                                        f"Reason: {exc}"
+                                    ) from exc
+                                autogluon_runtime_enabled = False
+                                run_quick_order_eval = False
+                                if self.verbose:
+                                    print(
+                                        f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                        "quick AutoGluon unavailable; continuing with proxy-only ordering."
+                                    )
+                                else:
+                                    logger.info(
+                                        "Quick AutoGluon unavailable for ordering iteration %s; "
+                                        "continuing with proxy-only ordering.",
+                                        order_idx,
+                                    )
+                            else:
+                                if self.verbose:
+                                    print(
+                                        f"Ordering Iter {order_idx}/{len(candidate_orders)} "
+                                        f"quick AutoGluon failed: {exc}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        "Quick AutoGluon failed for ordering iteration %s: %s",
+                                        order_idx,
+                                        exc,
+                                    )
 
-                if search_ordering:
-                    all_history.append(
+                    order_selection_score = (
+                        order_autogluon_score
+                        if order_autogluon_score is not None
+                        else order_proxy_score
+                    )
+                    order_iteration_results.append(
                         {
                             "iteration": order_idx,
-                            "best_score": order_selection_score,
-                            "proxy_score": order_proxy_score,
-                            "autogluon_score": order_autogluon_score,
                             "order_index": order_idx,
                             "step_order": list(order),
+                            "pipeline_config": order_best_cfg,
+                            "proxy_score": order_proxy_score,
+                            "autogluon_score": order_autogluon_score,
+                            "selection_score": order_selection_score,
+                            "autogluon_error": order_autogluon_error,
                         }
                     )
-                else:
-                    for hist in aco_history:
-                        if not isinstance(hist, dict):
-                            continue
+
+                    if search_ordering:
                         all_history.append(
                             {
-                                "iteration": global_iteration,
-                                "best_score": hist.get("best_score"),
-                                "episode_score": hist.get("episode_score"),
-                                "epsilon": hist.get("epsilon"),
-                                "order_epsilon": hist.get("order_epsilon"),
-                                "order_index": int(hist.get("order_idx", order_idx)),
-                                "step_order": hist.get("order", list(order)),
-                                "policy_updates": hist.get("policy_updates"),
-                                "policy_mean_loss": hist.get("policy_mean_loss"),
-                                "policy_last_loss": hist.get("policy_last_loss"),
-                                "order_policy_updates": hist.get("order_policy_updates"),
-                                "order_policy_mean_loss": hist.get("order_policy_mean_loss"),
-                                "order_policy_last_loss": hist.get("order_policy_last_loss"),
+                                "iteration": order_idx,
+                                "best_score": order_selection_score,
+                                "proxy_score": order_proxy_score,
+                                "autogluon_score": order_autogluon_score,
+                                "order_index": order_idx,
+                                "step_order": list(order),
                             }
                         )
-                        global_iteration += 1
+                    else:
+                        for hist in aco_history:
+                            if not isinstance(hist, dict):
+                                continue
+                            all_history.append(
+                                {
+                                    "iteration": global_iteration,
+                                    "best_score": hist.get("best_score"),
+                                    "episode_score": hist.get("episode_score"),
+                                    "epsilon": hist.get("epsilon"),
+                                    "order_epsilon": hist.get("order_epsilon"),
+                                    "order_index": int(hist.get("order_idx", order_idx)),
+                                    "step_order": hist.get("order", list(order)),
+                                    "policy_updates": hist.get("policy_updates"),
+                                    "policy_mean_loss": hist.get("policy_mean_loss"),
+                                    "policy_last_loss": hist.get("policy_last_loss"),
+                                    "order_policy_updates": hist.get("order_policy_updates"),
+                                    "order_policy_mean_loss": hist.get("order_policy_mean_loss"),
+                                    "order_policy_last_loss": hist.get("order_policy_last_loss"),
+                                }
+                            )
+                            global_iteration += 1
 
-            used_order_level_scoring = False
-            if search_ordering and order_iteration_results:
+            if not per_feature_mode:
+                used_order_level_scoring = False
+            if (not per_feature_mode) and search_ordering and order_iteration_results:
                 ranked_orders = [
                     item for item in order_iteration_results
                     if item.get("pipeline_config") is not None and item.get("selection_score") is not None
@@ -1077,11 +1560,11 @@ class MetaPipelineRecommender:
                 else:
                     aco_results = []
                     aco_unsorted_res = []
-            else:
+            elif not per_feature_mode:
                 aco_results = []
                 aco_unsorted_res = []
 
-            if not aco_results:
+            if (not per_feature_mode) and not aco_results:
                 dedup: Dict[Tuple[Any, ...], Tuple[Dict[str, Any], float]] = {}
                 dedup_source = all_unsorted_results if all_unsorted_results else all_top_results
                 for cfg, score in dedup_source:
@@ -1169,7 +1652,7 @@ class MetaPipelineRecommender:
                 "aco_history": all_history,
                 "optimizer": optimizer_name,
                 "ordering_search": {
-                    "enabled": bool(search_ordering),
+                    "enabled": bool(search_ordering and not per_feature_mode),
                     "strategy": order_strategy,
                     "num_orders_requested": int(num_orders),
                     "num_orders_evaluated": len(candidate_orders),
@@ -1179,6 +1662,16 @@ class MetaPipelineRecommender:
                     "selection_metric": "autogluon_quick_or_proxy" if used_order_level_scoring else "proxy",
                 },
                 "ordering_iteration_results": order_iteration_results if search_ordering else [],
+                "per_feature_search": {
+                    "enabled": bool(per_feature_mode),
+                    "steps": (
+                        step_list
+                        if per_feature_mode
+                        else []
+                    ),
+                    "heuristic_source": "phase2_transferred_eta_norm" if per_feature_mode else "n/a",
+                    "log": per_feature_pipeline_log,
+                },
                 "proxy_settings": proxy_settings or {},
                 "final_autogluon_topk": max(1, int(final_autogluon_topk)),
                 "aco_hyperparams": {
@@ -1197,6 +1690,9 @@ class MetaPipelineRecommender:
                     ),
                     "score_direction": str(aco_params.get("score_direction", "higher_is_better")),
                     "require_autogluon": bool(aco_params.get("require_autogluon", True)),
+                    "early_stop_rounds": int(aco_params.get("early_stop_rounds", 0)),
+                    "min_improvement": float(aco_params.get("min_improvement", 0.0)),
+                    "per_feature_independent_search": bool(aco_params.get("per_feature_independent_search", False)),
                 },
             }
 

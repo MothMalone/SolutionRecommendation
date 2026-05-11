@@ -135,7 +135,7 @@ class ACOParams:
     use_all_iter_pipelines: bool = False
     weight_method: str = "rank"
     markov_order: int = 2
-    lambda_smooth: float = 0.7
+    lambda_smooth: float = 0.0
 
 
 @dataclass

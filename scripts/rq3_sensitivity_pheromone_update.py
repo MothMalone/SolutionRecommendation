@@ -14,7 +14,7 @@ def main() -> int:
 
     variants = [
         # Sweep weight method with fixed top-k, order, and smoothing.
-        {"name": "w_rank_k3_m2_l0p7", "flags": ["--top-k-pheromone", "3", "--aco-weight-method", "rank", "--aco-markov-order", "2", "--aco-lambda-smooth", "0.7"]},  # default-like
+        {"name": "w_rank_k3_m2_l0p7", "flags": ["--top-k-pheromone", "3", "--aco-weight-method", "rank", "--aco-markov-order", "2", "--aco-lambda-smooth", "0.7"]},  # reference setting for this suite
         {"name": "w_uniform_k3_m2_l0p7", "flags": ["--top-k-pheromone", "3", "--aco-weight-method", "uniform", "--aco-markov-order", "2", "--aco-lambda-smooth", "0.7"]},
         {"name": "w_exp_k3_m2_l0p7", "flags": ["--top-k-pheromone", "3", "--aco-weight-method", "exponential", "--aco-markov-order", "2", "--aco-lambda-smooth", "0.7"]},
         # Sweep top-k pheromone with fixed method, order, and smoothing.

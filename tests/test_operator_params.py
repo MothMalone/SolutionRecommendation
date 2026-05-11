@@ -36,3 +36,44 @@ def test_knn_param_token_controls_neighbors():
     assert int(pre.num_imputer.n_neighbors) == 3
     assert X_t.isna().sum().sum() == 0
     assert len(y_t) == len(X_t)
+
+
+def test_per_feature_operator_maps_apply_independently():
+    X = pd.DataFrame(
+        {
+            "num_a": [1.0, None, 3.0, 4.0, 5.0],
+            "num_b": [10.0, 20.0, None, 40.0, 50.0],
+            "cat": ["x", "y", None, "x", "z"],
+        }
+    )
+    y = pd.Series([0, 1, 0, 1, 0])
+
+    cfg = {
+        "imputation": {
+            "num_a": "median",
+            "num_b": "mean",
+            "cat": "most_frequent",
+        },
+        "scaling": {
+            "num_a": "standard",
+            "num_b": "minmax",
+        },
+        "encoding": {"cat": "onehot"},
+        "feature_selection": "none",
+        "outlier_removal": "none",
+        "dimensionality_reduction": "none",
+    }
+
+    pre = Preprocessor(cfg)
+    X_t, y_t = pre.fit_transform(X, y)
+    X_x = pre.transform(X)
+
+    assert pre.num_imputer_map is not None
+    assert pre.scaler_map is not None
+    assert pre.encoder_map is not None
+    assert X_t.isna().sum().sum() == 0
+    assert X_x.isna().sum().sum() == 0
+    assert len(y_t) == len(X_t)
+    assert list(X_t.columns) == list(X_x.columns)
+    assert "num_a" in X_t.columns and "num_b" in X_t.columns
+    assert any(col.startswith("cat_") for col in X_t.columns)

@@ -1,7 +1,7 @@
 """k-order Markov conditional ACO search."""
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -58,7 +58,9 @@ def search_pipelines_aco(
     use_all_iter_pipelines: bool = False,
     weight_method: str = "rank",
     markov_order: int = 2,
-    lambda_smooth: float = 0.7,
+    lambda_smooth: float = 0.0,
+    early_stop_rounds: int = 0,
+    min_improvement: float = 0.0,
     verbose: bool = False,
     return_history: bool = False,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
@@ -90,6 +92,8 @@ def search_pipelines_aco(
     candidate_pipelines: List[Tuple[Dict[str, Any], float]] = []
     eval_cache: Dict[Tuple[Tuple[str, Any], ...], Tuple[Dict[str, Any], float]] = {}
     history: List[Dict[str, Any]] = []
+    best_so_far: Optional[float] = None
+    no_improve_rounds = 0
 
     def sample_config() -> Dict[str, Any]:
         cfg: Dict[str, Any] = {}
@@ -133,12 +137,51 @@ def search_pipelines_aco(
                 iteration + 1,
                 n_iterations,
             )
+            if carry_best is not None:
+                if best_so_far is None or carry_best > (best_so_far + float(min_improvement)):
+                    best_so_far = carry_best
+                    no_improve_rounds = 0
+                else:
+                    no_improve_rounds += 1
+            else:
+                no_improve_rounds += 1
+            if int(early_stop_rounds) > 0 and no_improve_rounds >= int(early_stop_rounds):
+                if verbose:
+                    print(
+                        f"Early stop at iter {iteration+1}: "
+                        f"no improvement for {no_improve_rounds} rounds "
+                        f"(min_improvement={float(min_improvement):.6f})"
+                    )
+                else:
+                    logger.info(
+                        "Early stop at iter %s: no improvement for %s rounds (min_improvement=%.6f)",
+                        iteration + 1,
+                        no_improve_rounds,
+                        float(min_improvement),
+                    )
+                break
             continue
 
         best_cfg, best_score, eval_results, unsorted_res = evaluate_fn(sampled)
         if not eval_results:
             history.append({"iteration": iteration + 1, "best_score": None})
             logger.info("ACO Iter %s/%s - No valid evaluation", iteration + 1, n_iterations)
+            no_improve_rounds += 1
+            if int(early_stop_rounds) > 0 and no_improve_rounds >= int(early_stop_rounds):
+                if verbose:
+                    print(
+                        f"Early stop at iter {iteration+1}: "
+                        f"no improvement for {no_improve_rounds} rounds "
+                        f"(min_improvement={float(min_improvement):.6f})"
+                    )
+                else:
+                    logger.info(
+                        "Early stop at iter %s: no improvement for %s rounds (min_improvement=%.6f)",
+                        iteration + 1,
+                        no_improve_rounds,
+                        float(min_improvement),
+                    )
+                break
             continue
 
         for cfg, score in eval_results:
@@ -191,6 +234,27 @@ def search_pipelines_aco(
 
         candidate_pipelines.extend(unsorted_res)
         history.append({"iteration": iteration + 1, "best_score": float(best_score)})
+        current_best = float(max(sc for _cfg, sc in eval_cache.values()))
+        if best_so_far is None or current_best > (best_so_far + float(min_improvement)):
+            best_so_far = current_best
+            no_improve_rounds = 0
+        else:
+            no_improve_rounds += 1
+        if int(early_stop_rounds) > 0 and no_improve_rounds >= int(early_stop_rounds):
+            if verbose:
+                print(
+                    f"Early stop at iter {iteration+1}: "
+                    f"no improvement for {no_improve_rounds} rounds "
+                    f"(min_improvement={float(min_improvement):.6f})"
+                )
+            else:
+                logger.info(
+                    "Early stop at iter %s: no improvement for %s rounds (min_improvement=%.6f)",
+                    iteration + 1,
+                    no_improve_rounds,
+                    float(min_improvement),
+                )
+            break
         if verbose:
             print(
                 f"ACO Iter {iteration+1}/{n_iterations} — "

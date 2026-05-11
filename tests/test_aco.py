@@ -141,3 +141,28 @@ def test_aco_history_carries_forward_when_no_new_configs_sampled():
     assert len(history) == 4
     assert [row.get("iteration") for row in history] == [1, 2, 3, 4]
     assert all(row.get("best_score") == history[0].get("best_score") for row in history)
+
+
+def test_aco_early_stop_stops_history_growth():
+    options = {
+        "imputation": ["none"],
+        "scaling": ["none"],
+    }
+    eta = _make_eta(options)
+    evaluate_fn = _dummy_evaluate_factory(options)
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate_fn,
+        eta=eta,
+        n_pipelines=1,
+        n_ants=3,
+        n_iterations=10,
+        seed=42,
+        early_stop_rounds=2,
+        min_improvement=0.0,
+        return_history=True,
+    )
+
+    assert len(history) == 3
+    assert [row.get("iteration") for row in history] == [1, 2, 3]

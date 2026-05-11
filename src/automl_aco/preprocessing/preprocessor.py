@@ -35,9 +35,13 @@ class Preprocessor:
         # Saved transformers
         self.num_imputer = None
         self.cat_imputer = None
+        self.num_imputer_map = None
+        self.cat_imputer_map = None
         self.encoder = None
+        self.encoder_map = None
         self.selector = None
         self.scaler = None
+        self.scaler_map = None
         self.reducer = None
 
         self.selected_columns_ = None
@@ -48,6 +52,18 @@ class Preprocessor:
 
         self.outlier_cleaner_num = None
         self.outlier_cleaner_cat = None
+
+    @staticmethod
+    def _resolve_feature_operator(spec: object, column: str, default: str = "none") -> str:
+        if isinstance(spec, dict):
+            if column in spec:
+                return str(spec[column])
+            if "*" in spec:
+                return str(spec["*"])
+            return default
+        if spec is None:
+            return default
+        return str(spec)
 
     def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None):
         if y is not None and len(X) != len(y):
@@ -156,6 +172,48 @@ class Preprocessor:
 
     def _fit_imputation(self, X_num, X_cat):
         method_raw = self.config["imputation"]
+        self.num_imputer = None
+        self.cat_imputer = None
+        self.num_imputer_map = None
+        self.cat_imputer_map = None
+
+        # Per-feature map: {"col_name": "median", "*": "none", ...}
+        if isinstance(method_raw, dict):
+            if X_num is not None:
+                X_num_out = X_num.copy()
+                self.num_imputer_map = {}
+                for col in X_num.columns:
+                    col_method_raw = self._resolve_feature_operator(method_raw, str(col), default="none")
+                    col_method, col_params = parse_operator_spec(col_method_raw)
+                    if col_method == "none":
+                        continue
+                    if col_method == "knn":
+                        # KNN is multivariate by design; in per-feature mode, fall back to mean.
+                        imp = SimpleImputer(strategy="mean")
+                    elif col_method in ["mean", "median", "most_frequent", "constant"]:
+                        imp = SimpleImputer(strategy=col_method)
+                    else:
+                        imp = SimpleImputer(strategy="mean")
+                    arr = imp.fit_transform(X_num[[col]])
+                    X_num_out[col] = arr.ravel()
+                    self.num_imputer_map[str(col)] = imp
+                X_num = X_num_out
+
+            if X_cat is not None:
+                X_cat_out = X_cat.copy()
+                self.cat_imputer_map = {}
+                for col in X_cat.columns:
+                    col_method_raw = self._resolve_feature_operator(method_raw, str(col), default="none")
+                    col_method, _col_params = parse_operator_spec(col_method_raw)
+                    if col_method == "none":
+                        continue
+                    imp = SimpleImputer(strategy="most_frequent")
+                    arr = imp.fit_transform(X_cat[[col]])
+                    X_cat_out[col] = arr.ravel()
+                    self.cat_imputer_map[str(col)] = imp
+                X_cat = X_cat_out
+            return X_num, X_cat
+
         method, params = parse_operator_spec(method_raw)
 
         if X_num is not None and method != "none":
@@ -190,6 +248,24 @@ class Preprocessor:
         return X_num, X_cat
 
     def _transform_imputation(self, X_num, X_cat):
+        if isinstance(self.config.get("imputation"), dict):
+            if X_num is not None and isinstance(self.num_imputer_map, dict):
+                X_num_out = X_num.copy()
+                for col, imp in self.num_imputer_map.items():
+                    if col in X_num_out.columns:
+                        arr = imp.transform(X_num_out[[col]])
+                        X_num_out[col] = arr.ravel()
+                X_num = X_num_out
+
+            if X_cat is not None and isinstance(self.cat_imputer_map, dict):
+                X_cat_out = X_cat.copy()
+                for col, imp in self.cat_imputer_map.items():
+                    if col in X_cat_out.columns:
+                        arr = imp.transform(X_cat_out[[col]])
+                        X_cat_out[col] = arr.ravel()
+                X_cat = X_cat_out
+            return X_num, X_cat
+
         if X_num is not None and self.num_imputer is not None:
             X_num = self._imputer_output_to_df(
                 self.num_imputer.transform(X_num),
@@ -369,7 +445,70 @@ class Preprocessor:
     # 3. Encoding
     # -----------------------------
     def _fit_encoding(self, X_cat):
-        method, _params = parse_operator_spec(self.config["encoding"])
+        method_raw = self.config["encoding"]
+        self.encoder = None
+        self.encoder_map = None
+
+        if isinstance(method_raw, dict):
+            if X_cat is None:
+                return X_cat
+            pieces = []
+            self.encoder_map = {}
+            for col in X_cat.columns:
+                col_method_raw = self._resolve_feature_operator(method_raw, str(col), default="none")
+                col_method, _col_params = parse_operator_spec(col_method_raw)
+                if col_method == "none":
+                    pieces.append(X_cat[[col]].copy())
+                    self.encoder_map[str(col)] = {"method": "none"}
+                    continue
+
+                if col_method == "onehot":
+                    try:
+                        enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+                    except TypeError:  # pragma: no cover
+                        enc = OneHotEncoder(handle_unknown="ignore", sparse=False)
+                    arr = enc.fit_transform(X_cat[[col]])
+                    names = [str(x) for x in enc.get_feature_names_out([str(col)])]
+                    out_df = pd.DataFrame(arr, index=X_cat.index, columns=names)
+                    pieces.append(out_df)
+                    self.encoder_map[str(col)] = {
+                        "method": "onehot",
+                        "encoder": enc,
+                        "output_columns": names,
+                    }
+                    continue
+
+                if ce is None:
+                    raise RuntimeError("category_encoders is required for non-onehot encoding")
+                if col_method == "frequency":
+                    enc = ce.CountEncoder(normalize=True)
+                elif col_method == "count":
+                    enc = ce.CountEncoder(normalize=False)
+                elif col_method == "ordinal":
+                    enc = ce.OrdinalEncoder()
+                elif col_method == "binary":
+                    enc = ce.BinaryEncoder()
+                else:
+                    enc = ce.OrdinalEncoder()
+
+                transformed = enc.fit_transform(X_cat[[col]])
+                if isinstance(transformed, pd.DataFrame):
+                    out_df = transformed.copy()
+                else:
+                    out_df = pd.DataFrame(transformed, index=X_cat.index)
+                prefixed = [f"{col}__{i}" for i in out_df.columns.astype(str)]
+                out_df.columns = prefixed
+                pieces.append(out_df)
+                self.encoder_map[str(col)] = {
+                    "method": col_method,
+                    "encoder": enc,
+                    "output_columns": prefixed,
+                }
+            if not pieces:
+                return None
+            return pd.concat(pieces, axis=1)
+
+        method, _params = parse_operator_spec(method_raw)
         if X_cat is None or method == "none":
             return X_cat
 
@@ -402,6 +541,42 @@ class Preprocessor:
         return self.encoder.fit_transform(X_cat)
 
     def _transform_encoding(self, X_cat):
+        if isinstance(self.config.get("encoding"), dict):
+            if X_cat is None:
+                return X_cat
+            if not isinstance(self.encoder_map, dict):
+                return X_cat
+            pieces = []
+            for col in X_cat.columns:
+                state = self.encoder_map.get(str(col), {"method": "none"})
+                method = str(state.get("method", "none"))
+                if method == "none":
+                    pieces.append(X_cat[[col]].copy())
+                    continue
+
+                enc = state.get("encoder")
+                if enc is None:
+                    pieces.append(X_cat[[col]].copy())
+                    continue
+                arr = enc.transform(X_cat[[col]])
+                out_cols = state.get("output_columns")
+
+                if isinstance(arr, pd.DataFrame):
+                    out_df = arr.copy()
+                    if isinstance(out_cols, list) and len(out_cols) == out_df.shape[1]:
+                        out_df.columns = out_cols
+                    pieces.append(out_df)
+                    continue
+
+                if hasattr(arr, "toarray"):
+                    arr = arr.toarray()
+                if not isinstance(out_cols, list) or len(out_cols) != arr.shape[1]:
+                    out_cols = [f"{col}__{i}" for i in range(arr.shape[1])]
+                pieces.append(pd.DataFrame(arr, index=X_cat.index, columns=out_cols))
+            if not pieces:
+                return None
+            return pd.concat(pieces, axis=1)
+
         if X_cat is None or self.encoder is None:
             return X_cat
 
@@ -525,7 +700,33 @@ class Preprocessor:
     # 5. Scaling
     # -----------------------------
     def _fit_scaling(self, X):
-        method, _params = parse_operator_spec(self.config["scaling"])
+        method_raw = self.config["scaling"]
+        self.scaler = None
+        self.scaler_map = None
+        if isinstance(method_raw, dict):
+            if X is None:
+                return X
+            X_out = X.copy()
+            self.scaler_map = {}
+            for col in X.columns:
+                col_method_raw = self._resolve_feature_operator(method_raw, str(col), default="none")
+                col_method, _col_params = parse_operator_spec(col_method_raw)
+                if col_method == "none":
+                    continue
+                scaler = {
+                    "standard": StandardScaler(),
+                    "minmax": MinMaxScaler(),
+                    "robust": RobustScaler(),
+                    "maxabs": MaxAbsScaler(),
+                }.get(col_method)
+                if scaler is None:
+                    continue
+                arr = scaler.fit_transform(X[[col]])
+                X_out[col] = arr.ravel()
+                self.scaler_map[str(col)] = scaler
+            return X_out
+
+        method, _params = parse_operator_spec(method_raw)
         if X is None or method == "none":
             return X
 
@@ -541,6 +742,19 @@ class Preprocessor:
         return X
 
     def _transform_scaling(self, X):
+        if isinstance(self.config.get("scaling"), dict):
+            if X is None:
+                return X
+            if not isinstance(self.scaler_map, dict):
+                return X
+            X_out = X.copy()
+            for col, scaler in self.scaler_map.items():
+                if col not in X_out.columns:
+                    continue
+                arr = scaler.transform(X_out[[col]])
+                X_out[col] = arr.ravel()
+            return X_out
+
         if X is None or self.scaler is None:
             return X
         return pd.DataFrame(self.scaler.transform(X), index=X.index, columns=X.columns)

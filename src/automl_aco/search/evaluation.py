@@ -60,7 +60,21 @@ def _count_active_steps(cfg: Dict[str, Any]) -> int:
         "feature_selection",
         "dimensionality_reduction",
     ]
-    return sum(1 for step in steps if cfg.get(step) not in (None, "none"))
+    return sum(1 for step in steps if not _step_is_none(cfg, step))
+
+
+def _step_is_none(cfg: Dict[str, Any], step: str) -> bool:
+    val = cfg.get(step)
+    if isinstance(val, dict):
+        if len(val) == 0:
+            return True
+        for op in val.values():
+            if base_operator_name(op) != "none":
+                return False
+        return True
+    if val is None:
+        return True
+    return base_operator_name(val) == "none"
 
 
 def _proxy_penalty(
@@ -82,15 +96,15 @@ def _proxy_penalty(
 
     if (
         missing_ratio <= float(proxy_cfg["low_missing_threshold"])
-        and cfg.get("imputation") not in (None, "none")
+        and not _step_is_none(cfg, "imputation")
     ):
         penalty += float(proxy_cfg["imputation_low_missing_penalty"])
 
-    if cfg.get("outlier_removal") not in (None, "none"):
+    if not _step_is_none(cfg, "outlier_removal"):
         penalty += float(proxy_cfg["outlier_removal_penalty"])
 
     if (
-        cfg.get("dimensionality_reduction") not in (None, "none")
+        not _step_is_none(cfg, "dimensionality_reduction")
         and n_features_before <= int(proxy_cfg["dimred_small_feature_threshold"])
     ):
         penalty += float(proxy_cfg["dimred_small_feature_penalty"])
@@ -463,7 +477,7 @@ def evaluate_candidates_simple(
 
         # Fast reject: this search space does not include NaN-tolerant downstream estimators.
         # If data has missing values and no imputation is selected, the config is invalid by design.
-        if has_missing and base_operator_name(cfg.get("imputation", "none")) == "none":
+        if has_missing and _step_is_none(cfg, "imputation"):
             if verbose:
                 print(f"    ✗ {name} skipped: missing values require non-'none' imputation")
             continue

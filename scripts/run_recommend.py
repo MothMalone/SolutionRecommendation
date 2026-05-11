@@ -166,8 +166,69 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--aco-lambda-smooth",
         type=float,
-        default=0.7,
-        help="Interpolation weight between conditional/global pheromone sampling (ACO only)",
+        default=0.0,
+        help=(
+            "Interpolation weight between conditional/global pheromone sampling (ACO only). "
+            "Default 0.0 disables Markov conditional influence."
+        ),
+    )
+    parser.add_argument(
+        "--aco-early-stop-rounds",
+        type=int,
+        default=0,
+        help="Stop ACO iterations early after N rounds without meaningful improvement (0 disables).",
+    )
+    parser.add_argument(
+        "--aco-min-improvement",
+        type=float,
+        default=0.0,
+        help="Minimum best-score improvement required to reset ACO early-stop patience.",
+    )
+    parser.add_argument(
+        "--per-feature-independent-search",
+        action="store_true",
+        help=(
+            "Enable sequential per-feature ACO search for independent operators "
+            "(imputation/scaling/encoding), while global operators remain shared."
+        ),
+    )
+    parser.add_argument(
+        "--per-feature-steps",
+        default="imputation,scaling,encoding",
+        help="Comma-separated independent steps for per-feature search.",
+    )
+    parser.add_argument(
+        "--per-feature-early-stop-rounds",
+        type=int,
+        default=2,
+        help="Per-feature ACO early-stop patience in iterations (used when per-feature mode is enabled).",
+    )
+    parser.add_argument(
+        "--per-feature-min-improvement",
+        type=float,
+        default=0.001,
+        help="Per-feature ACO minimum improvement threshold for early stop.",
+    )
+    parser.add_argument(
+        "--per-feature-feature-patience",
+        type=int,
+        default=0,
+        help=(
+            "Optional early stop across features: stop after this many consecutive features "
+            "without improving best proxy score (0 disables)."
+        ),
+    )
+    parser.add_argument(
+        "--per-feature-feature-min-improvement",
+        type=float,
+        default=0.0,
+        help="Minimum improvement threshold used by per-feature feature-level patience.",
+    )
+    parser.add_argument(
+        "--per-feature-max-features",
+        type=int,
+        default=0,
+        help="Optional cap on number of features processed in per-feature mode (0 uses all features).",
     )
     parser.add_argument(
         "--optimizer",
@@ -975,11 +1036,24 @@ def main() -> None:
             f"weight_method={args.aco_weight_method}, "
             f"markov_order={int(args.aco_markov_order)}, "
             f"lambda_smooth={float(args.aco_lambda_smooth)}, "
+            f"aco_early_stop_rounds={int(args.aco_early_stop_rounds)}, "
+            f"aco_min_improvement={float(args.aco_min_improvement)}, "
+            f"per_feature_independent_search={bool(args.per_feature_independent_search)}, "
             f"score_direction={args.score_direction}, "
             f"require_autogluon={bool(args.require_autogluon)}, "
             f"proxy_clf_model={proxy_settings.get('classification_model')}, "
             f"proxy_reg_model={proxy_settings.get('regression_model')}"
         )
+        if args.per_feature_independent_search:
+            print(
+                "Per-feature mode setup: "
+                f"steps={args.per_feature_steps}, "
+                f"iter_early_stop={int(args.per_feature_early_stop_rounds)}, "
+                f"iter_min_improvement={float(args.per_feature_min_improvement)}, "
+                f"feature_patience={int(args.per_feature_feature_patience)}, "
+                f"feature_min_improvement={float(args.per_feature_feature_min_improvement)}, "
+                f"max_features={int(args.per_feature_max_features)}"
+            )
 
     for run_idx, dataset_id in enumerate(dataset_ids, start=1):
         if n_runs > 1:
@@ -1024,6 +1098,8 @@ def main() -> None:
                     "weight_method": str(args.aco_weight_method),
                     "markov_order": int(args.aco_markov_order),
                     "lambda_smooth": float(args.aco_lambda_smooth),
+                    "early_stop_rounds": int(args.aco_early_stop_rounds),
+                    "min_improvement": float(args.aco_min_improvement),
                     "dataset_weighting": args.dataset_weighting,
                     "heuristic_top_k": heuristic_top_k,
                     "heuristic_top_l": int(args.heuristic_top_l),
@@ -1056,6 +1132,13 @@ def main() -> None:
                     "dqn_epsilon_start": args.dqn_epsilon_start,
                     "dqn_epsilon_end": args.dqn_epsilon_end,
                     "dqn_warmstart_weight": args.dqn_warmstart_weight,
+                    "per_feature_independent_search": bool(args.per_feature_independent_search),
+                    "per_feature_steps": str(args.per_feature_steps),
+                    "per_feature_early_stop_rounds": int(args.per_feature_early_stop_rounds),
+                    "per_feature_min_improvement": float(args.per_feature_min_improvement),
+                    "per_feature_feature_patience": int(args.per_feature_feature_patience),
+                    "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
+                    "per_feature_max_features": int(args.per_feature_max_features),
                 },
                 time_limit_per_model=args.time_limit,
                 metafeatures_func=_mf_func,
@@ -1116,6 +1199,15 @@ def main() -> None:
             "weight_method": str(args.aco_weight_method),
             "markov_order": int(args.aco_markov_order),
             "lambda_smooth": float(args.aco_lambda_smooth),
+            "aco_early_stop_rounds": int(args.aco_early_stop_rounds),
+            "aco_min_improvement": float(args.aco_min_improvement),
+            "per_feature_independent_search": bool(args.per_feature_independent_search),
+            "per_feature_steps": str(args.per_feature_steps),
+            "per_feature_early_stop_rounds": int(args.per_feature_early_stop_rounds),
+            "per_feature_min_improvement": float(args.per_feature_min_improvement),
+            "per_feature_feature_patience": int(args.per_feature_feature_patience),
+            "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
+            "per_feature_max_features": int(args.per_feature_max_features),
             "proxy_clf_model": str(proxy_settings.get("classification_model")),
             "proxy_reg_model": str(proxy_settings.get("regression_model")),
             "proxy_split_seeds": list(proxy_settings.get("split_seeds", [])),
@@ -1148,6 +1240,10 @@ def main() -> None:
         if args.operator_param_search:
             print(f"  Operator-param profile: {args.operator_param_grid}")
         print(f"  Pipeline: {_format_pipeline(pipeline_cfg)}")
+        per_feature_info = recommendation.get("per_feature_search")
+        if isinstance(per_feature_info, dict) and per_feature_info.get("enabled"):
+            pf_log = per_feature_info.get("log") or []
+            print(f"  Per-feature search: enabled (features_logged={len(pf_log)})")
         if proxy_score is not None:
             print(f"  Proxy score: {float(proxy_score):.4f}")
         if final_score is not None and final_eval:
