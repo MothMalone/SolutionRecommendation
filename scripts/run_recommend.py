@@ -30,6 +30,7 @@ from automl_aco.config import (
     LOCAL_PIPELINES_PATH,
     LOCAL_PIPELINES_PATH_ALT,
     LOCAL_TRAIN_PERF_PATH,
+    NOTEBOOK_LEGACY_PIPELINE_OPTIONS,
 )
 from automl_aco.data.loaders import (
     load_openml_dataset,
@@ -140,6 +141,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Direction of performance-matrix values used in transfer.",
     )
     parser.add_argument("--eval-k", type=int, default=3, help="Number of top pipelines to evaluate")
+    parser.add_argument(
+        "--no-search",
+        action="store_true",
+        help=(
+            "Disable optimizer search and only evaluate the recommender's retrieved/ranked candidate pipelines. "
+            "Use this for retrieval-only vs search comparisons inside the same run_recommend protocol."
+        ),
+    )
+    parser.add_argument(
+        "--notebook-legacy-mode",
+        action="store_true",
+        help=(
+            "Compatibility mode for the old notebook: legacy eta averaging, equality dataset weighting, "
+            "Markov smoothing 0.7, legacy metric target, and old encoding option space. "
+            "The current self-query guard remains enabled."
+        ),
+    )
+    parser.add_argument(
+        "--notebook-legacy-options",
+        action="store_true",
+        help="Use the old notebook search space, including label/frequency encoding.",
+    )
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
     parser.add_argument("--alpha", type=float, default=1.0, help="ACO alpha: pheromone importance")
@@ -339,6 +362,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--metric-path", required=False, help="Optional metric path to load")
     parser.add_argument(
+        "--train-metric-inline",
+        action="store_true",
+        help="Train the Siamese regression metric before recommendation instead of requiring a saved --metric-path.",
+    )
+    parser.add_argument("--metric-hidden-dim", type=int, default=64)
+    parser.add_argument("--metric-embed-dim", type=int, default=64)
+    parser.add_argument("--metric-epochs", type=int, default=100)
+    parser.add_argument("--metric-lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--metric-similarity-target",
+        choices=[
+            "rank_cosine",
+            "row_zscore_cosine",
+            "row_minmax_cosine",
+            "legacy_global_zscore_cosine",
+        ],
+        default="rank_cosine",
+        help="Ground-truth dataset-similarity target when training the Siamese metric inline.",
+    )
+    parser.add_argument(
+        "--save-trained-metric",
+        required=False,
+        help="Optional path to save a metric trained with --train-metric-inline.",
+    )
+    parser.add_argument(
         "--kaggle",
         action="store_true",
         help="Use Kaggle default paths for performance matrix, metafeatures, and pipelines",
@@ -431,6 +479,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main() -> None:
     configure_logging()
     args = build_arg_parser().parse_args()
+
+    if args.notebook_legacy_mode:
+        args.notebook_legacy_options = True
+        args.heuristic_transfer_method = "legacy_weighted_average"
+        args.dataset_weighting = "equality"
+        args.aco_lambda_smooth = 0.7
+        args.metric_similarity_target = "legacy_global_zscore_cosine"
+        args.metric_hidden_dim = 32
+        args.metric_embed_dim = 32
+        if not args.metric_path:
+            args.train_metric_inline = True
+
+    if args.metric_path and args.train_metric_inline:
+        raise ValueError("Use either --metric-path or --train-metric-inline, not both.")
 
     if not args.show_warnings:
         try:
@@ -741,6 +803,31 @@ def main() -> None:
     recommender = MetaPipelineRecommender(perf, meta, pipeline_configs, verbose=args.verbose)
     if args.metric_path:
         recommender.load_metric(args.metric_path)
+        if args.verbose:
+            print(f"Loaded Siamese metric: {args.metric_path}")
+    elif args.train_metric_inline:
+        if args.verbose:
+            print(
+                "Training Siamese metric inline: "
+                f"hidden_dim={int(args.metric_hidden_dim)}, "
+                f"embed_dim={int(args.metric_embed_dim)}, "
+                f"epochs={int(args.metric_epochs)}, "
+                f"target={args.metric_similarity_target}"
+            )
+        recommender.train_metric(
+            method="regression",
+            hidden_dim=int(args.metric_hidden_dim),
+            embed_dim=int(args.metric_embed_dim),
+            epochs=int(args.metric_epochs),
+            lr=float(args.metric_lr),
+            seed=int(args.seed),
+            similarity_target=str(args.metric_similarity_target),
+            score_direction=str(args.score_direction),
+        )
+        if args.save_trained_metric:
+            saved_metric_path = recommender.save_metric(args.save_trained_metric)
+            if args.verbose:
+                print(f"Saved trained Siamese metric: {saved_metric_path}")
 
     def _get_output_dir() -> str:
         if args.output_dir:
@@ -854,7 +941,8 @@ def main() -> None:
 
     def _build_run_options(dataset_id: Any):
         # Copy lists so per-run constraints do not mutate global defaults.
-        options = {step: list(vals) for step, vals in DEFAULT_PIPELINE_OPTIONS.items()}
+        base_options = NOTEBOOK_LEGACY_PIPELINE_OPTIONS if args.notebook_legacy_options else DEFAULT_PIPELINE_OPTIONS
+        options = {step: list(vals) for step, vals in base_options.items()}
         profile_note = None
 
         if pipeline_override:
@@ -862,6 +950,9 @@ def main() -> None:
                 options[step] = [choice]
             profile_note = "pipeline_override"
             return options, profile_note
+
+        if args.notebook_legacy_options:
+            profile_note = "notebook_legacy_options"
 
         if args.operator_param_search:
             # Parameterized operator tokens remain discrete choices and are scored inline by the same proxy.
@@ -1008,10 +1099,13 @@ def main() -> None:
     output_dir = _get_output_dir()
     n_runs = len(dataset_ids)
     run_summaries = []
-    search_enabled = args.use_aco or args.optimizer != "aco"
+    search_enabled = False if args.no_search else (args.use_aco or args.optimizer != "aco")
     proxy_settings = _build_proxy_settings()
     heuristic_top_k = int(args.heuristic_top_k) if args.heuristic_top_k is not None else int(args.k)
-    if args.optimizer == "aco" and not args.use_aco:
+    if args.no_search:
+        if args.verbose:
+            print("Info: --no-search selected; optimizer search is disabled.")
+    elif args.optimizer == "aco" and not args.use_aco:
         # Legacy behavior required --use-aco even when optimizer=aco.
         # Auto-enable to match user intent and avoid accidental prediction-only runs.
         search_enabled = True
@@ -1020,6 +1114,12 @@ def main() -> None:
     elif args.optimizer != "aco" and not args.use_aco and args.verbose:
         print("Info: --optimizer is non-ACO, enabling search flow (same as --use-aco).")
     if args.verbose:
+        if args.notebook_legacy_mode:
+            print(
+                "Notebook legacy mode enabled: "
+                "legacy eta averaging, equality weighting, lambda_smooth=0.7, "
+                "old option space, and leave-one-out self-query guard."
+            )
         print(
             "Proxy profile: "
             f"{args.proxy_profile} (seeds={proxy_settings.get('split_seeds')}, "
@@ -1215,6 +1315,17 @@ def main() -> None:
             "proxy_profile": str(args.proxy_profile),
             "operator_param_search": bool(args.operator_param_search),
             "operator_param_grid": str(args.operator_param_grid),
+            "no_search": bool(args.no_search),
+            "notebook_legacy_mode": bool(args.notebook_legacy_mode),
+            "notebook_legacy_options": bool(args.notebook_legacy_options),
+            "train_metric_inline": bool(args.train_metric_inline),
+            "metric_path": str(args.metric_path) if args.metric_path else None,
+            "metric_hidden_dim": int(args.metric_hidden_dim),
+            "metric_embed_dim": int(args.metric_embed_dim),
+            "metric_epochs": int(args.metric_epochs),
+            "metric_lr": float(args.metric_lr),
+            "metric_similarity_target": str(args.metric_similarity_target),
+            "save_trained_metric": str(args.save_trained_metric) if args.save_trained_metric else None,
         }
         with open(rec_path, "w", encoding="utf-8") as f:
             json.dump(recommendation, f, indent=2, default=str)

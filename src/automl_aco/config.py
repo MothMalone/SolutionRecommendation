@@ -60,6 +60,21 @@ DEFAULT_PIPELINE_OPTIONS: "OrderedDict[str, List[str]]" = OrderedDict(
     ]
 )
 
+# Active operator space used by the legacy notebook. This is intentionally
+# separate from DEFAULT_PIPELINE_OPTIONS because label/frequency encoding makes
+# old notebook comparisons less directly comparable to the current onehot-only
+# RQ3 protocol.
+NOTEBOOK_LEGACY_PIPELINE_OPTIONS: "OrderedDict[str, List[str]]" = OrderedDict(
+    [
+        ("imputation", ["none", "mean", "median", "most_frequent", "knn", "constant"]),
+        ("scaling", ["none", "standard", "minmax", "robust", "maxabs"]),
+        ("encoding", ["onehot", "label", "frequency"]),
+        ("feature_selection", OPERATORS["feature_selection"]),
+        ("outlier_removal", OPERATORS["outlier_removal"]),
+        ("dimensionality_reduction", OPERATORS["dimensionality_reduction"]),
+    ]
+)
+
 # Preprocessor execution order used in the notebook
 DEFAULT_PREPROCESSOR_ORDER: List[str] = [
     "imputation",

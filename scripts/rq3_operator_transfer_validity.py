@@ -296,6 +296,18 @@ def _rank_desc(values: Mapping[str, float]) -> Dict[str, int]:
     return {key: rank for rank, (key, _val) in enumerate(items, start=1)}
 
 
+def _flatness_stats(values: Mapping[str, float]) -> Tuple[bool, int, float]:
+    finite = np.asarray([float(v) for v in values.values() if np.isfinite(float(v))], dtype=float)
+    if finite.size == 0:
+        return True, 0, np.nan
+
+    unique = np.unique(np.round(finite, 12))
+    sorted_vals = np.sort(finite)[::-1]
+    margin = float(sorted_vals[0] - sorted_vals[1]) if sorted_vals.size >= 2 else np.nan
+    is_flat = bool(unique.size <= 1 or (np.isfinite(margin) and margin <= 1e-12))
+    return is_flat, int(unique.size), margin
+
+
 def _load_aco_scores(args: argparse.Namespace) -> Dict[str, float]:
     if not args.aco_summary_csv:
         return {}
@@ -849,15 +861,20 @@ def main() -> int:
                     op: float(np.mean(hist_lift_by_step_operator.get((step, op), [np.nan])))
                     for op in operators
                 }
+                eta_is_flat, eta_num_unique, eta_margin = _flatness_stats(eta_by_operator)
                 eta_rank = _rank_desc(eta_by_operator)
                 target_rank = _rank_desc(target_by_operator)
                 hist_rank = _rank_desc(hist_by_operator)
-                eta_top_operator = min(eta_rank, key=eta_rank.get) if eta_rank else ""
+                eta_top_operator = "" if eta_is_flat else (min(eta_rank, key=eta_rank.get) if eta_rank else "")
                 best_target_operator = min(target_rank, key=target_rank.get) if target_rank else ""
                 top2_target = {op for op, rank in target_rank.items() if rank <= 2}
-                corr_eta_target = _safe_spearman(
-                    [eta_by_operator[op] for op in operators],
-                    [target_by_operator[op] for op in operators],
+                corr_eta_target = (
+                    np.nan
+                    if eta_is_flat
+                    else _safe_spearman(
+                        [eta_by_operator[op] for op in operators],
+                        [target_by_operator[op] for op in operators],
+                    )
                 )
                 corr_hist_target = _safe_spearman(
                     [hist_by_operator[op] for op in operators],
@@ -873,34 +890,37 @@ def main() -> int:
                             "operator": op,
                             "eta_score": eta_by_operator.get(op, np.nan),
                             "eta_rank": eta_rank.get(op, np.nan),
+                            "eta_is_flat": bool(eta_is_flat),
+                            "eta_num_unique": eta_num_unique,
+                            "eta_margin_top1_top2": eta_margin,
                             "target_operator_lift": target_by_operator.get(op, np.nan),
                             "target_rank": target_rank.get(op, np.nan),
                             "neighbor_operator_lift_mean": hist_by_operator.get(op, np.nan),
                             "neighbor_hist_rank": hist_rank.get(op, np.nan),
-                            "is_eta_top_operator": bool(op == eta_top_operator),
+                            "is_eta_top_operator": bool((not eta_is_flat) and op == eta_top_operator),
                             "is_best_target_operator": bool(op == best_target_operator),
                             "eta_top_hits_target_top1": bool(eta_top_operator == best_target_operator)
-                            if op == eta_top_operator
+                            if (not eta_is_flat and op == eta_top_operator)
                             else np.nan,
                             "eta_top_hits_target_top2": bool(eta_top_operator in top2_target)
-                            if op == eta_top_operator
+                            if (not eta_is_flat and op == eta_top_operator)
                             else np.nan,
                         }
                     )
 
-                eta_sorted = sorted(eta_by_operator.values(), reverse=True)
-                eta_margin = eta_sorted[0] - eta_sorted[1] if len(eta_sorted) >= 2 else np.nan
                 eta_step_rows.append(
                     {
                         "record_space": record_spec.name,
                         "dataset_id": str(dataset_id),
                         "step": step,
+                        "eta_is_flat": bool(eta_is_flat),
+                        "eta_num_unique": eta_num_unique,
                         "eta_top_operator": eta_top_operator,
                         "best_target_operator": best_target_operator,
                         "eta_top_target_lift": target_by_operator.get(eta_top_operator, np.nan),
                         "best_target_lift": target_by_operator.get(best_target_operator, np.nan),
-                        "eta_top1_match": bool(eta_top_operator == best_target_operator),
-                        "eta_top2_match": bool(eta_top_operator in top2_target),
+                        "eta_top1_match": np.nan if eta_is_flat else bool(eta_top_operator == best_target_operator),
+                        "eta_top2_match": np.nan if eta_is_flat else bool(eta_top_operator in top2_target),
                         "eta_target_spearman": corr_eta_target,
                         "neighbor_hist_target_spearman": corr_hist_target,
                         "eta_margin_top1_top2": eta_margin,
@@ -1097,16 +1117,27 @@ def main() -> int:
         controlled_by_operator = pd.DataFrame()
 
     if not eta_step_df.empty:
+        eta_nonflat = eta_step_df[~eta_step_df["eta_is_flat"].fillna(True)].copy()
         eta_overall = pd.DataFrame(
             [
                 {
                     "record_space": record_spec.name,
                     "n_target_datasets": eta_step_df["dataset_id"].nunique(),
                     "n_step_tests": len(eta_step_df),
-                    "eta_top1_match_rate": eta_step_df["eta_top1_match"].astype(float).mean(),
-                    "eta_top2_match_rate": eta_step_df["eta_top2_match"].astype(float).mean(),
-                    "mean_eta_target_spearman": eta_step_df["eta_target_spearman"].mean(),
-                    "median_eta_target_spearman": eta_step_df["eta_target_spearman"].median(),
+                    "eta_flat_rate": eta_step_df["eta_is_flat"].astype(float).mean(),
+                    "n_nonflat_step_tests": len(eta_nonflat),
+                    "eta_top1_match_rate": eta_nonflat["eta_top1_match"].astype(float).mean()
+                    if not eta_nonflat.empty
+                    else np.nan,
+                    "eta_top2_match_rate": eta_nonflat["eta_top2_match"].astype(float).mean()
+                    if not eta_nonflat.empty
+                    else np.nan,
+                    "mean_eta_target_spearman": eta_nonflat["eta_target_spearman"].mean()
+                    if not eta_nonflat.empty
+                    else np.nan,
+                    "median_eta_target_spearman": eta_nonflat["eta_target_spearman"].median()
+                    if not eta_nonflat.empty
+                    else np.nan,
                     "mean_neighbor_hist_target_spearman": eta_step_df["neighbor_hist_target_spearman"].mean(),
                     "mean_eta_margin_top1_top2": eta_step_df["eta_margin_top1_top2"].mean(),
                 }

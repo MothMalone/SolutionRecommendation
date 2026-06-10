@@ -337,8 +337,10 @@ def _compute_aco_heuristic_legacy(
     recommend_func: Optional[Callable[..., Dict[str, Any]]] = None,
     recommend_kwargs: Optional[Dict[str, Any]] = None,
     metafeatures_scaled: Optional[np.ndarray] = None,
+    query_dataset_id: Optional[Any] = None,
 ) -> Dict[str, np.ndarray]:
     perf_subset = performance_matrix.copy()
+    query_norm = _normalize_dataset_id(query_dataset_id) if query_dataset_id is not None else None
 
     if use_top_pipelines_from_metric and recommend_func is not None:
         rec_args = recommend_kwargs or {}
@@ -359,23 +361,57 @@ def _compute_aco_heuristic_legacy(
         try:
             known = metafeatures_scaled if metafeatures_scaled is not None else metafeatures_df.fillna(0).values
             sims = cosine_similarity(known, np.asarray(new_metafeatures, dtype=float).reshape(1, -1)).ravel()
+            eligible = np.ones(len(sims), dtype=bool)
+            if query_norm is not None:
+                eligible = np.asarray(
+                    [_normalize_dataset_id(dataset_id) != query_norm for dataset_id in metafeatures_df.index],
+                    dtype=bool,
+                )
 
-            if top_k is not None and top_k < len(sims):
-                top_idx = np.argsort(sims)[-int(top_k):]
-                sims_masked = np.zeros_like(sims)
-                sims_masked[top_idx] = sims[top_idx]
-                sims = sims_masked
+            if query_norm is not None:
+                eligible_idx = np.flatnonzero(eligible & np.isfinite(sims))
+                dataset_weights = np.zeros(len(sims), dtype=float)
+                if eligible_idx.size > 0:
+                    if top_k is not None and int(top_k) < int(eligible_idx.size):
+                        ranked_idx = eligible_idx[np.argsort(sims[eligible_idx])[-int(top_k):]]
+                    else:
+                        ranked_idx = eligible_idx
 
-            sims = sims - sims.min()
-            if sims.sum() <= 0:
-                sims = np.ones_like(sims)
-            dataset_weights = sims / (sims.sum() + EPS)
+                    selected_sims = sims[ranked_idx].astype(float)
+                    selected_sims = selected_sims - float(np.min(selected_sims))
+                    if selected_sims.sum() <= EPS:
+                        dataset_weights[ranked_idx] = 1.0 / float(len(ranked_idx))
+                    else:
+                        dataset_weights[ranked_idx] = selected_sims / (float(selected_sims.sum()) + EPS)
+                else:
+                    dataset_weights = np.ones(metafeatures_df.shape[0], dtype=float) / max(1, metafeatures_df.shape[0])
+            else:
+                if top_k is not None and top_k < len(sims):
+                    top_idx = np.argsort(sims)[-int(top_k):]
+                    sims_masked = np.zeros_like(sims)
+                    sims_masked[top_idx] = sims[top_idx]
+                    sims = sims_masked
+
+                sims = sims - sims.min()
+                if sims.sum() <= 0:
+                    sims = np.ones_like(sims)
+                dataset_weights = sims / (sims.sum() + EPS)
         except Exception:
             dataset_weights = np.ones(metafeatures_df.shape[0], dtype=float) / max(1, metafeatures_df.shape[0])
     else:
         dataset_weights = np.ones(metafeatures_df.shape[0], dtype=float) / max(1, metafeatures_df.shape[0])
+        if query_norm is not None and metafeatures_df.shape[0] > 1:
+            eligible = np.asarray(
+                [_normalize_dataset_id(dataset_id) != query_norm for dataset_id in metafeatures_df.index],
+                dtype=bool,
+            )
+            if eligible.any():
+                dataset_weights = eligible.astype(float)
+                dataset_weights = dataset_weights / (float(dataset_weights.sum()) + EPS)
 
     common_names = [name for name in metafeatures_df.index if name in perf_subset.columns]
+    if query_norm is not None:
+        common_names = [name for name in common_names if _normalize_dataset_id(name) != query_norm]
     if len(common_names) == 0:
         raise ValueError("No common datasets between metafeatures and performance matrix")
 
@@ -520,6 +556,7 @@ def compute_aco_heuristic(
             recommend_func=recommend_func,
             recommend_kwargs=recommend_kwargs,
             metafeatures_scaled=metafeatures_scaled,
+            query_dataset_id=query_dataset_id,
         )
 
     dataset_similarities = compute_dataset_similarities(

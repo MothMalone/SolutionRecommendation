@@ -188,6 +188,39 @@ def test_compute_aco_heuristic_self_exclusion_changes_neighbor_choice():
     assert eta["imputation"][1] > eta["imputation"][0]
 
 
+def test_legacy_heuristic_self_exclusion_removes_target_from_averaging():
+    performance_matrix = pd.DataFrame(
+        [[1.0, 0.0], [0.0, 1.0]],
+        index=["pca_pipe", "none_pipe"],
+        columns=["target_ds", "neighbor_ds"],
+    )
+    metafeatures_df = pd.DataFrame(
+        [[1.0, 0.0], [0.0, 1.0]],
+        index=["target_ds", "neighbor_ds"],
+        columns=["f1", "f2"],
+    )
+    pipeline_configs = [
+        {"name": "pca_pipe", "dimensionality_reduction": "pca"},
+        {"name": "none_pipe", "dimensionality_reduction": "none"},
+    ]
+    options = {"dimensionality_reduction": ["none", "pca"]}
+
+    eta = compute_aco_heuristic(
+        performance_matrix=performance_matrix,
+        metafeatures_df=metafeatures_df,
+        pipeline_configs=pipeline_configs,
+        options=options,
+        new_metafeatures=np.array([1.0, 0.0], dtype=float),
+        dataset_weighting="equality",
+        top_k=1,
+        use_top_pipelines_from_metric=False,
+        heuristic_transfer_method="legacy_weighted_average",
+        query_dataset_id="target_ds",
+    )
+
+    assert eta["dimensionality_reduction"][0] > eta["dimensionality_reduction"][1]
+
+
 def test_compute_aco_heuristic_uses_top_k_top_l_only_not_full_library():
     performance_matrix = pd.DataFrame(
         [[0.90, 0.10], [0.60, 0.95], [0.20, 0.80]],
