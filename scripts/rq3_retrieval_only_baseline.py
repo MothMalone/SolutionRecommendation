@@ -12,7 +12,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,12 @@ from automl_aco.config import DEFAULT_PIPELINE_OPTIONS
 from automl_aco.data.loaders import load_kaggle_dataset, load_openml_dataset
 from automl_aco.data.metafeatures import extract_enhanced_metafeatures
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
+
+
+class RecordSpec(NamedTuple):
+    name: str
+    perf_path: Path
+    allow_inferred_configs: bool
 
 
 def _normalize_id(val: object) -> str:
@@ -135,15 +141,27 @@ def _infer_pipeline_config_from_name(pipeline_name: str) -> Dict[str, Any]:
     return cfg
 
 
-def _load_pipeline_configs(path: Path, perf: pd.DataFrame) -> List[Dict[str, Any]]:
+def _load_pipeline_configs(
+    path: Path,
+    perf: pd.DataFrame,
+    allow_inferred: bool = False,
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     with path.open("r", encoding="utf-8") as f:
         configs = json.load(f)
 
     existing = {str(cfg.get("name")) for cfg in configs if isinstance(cfg, dict) and "name" in cfg}
     missing = [str(name) for name in perf.index if str(name) not in existing]
     if missing:
+        if not allow_inferred:
+            sample = ", ".join(missing[:10])
+            raise ValueError(
+                "Performance matrix contains pipeline rows that are not present in "
+                f"{path}: {sample}. Use the matching AutoGluon matrix under "
+                "data/openml/training_performance_matrix_autogluon.csv, or pass "
+                "--allow-inferred-pipeline-configs only for legacy/debug runs."
+            )
         configs = list(configs) + [_infer_pipeline_config_from_name(name) for name in missing]
-    return configs
+    return configs, missing
 
 
 def _format_pipeline(cfg: Optional[Dict[str, Any]]) -> str:
@@ -169,13 +187,65 @@ def _parse_dataset_ids(raw: Optional[List[str]]) -> List[Any]:
     return out
 
 
+def _resolve_record_specs(args: argparse.Namespace, root: Path) -> List[RecordSpec]:
+    if args.performance_matrix:
+        return [
+            RecordSpec(
+                name="custom",
+                perf_path=Path(args.performance_matrix),
+                allow_inferred_configs=bool(args.allow_inferred_pipeline_configs),
+            )
+        ]
+
+    specs: List[RecordSpec] = []
+    seen: set[str] = set()
+    for record_space in args.record_spaces:
+        if record_space in seen:
+            continue
+        seen.add(record_space)
+        if record_space == "openml":
+            specs.append(
+                RecordSpec(
+                    name="openml",
+                    perf_path=root / "data" / "openml" / "training_performance_matrix_autogluon.csv",
+                    allow_inferred_configs=bool(args.allow_inferred_pipeline_configs),
+                )
+            )
+        elif record_space == "aco":
+            specs.append(
+                RecordSpec(
+                    name="aco",
+                    perf_path=root / "aco" / "training_performance_matrix_autogluon.csv",
+                    allow_inferred_configs=True,
+                )
+            )
+        else:
+            raise ValueError(f"Unknown record space: {record_space}")
+    return specs
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run retrieval-only nearest-neighbor baselines")
     parser.add_argument("--root", default=os.environ.get("ROOT", str(Path(__file__).resolve().parents[1])))
     parser.add_argument("--performance-matrix", default=None)
+    parser.add_argument(
+        "--record-spaces",
+        nargs="+",
+        choices=["openml", "aco"],
+        default=["openml"],
+        help=(
+            "Named historical records to test when --performance-matrix is not set. "
+            "openml uses data/openml; aco uses the legacy aco matrix with inferred configs."
+        ),
+    )
     parser.add_argument("--metafeatures", default=None)
     parser.add_argument("--metafeatures-id-column", default=None)
     parser.add_argument("--pipeline-configs", default=None)
+    parser.add_argument(
+        "--allow-inferred-pipeline-configs",
+        action="store_true",
+        help="Allow heuristic configs for performance-matrix rows missing from pipeline-configs.",
+    )
     parser.add_argument("--dataset-source", choices=["openml", "kaggle"], default="openml")
     parser.add_argument("--openml-local-folder", default=None)
     parser.add_argument("--kaggle-data-folder", default=None)
@@ -193,7 +263,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     root = Path(args.root)
-    perf_path = Path(args.performance_matrix or root / "aco" / "training_performance_matrix_autogluon.csv")
     meta_path = Path(args.metafeatures or root / "data" / "openml" / "dataset_feats.csv")
     cfg_path = Path(args.pipeline_configs or root / "aco" / "pipeline_configs.json")
     openml_local = Path(args.openml_local_folder or root / "test_data_local")
@@ -201,91 +270,128 @@ def main() -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    perf = pd.read_csv(perf_path, index_col=0)
-    meta = _maybe_set_meta_index(pd.read_csv(meta_path), perf, args.metafeatures_id_column)
-    configs = _load_pipeline_configs(cfg_path, perf)
-    recommender = MetaPipelineRecommender(perf, meta, configs, verbose=args.verbose)
-
+    raw_meta = pd.read_csv(meta_path)
+    record_specs = _resolve_record_specs(args, root)
     dataset_ids = _parse_dataset_ids(args.dataset_ids)
     rows: List[Dict[str, Any]] = []
 
-    for dataset_id in dataset_ids:
-        start = time.perf_counter()
-        try:
-            if args.dataset_source == "openml":
-                ds = load_openml_dataset(dataset_id, verbose=args.verbose, local_data_folder=str(openml_local))
-            else:
-                ds = load_kaggle_dataset(
-                    dataset_id,
-                    data_folder=str(kaggle_data),
-                    target_column=args.kaggle_target_column,
-                    verbose=args.verbose,
+    for record_spec in record_specs:
+        perf = pd.read_csv(record_spec.perf_path, index_col=0)
+        meta = _maybe_set_meta_index(raw_meta.copy(), perf, args.metafeatures_id_column)
+        configs, inferred_config_names = _load_pipeline_configs(
+            cfg_path,
+            perf,
+            allow_inferred=bool(record_spec.allow_inferred_configs),
+        )
+        inferred_config_names_text = "|".join(inferred_config_names)
+
+        for dataset_id in dataset_ids:
+            start = time.perf_counter()
+            try:
+                dataset_norm = _normalize_id(dataset_id)
+                ref_columns = [col for col in perf.columns if _normalize_id(col) != dataset_norm]
+                ref_index = [idx for idx in meta.index if _normalize_id(idx) != dataset_norm]
+                ref_perf = perf.loc[:, ref_columns]
+                ref_meta = meta.loc[ref_index]
+                if ref_perf.shape[1] == perf.shape[1] or ref_meta.shape[0] == meta.shape[0]:
+                    if args.verbose:
+                        print(
+                            f"Warning: dataset_id={dataset_id} was not found in both reference tables; "
+                            "self-exclusion may be incomplete."
+                        )
+                recommender = MetaPipelineRecommender(ref_perf, ref_meta, configs, verbose=args.verbose)
+
+                if args.dataset_source == "openml":
+                    ds = load_openml_dataset(dataset_id, verbose=args.verbose, local_data_folder=str(openml_local))
+                else:
+                    ds = load_kaggle_dataset(
+                        dataset_id,
+                        data_folder=str(kaggle_data),
+                        target_column=args.kaggle_target_column,
+                        verbose=args.verbose,
+                    )
+                if ds is None or "X" not in ds or "y" not in ds:
+                    raise RuntimeError(f"Could not load dataset {dataset_id}")
+
+                data = ds["X"].copy()
+                data["target"] = ds["y"]
+
+                def mf_func(_df: pd.DataFrame, _dataset: Dict[str, Any] = ds) -> np.ndarray:
+                    return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+
+                for retrieval_k in args.retrieval_k_values:
+                    for eval_l in args.eval_l_values:
+                        rec = recommender.recommend(
+                            new_dataset=data,
+                            target_column="target",
+                            k=max(1, int(retrieval_k)),
+                            eval_k=max(1, int(eval_l)),
+                            use_autogluon=True,
+                            time_limit_per_model=int(args.time_limit),
+                            metafeatures_func=mf_func,
+                            use_aco=False,
+                            aco_params={"require_autogluon": bool(args.require_autogluon)},
+                            final_autogluon_topk=1,
+                        )
+
+                        sims = rec.get("similarity_scores", {}) or {}
+                        similar = list(rec.get("similar_datasets", []) or [])
+                        top_neighbor = str(similar[0]) if similar else ""
+                        retrieved = rec.get("top_candidates_evaluated") or rec.get("top_candidates") or []
+                        retrieved_names = [
+                            str(item[0].get("name", "")) if isinstance(item[0], dict) else str(item[0])
+                            for item in retrieved
+                        ]
+
+                        rows.append(
+                            {
+                                "dataset_id": str(dataset_id),
+                                "record_space": record_spec.name,
+                                "performance_matrix": str(record_spec.perf_path),
+                                "inferred_pipeline_configs_allowed": bool(record_spec.allow_inferred_configs),
+                                "inferred_pipeline_config_count": int(len(inferred_config_names)),
+                                "inferred_pipeline_config_names": inferred_config_names_text,
+                                "mode": f"{record_spec.name}_retrieval_k{int(retrieval_k)}_direct_top{int(eval_l)}",
+                                "retrieval_k": int(retrieval_k),
+                                "eval_l": int(eval_l),
+                                "self_excluded": True,
+                                "reference_dataset_count": int(ref_perf.shape[1]),
+                                "top_neighbor": top_neighbor,
+                                "top_neighbor_similarity": float(sims.get(similar[0], np.nan)) if similar else np.nan,
+                                "retrieved_pipeline_names": "|".join(retrieved_names),
+                                "selected_pipeline": _format_pipeline(rec.get("pipeline_config")),
+                                "score": rec.get("expected_performance"),
+                                "evaluation_method": rec.get("evaluation_method"),
+                                "elapsed_seconds_total_dataset_so_far": time.perf_counter() - start,
+                                "status": "ok",
+                                "error": "",
+                            }
+                        )
+            except Exception as exc:
+                rows.append(
+                    {
+                        "dataset_id": str(dataset_id),
+                        "record_space": record_spec.name,
+                        "performance_matrix": str(record_spec.perf_path),
+                        "inferred_pipeline_configs_allowed": bool(record_spec.allow_inferred_configs),
+                        "inferred_pipeline_config_count": int(len(inferred_config_names)),
+                        "inferred_pipeline_config_names": inferred_config_names_text,
+                        "mode": f"{record_spec.name}_failed",
+                        "retrieval_k": np.nan,
+                        "eval_l": np.nan,
+                        "self_excluded": True,
+                        "reference_dataset_count": np.nan,
+                        "top_neighbor": "",
+                        "top_neighbor_similarity": np.nan,
+                        "retrieved_pipeline_names": "",
+                        "selected_pipeline": "",
+                        "score": np.nan,
+                        "evaluation_method": "",
+                        "elapsed_seconds_total_dataset_so_far": time.perf_counter() - start,
+                        "status": "failed",
+                        "error": str(exc),
+                    }
                 )
-            if ds is None or "X" not in ds or "y" not in ds:
-                raise RuntimeError(f"Could not load dataset {dataset_id}")
-
-            data = ds["X"].copy()
-            data["target"] = ds["y"]
-
-            def mf_func(_df: pd.DataFrame, _dataset: Dict[str, Any] = ds) -> np.ndarray:
-                return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
-
-            for retrieval_k in args.retrieval_k_values:
-                for eval_l in args.eval_l_values:
-                    rec = recommender.recommend(
-                        new_dataset=data,
-                        target_column="target",
-                        k=max(1, int(retrieval_k)),
-                        eval_k=max(1, int(eval_l)),
-                        use_autogluon=True,
-                        time_limit_per_model=int(args.time_limit),
-                        metafeatures_func=mf_func,
-                        use_aco=False,
-                        aco_params={"require_autogluon": bool(args.require_autogluon)},
-                        final_autogluon_topk=1,
-                    )
-
-                    sims = rec.get("similarity_scores", {}) or {}
-                    similar = list(rec.get("similar_datasets", []) or [])
-                    top_neighbor = str(similar[0]) if similar else ""
-                    retrieved = rec.get("top_candidates_evaluated") or rec.get("top_candidates") or []
-                    retrieved_names = [str(item[0].get("name", "")) if isinstance(item[0], dict) else str(item[0]) for item in retrieved]
-
-                    rows.append(
-                        {
-                            "dataset_id": str(dataset_id),
-                            "mode": f"retrieval_k{int(retrieval_k)}_direct_top{int(eval_l)}",
-                            "retrieval_k": int(retrieval_k),
-                            "eval_l": int(eval_l),
-                            "top_neighbor": top_neighbor,
-                            "top_neighbor_similarity": float(sims.get(similar[0], np.nan)) if similar else np.nan,
-                            "retrieved_pipeline_names": "|".join(retrieved_names),
-                            "selected_pipeline": _format_pipeline(rec.get("pipeline_config")),
-                            "score": rec.get("expected_performance"),
-                            "evaluation_method": rec.get("evaluation_method"),
-                            "elapsed_seconds_total_dataset_so_far": time.perf_counter() - start,
-                            "status": "ok",
-                            "error": "",
-                        }
-                    )
-        except Exception as exc:
-            rows.append(
-                {
-                    "dataset_id": str(dataset_id),
-                    "mode": "failed",
-                    "retrieval_k": np.nan,
-                    "eval_l": np.nan,
-                    "top_neighbor": "",
-                    "top_neighbor_similarity": np.nan,
-                    "retrieved_pipeline_names": "",
-                    "selected_pipeline": "",
-                    "score": np.nan,
-                    "evaluation_method": "",
-                    "elapsed_seconds_total_dataset_so_far": time.perf_counter() - start,
-                    "status": "failed",
-                    "error": str(exc),
-                }
-            )
 
     df = pd.DataFrame(rows)
     df.to_csv(out_dir / "retrieval_only_results.csv", index=False)
@@ -295,7 +401,7 @@ def main() -> int:
     ok = df[df["status"] == "ok"].copy()
     if not ok.empty:
         summary = (
-            ok.groupby("mode", as_index=False)
+            ok.groupby(["record_space", "mode"], as_index=False)
             .agg(n_datasets=("dataset_id", "nunique"), mean_score=("score", "mean"), median_score=("score", "median"))
             .sort_values("mean_score", ascending=False)
         )

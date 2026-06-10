@@ -88,7 +88,7 @@ def build_common_parser(description: str) -> argparse.ArgumentParser:
 
 def resolve_default_paths(args: argparse.Namespace) -> Dict[str, str]:
     root = Path(args.root)
-    performance_matrix = args.performance_matrix or str(root / "aco" / "training_performance_matrix_autogluon.csv")
+    performance_matrix = args.performance_matrix or str(root / "data" / "openml" / "training_performance_matrix_autogluon.csv")
     metafeatures = args.metafeatures or str(root / "data" / "openml" / "dataset_feats.csv")
     pipeline_configs = args.pipeline_configs or str(root / "aco" / "pipeline_configs.json")
     openml_local = args.openml_local_folder or str(root / "test_data_local")

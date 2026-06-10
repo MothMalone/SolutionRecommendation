@@ -32,18 +32,19 @@ KAGGLE_REPO_ROOT = "/kaggle/input/acorec"
 
 # Notebook-sourced default paths (kept for parity with Kaggle runs)
 KAGGLE_TRAIN_PERF_PATHS = [
+    f"{KAGGLE_REPO_ROOT}/data/openml/training_performance_matrix_autogluon.csv",
     f"{KAGGLE_REPO_ROOT}/aco/training_performance_matrix_autogluon.csv",
     "/kaggle/input/disable-autogluon/training_performance_matrix_autogluon.csv",
     "/kaggle/input/diffprep-setting/training_performance_matrix_autogluon_diffprep.csv",
     "/kaggle/input/quick-test-regression/training_performance_matrix_autogluon.csv",
 ]
-KAGGLE_METAFEATURES_PATH = f"{KAGGLE_REPO_ROOT}/aco/dataset_feats.csv"
+KAGGLE_METAFEATURES_PATH = f"{KAGGLE_REPO_ROOT}/data/openml/dataset_feats.csv"
 KAGGLE_PIPELINES_PATH = f"{KAGGLE_REPO_ROOT}/aco/pipeline_configs.json"
 KAGGLE_DATA_FOLDER = "/kaggle/input/openml"
 
 # Local-friendly defaults (repo-relative)
-LOCAL_TRAIN_PERF_PATH = "aco/training_performance_matrix_autogluon.csv"
-LOCAL_METAFEATURES_PATH = "aco/dataset_feats.csv"
+LOCAL_TRAIN_PERF_PATH = "data/openml/training_performance_matrix_autogluon.csv"
+LOCAL_METAFEATURES_PATH = "data/openml/dataset_feats.csv"
 LOCAL_PIPELINES_PATH = "aco/pipeline_configs.json"
 LOCAL_PIPELINES_PATH_ALT = "Data/openml/pipelines.json"
 

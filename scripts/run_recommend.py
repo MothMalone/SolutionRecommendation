@@ -473,10 +473,11 @@ def main() -> None:
         performance_matrix_path = args.performance_matrix
     else:
         if use_kaggle:
-            repo_perf = os.path.join(args.kaggle_root, "aco", "training_performance_matrix_autogluon.csv")
+            repo_perf_primary = os.path.join(args.kaggle_root, "data", "openml", "training_performance_matrix_autogluon.csv")
+            repo_perf_legacy = os.path.join(args.kaggle_root, "aco", "training_performance_matrix_autogluon.csv")
             performance_matrix_path = pick_existing(
                 "performance matrix",
-                [repo_perf] + KAGGLE_TRAIN_PERF_PATHS,
+                [repo_perf_primary, repo_perf_legacy] + KAGGLE_TRAIN_PERF_PATHS,
             )
         else:
             performance_matrix_path = pick_existing(
