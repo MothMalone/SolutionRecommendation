@@ -82,6 +82,18 @@ def _maybe_set_meta_index(meta_df: pd.DataFrame, perf_df: pd.DataFrame, explicit
     return meta_df
 
 
+def _lookup_metafeatures(dataset: Dict[str, Any], meta_df: pd.DataFrame) -> Dict[str, Any]:
+    dataset_id = dataset.get("id") if isinstance(dataset, dict) else None
+    if dataset_id is None:
+        return extract_enhanced_metafeatures(dataset, meta_features_df=meta_df)
+
+    dataset_norm = _normalize_id(dataset_id)
+    for idx in meta_df.index:
+        if _normalize_id(idx) == dataset_norm:
+            return meta_df.loc[idx].to_dict()
+    return extract_enhanced_metafeatures(dataset, meta_features_df=meta_df)
+
+
 def _infer_pipeline_config_from_name(pipeline_name: str) -> Dict[str, Any]:
     token = str(pipeline_name).strip().lower()
     cfg: Dict[str, Any] = {
@@ -278,6 +290,7 @@ def main() -> int:
     for record_spec in record_specs:
         perf = pd.read_csv(record_spec.perf_path, index_col=0)
         meta = _maybe_set_meta_index(raw_meta.copy(), perf, args.metafeatures_id_column)
+        lookup_meta = meta.copy()
         configs, inferred_config_names = _load_pipeline_configs(
             cfg_path,
             perf,
@@ -316,8 +329,8 @@ def main() -> int:
                 data = ds["X"].copy()
                 data["target"] = ds["y"]
 
-                def mf_func(_df: pd.DataFrame, _dataset: Dict[str, Any] = ds) -> np.ndarray:
-                    return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+                def mf_func(_df: pd.DataFrame, _dataset: Dict[str, Any] = ds) -> Dict[str, Any]:
+                    return _lookup_metafeatures(_dataset, lookup_meta)
 
                 for retrieval_k in args.retrieval_k_values:
                     for eval_l in args.eval_l_values:
