@@ -1737,9 +1737,17 @@ class MetaPipelineRecommender:
                     (cfg for cfg in self.pipeline_configs if cfg.get("name") == top_pipeline_name),
                     None,
                 )
+                final_eval = {
+                    "method": "fallback_prediction_only",
+                    "score": float(top_pipeline_score),
+                    "error": "No candidate produced valid evaluation results",
+                }
                 return {
                     "pipeline_config": top_pipeline_config,
                     "expected_performance": float(top_pipeline_score),
+                    "recommended_performance": float(top_pipeline_score),
+                    "final_evaluation": final_eval,
+                    "final_performance": float(final_eval["score"]),
                     "similar_datasets": top_datasets,
                     "pipeline_ranking": pipeline_ranking[:k],
                     "top_candidates": [(cfg["name"], float(candidate_perfs[cfg["name"]])) for cfg in top_candidate_configs],
@@ -1749,9 +1757,19 @@ class MetaPipelineRecommender:
                     "evaluation_method": "fallback_prediction_only",
                 }
 
+            best_name = str(best_cfg.get("name", "")) if isinstance(best_cfg, dict) else ""
+            expected_score = (
+                float(candidate_perfs[best_name])
+                if best_name in candidate_perfs.index
+                else float(best_score)
+            )
+            final_eval = {"method": eval_method, "score": float(best_score)}
             return {
                 "pipeline_config": best_cfg,
-                "expected_performance": float(best_score),
+                "expected_performance": expected_score,
+                "recommended_performance": expected_score,
+                "final_evaluation": final_eval,
+                "final_performance": float(final_eval["score"]),
                 "similar_datasets": top_datasets,
                 "pipeline_ranking": all_results,
                 "top_candidates_evaluated": [(cfg["name"], sc) for cfg, sc in all_results],
@@ -1767,9 +1785,13 @@ class MetaPipelineRecommender:
             (cfg for cfg in self.pipeline_configs if cfg.get("name") == top_pipeline_name),
             None,
         )
+        final_eval = {"method": "prediction_only", "score": float(top_pipeline_score)}
         return {
             "pipeline_config": top_pipeline_config,
             "expected_performance": float(top_pipeline_score),
+            "recommended_performance": float(top_pipeline_score),
+            "final_evaluation": final_eval,
+            "final_performance": float(final_eval["score"]),
             "similar_datasets": top_datasets,
             "pipeline_ranking": pipeline_ranking[:k],
             "top_candidates": [(cfg["name"], float(candidate_perfs[cfg["name"]])) for cfg in top_candidate_configs],
