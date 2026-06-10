@@ -375,6 +375,14 @@ def main() -> int:
     parser.add_argument("--pipeline-configs", default=None, help="Override pipeline configs path")
     parser.add_argument("--metafeatures-id-column", default=None, help="Optional metafeatures id column")
     parser.add_argument("--baseline-variant", default="K5_L3", help="Baseline variant for delta/win-loss")
+    parser.add_argument(
+        "--fallback-dataset-id",
+        default=None,
+        help=(
+            "Dataset id to use when recommendation layout is single-run and "
+            "dataset_id cannot be inferred (e.g., variant/recommendation.json only)."
+        ),
+    )
     parser.add_argument("--output-prefix", default=None, help="Output prefix (without extension)")
     args = parser.parse_args()
 
@@ -427,6 +435,9 @@ def main() -> int:
             if proxy_score is not None and final_score is not None
             else np.nan
         )
+
+        if (_normalize_id(dataset_id).lower() in {"", "unknown"}) and args.fallback_dataset_id:
+            dataset_id = str(args.fallback_dataset_id)
 
         k_val, l_val = _parse_k_l(payload, variant_name=variant)
         hp = payload.get("search_hyperparams", {}) if isinstance(payload, dict) else {}
@@ -491,6 +502,28 @@ def main() -> int:
     if df.empty:
         raise RuntimeError("No analyzable rows produced.")
 
+    # Ensure expected columns exist even when diagnostics fail for all rows (e.g., unknown dataset_id).
+    expected_numeric_cols = [
+        "sim_spread",
+        "sim_gap12",
+        "weight_entropy_norm",
+        "effective_neighbors",
+        "topl_pairwise_jaccard",
+        "topl_dup_ratio",
+        "eta_margin_mean",
+        "heuristic_top_k",
+        "heuristic_top_l",
+        "final_score",
+        "proxy_minus_final",
+    ]
+    expected_text_cols = ["variant", "dataset_id", "wl_vs_baseline"]
+    for col in expected_numeric_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+    for col in expected_text_cols:
+        if col not in df.columns:
+            df[col] = ""
+
     # Baseline deltas and win/tie/loss
     base = (
         df[df["variant"] == args.baseline_variant][["dataset_id", "final_score"]]
@@ -504,6 +537,8 @@ def main() -> int:
         "win",
         np.where(df["delta_vs_baseline"] < -1e-12, "loss", "tie"),
     )
+    df["heuristic_top_k"] = pd.to_numeric(df["heuristic_top_k"], errors="coerce")
+    df["heuristic_top_l"] = pd.to_numeric(df["heuristic_top_l"], errors="coerce")
 
     # Variant summary
     variant_summary = (
