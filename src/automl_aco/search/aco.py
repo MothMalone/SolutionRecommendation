@@ -194,7 +194,32 @@ def search_pipelines_aco(
             carry_best = None
             if eval_cache:
                 carry_best = float(max(sc for _cfg, sc in eval_cache.values()))
-            history.append({"iteration": iteration + 1, "best_score": carry_best})
+            previous_best = best_so_far
+            improved = (
+                carry_best is not None
+                and (previous_best is None or carry_best > (previous_best + float(min_improvement)))
+            )
+            history.append(
+                {
+                    "iteration": iteration + 1,
+                    "best_score": carry_best,
+                    "global_best_score": carry_best,
+                    "iteration_best_score": None,
+                    "iteration_mean_score": None,
+                    "iteration_min_score": None,
+                    "sampled_unique_count": 0,
+                    "valid_count": 0,
+                    "cache_size": len(eval_cache),
+                    "global_improved": bool(improved),
+                    "global_improvement": (
+                        float(carry_best - previous_best)
+                        if carry_best is not None and previous_best is not None
+                        else (0.0 if carry_best is not None else None)
+                    ),
+                    "no_improve_rounds": int(no_improve_rounds),
+                    "status": "no_new_unique",
+                }
+            )
             logger.info(
                 "ACO Iter %s/%s - No new unique configuration sampled",
                 iteration + 1,
@@ -227,7 +252,26 @@ def search_pipelines_aco(
 
         best_cfg, best_score, eval_results, unsorted_res = evaluate_fn(sampled)
         if not eval_results:
-            history.append({"iteration": iteration + 1, "best_score": None})
+            carry_best = None
+            if eval_cache:
+                carry_best = float(max(sc for _cfg, sc in eval_cache.values()))
+            history.append(
+                {
+                    "iteration": iteration + 1,
+                    "best_score": carry_best,
+                    "global_best_score": carry_best,
+                    "iteration_best_score": None,
+                    "iteration_mean_score": None,
+                    "iteration_min_score": None,
+                    "sampled_unique_count": len(sampled),
+                    "valid_count": 0,
+                    "cache_size": len(eval_cache),
+                    "global_improved": False,
+                    "global_improvement": 0.0 if carry_best is not None else None,
+                    "no_improve_rounds": int(no_improve_rounds),
+                    "status": "no_valid_evaluation",
+                }
+            )
             logger.info("ACO Iter %s/%s - No valid evaluation", iteration + 1, n_iterations)
             no_improve_rounds += 1
             if int(early_stop_rounds) > 0 and no_improve_rounds >= int(early_stop_rounds):
@@ -296,8 +340,31 @@ def search_pipelines_aco(
                 path_context.append((step, val_idx))
 
         candidate_pipelines.extend(unsorted_res)
-        history.append({"iteration": iteration + 1, "best_score": float(best_score)})
         current_best = float(max(sc for _cfg, sc in eval_cache.values()))
+        previous_best = best_so_far
+        improved_global = previous_best is None or current_best > (previous_best + float(min_improvement))
+        iter_scores = np.asarray([float(sc) for _cfg, sc in eval_results], dtype=float)
+        history.append(
+            {
+                "iteration": iteration + 1,
+                "best_score": current_best,
+                "global_best_score": current_best,
+                "iteration_best_score": float(best_score),
+                "iteration_mean_score": float(np.mean(iter_scores)) if iter_scores.size else None,
+                "iteration_min_score": float(np.min(iter_scores)) if iter_scores.size else None,
+                "sampled_unique_count": len(sampled),
+                "valid_count": len(eval_results),
+                "cache_size": len(eval_cache),
+                "global_improved": bool(improved_global),
+                "global_improvement": (
+                    float(current_best - previous_best)
+                    if previous_best is not None
+                    else 0.0
+                ),
+                "no_improve_rounds": int(no_improve_rounds),
+                "status": "ok",
+            }
+        )
         if best_so_far is None or current_best > (best_so_far + float(min_improvement)):
             best_so_far = current_best
             no_improve_rounds = 0

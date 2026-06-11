@@ -152,6 +152,8 @@ def test_aco_return_history_contains_iteration_records_only():
     assert len(history) > 1
     assert all(isinstance(row, dict) for row in history)
     assert all("iteration" in row and "best_score" in row for row in history)
+    assert all("global_best_score" in row and "iteration_best_score" in row for row in history)
+    assert all("sampled_unique_count" in row and "valid_count" in row for row in history)
 
 
 def test_aco_history_carries_forward_when_no_new_configs_sampled():

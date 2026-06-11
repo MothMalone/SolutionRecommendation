@@ -1880,23 +1880,15 @@ class MetaPipelineRecommender:
                         for hist in aco_history:
                             if not isinstance(hist, dict):
                                 continue
-                            all_history.append(
+                            row = dict(hist)
+                            row.update(
                                 {
                                     "iteration": global_iteration,
-                                    "best_score": hist.get("best_score"),
-                                    "episode_score": hist.get("episode_score"),
-                                    "epsilon": hist.get("epsilon"),
-                                    "order_epsilon": hist.get("order_epsilon"),
                                     "order_index": int(hist.get("order_idx", order_idx)),
                                     "step_order": hist.get("order", list(order)),
-                                    "policy_updates": hist.get("policy_updates"),
-                                    "policy_mean_loss": hist.get("policy_mean_loss"),
-                                    "policy_last_loss": hist.get("policy_last_loss"),
-                                    "order_policy_updates": hist.get("order_policy_updates"),
-                                    "order_policy_mean_loss": hist.get("order_policy_mean_loss"),
-                                    "order_policy_last_loss": hist.get("order_policy_last_loss"),
                                 }
                             )
+                            all_history.append(row)
                             global_iteration += 1
 
             if not per_feature_mode:
