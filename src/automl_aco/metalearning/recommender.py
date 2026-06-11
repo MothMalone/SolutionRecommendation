@@ -1,7 +1,7 @@
 """Meta-learning pipeline recommender (ported from notebook)."""
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import re
 
 import numpy as np
@@ -893,6 +893,329 @@ class MetaPipelineRecommender:
             verbose=self.verbose,
         )
 
+    @staticmethod
+    def _candidate_key_for_options(
+        cfg: Mapping[str, Any],
+        options: Mapping[str, Sequence[str]],
+        step_order: Optional[Sequence[str]] = None,
+    ) -> Tuple[Tuple[str, Any], ...]:
+        order = list(step_order) if step_order else list(options.keys())
+        return tuple((step, cfg.get(step)) for step in order)
+
+    @staticmethod
+    def _compatible_option_value(raw_value: Any, choices: Sequence[str]) -> str:
+        choice_values = [str(v) for v in choices]
+        if not choice_values:
+            return "none"
+
+        if raw_value is not None:
+            raw_str = str(raw_value)
+            if raw_str in choice_values:
+                return raw_str
+            raw_base = base_operator_name(raw_str)
+            for choice in choice_values:
+                if base_operator_name(choice) == raw_base:
+                    return choice
+
+        for choice in choice_values:
+            if base_operator_name(choice) == "none":
+                return choice
+        return choice_values[0]
+
+    def _coerce_pipeline_to_options(
+        self,
+        cfg: Mapping[str, Any],
+        options: Mapping[str, Sequence[str]],
+        *,
+        name: Optional[str] = None,
+        step_order: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        coerced: Dict[str, Any] = {}
+        for step, choices in options.items():
+            coerced[step] = self._compatible_option_value(cfg.get(step), choices)
+        if name is not None:
+            coerced["name"] = str(name)
+        elif cfg.get("name") is not None:
+            coerced["name"] = str(cfg.get("name"))
+        if step_order:
+            coerced["step_order"] = list(step_order)
+        return coerced
+
+    def _dedupe_candidate_configs(
+        self,
+        candidates: Sequence[Mapping[str, Any]],
+        options: Mapping[str, Sequence[str]],
+        *,
+        step_order: Optional[Sequence[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        seen = set()
+        deduped: List[Dict[str, Any]] = []
+        for cfg in candidates:
+            key = self._candidate_key_for_options(cfg, options, step_order=step_order)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(dict(cfg))
+        return deduped
+
+    def _retrieved_seed_configs(
+        self,
+        *,
+        new_metafeatures: np.ndarray,
+        options: Mapping[str, Sequence[str]],
+        neighbor_k: int,
+        top_l: int,
+        score_direction: str,
+        query_dataset_id: Optional[Any],
+        step_order: Optional[Sequence[str]],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Tuple[Any, float]]]:
+        cfg_by_name = {
+            str(cfg.get("name")): cfg
+            for cfg in self.pipeline_configs
+            if isinstance(cfg, dict) and cfg.get("name") is not None
+        }
+        sims = self._compute_dataset_similarities(new_metafeatures)
+        top_neighbors = select_top_k_neighbors(
+            dataset_similarities=sims,
+            top_k=max(1, int(neighbor_k)),
+            query_dataset_id=query_dataset_id,
+        )
+
+        seeds: List[Dict[str, Any]] = []
+        seed_rows: List[Dict[str, Any]] = []
+        ascending = str(score_direction).lower().strip() not in {"higher_is_better", "max", "maximize"}
+
+        for neighbor_rank, (dataset_id, sim) in enumerate(top_neighbors, start=1):
+            ds_key = str(dataset_id)
+            if ds_key not in self.performance_matrix_imputed.columns:
+                continue
+            scores = pd.to_numeric(self.performance_matrix_imputed[ds_key], errors="coerce")
+            scores = scores.replace([np.inf, -np.inf], np.nan).dropna()
+            if scores.empty:
+                continue
+            ranked = scores.sort_values(ascending=ascending)
+            for pipeline_rank, (pipeline_name, hist_score) in enumerate(ranked.head(max(1, int(top_l))).items(), start=1):
+                pipeline_key = str(pipeline_name)
+                raw_cfg = cfg_by_name.get(pipeline_key)
+                if raw_cfg is None:
+                    continue
+                cfg = self._coerce_pipeline_to_options(
+                    raw_cfg,
+                    options,
+                    name=pipeline_key,
+                    step_order=step_order,
+                )
+                seeds.append(cfg)
+                seed_rows.append(
+                    {
+                        "neighbor_dataset": ds_key,
+                        "neighbor_rank": int(neighbor_rank),
+                        "similarity": float(sim),
+                        "pipeline_name": pipeline_key,
+                        "pipeline_rank": int(pipeline_rank),
+                        "historical_score": float(hist_score),
+                    }
+                )
+
+        seeds = self._dedupe_candidate_configs(seeds, options, step_order=step_order)
+        return seeds, seed_rows, top_neighbors
+
+    def _local_mutation_candidates(
+        self,
+        *,
+        seed_configs: Sequence[Mapping[str, Any]],
+        options: Mapping[str, Sequence[str]],
+        sample_budget: int,
+        radius: int,
+        random_candidates: int,
+        seed: int,
+        step_order: Optional[Sequence[str]],
+    ) -> List[Dict[str, Any]]:
+        rng = np.random.RandomState(seed)
+        order = list(step_order) if step_order else list(options.keys())
+        budget = max(int(sample_budget), len(seed_configs), 1)
+        candidates: List[Dict[str, Any]] = [dict(cfg) for cfg in seed_configs]
+
+        def add_candidate(cfg: Mapping[str, Any]) -> bool:
+            if len(candidates) >= budget:
+                return False
+            before = len(self._dedupe_candidate_configs(candidates, options, step_order=order))
+            candidates.append(dict(cfg))
+            after = len(self._dedupe_candidate_configs(candidates, options, step_order=order))
+            if after == before:
+                candidates.pop()
+                return True
+            return len(candidates) < budget
+
+        def mutation_name(base_name: str, changes: Sequence[Tuple[str, str]]) -> str:
+            suffix = ",".join(f"{step}={value}" for step, value in changes)
+            return f"{base_name}|local:{suffix}"
+
+        for base in seed_configs:
+            base_name = str(base.get("name", "retrieved"))
+            for step in order:
+                for value in [str(v) for v in options.get(step, [])]:
+                    if value == str(base.get(step)):
+                        continue
+                    cfg = dict(base)
+                    cfg[step] = value
+                    cfg["name"] = mutation_name(base_name, [(step, value)])
+                    if step_order:
+                        cfg["step_order"] = list(step_order)
+                    if not add_candidate(cfg):
+                        return self._dedupe_candidate_configs(candidates, options, step_order=order)
+
+        if int(radius) >= 2:
+            for base in seed_configs:
+                base_name = str(base.get("name", "retrieved"))
+                for i, step_a in enumerate(order):
+                    for step_b in order[i + 1 :]:
+                        vals_a = [str(v) for v in options.get(step_a, []) if str(v) != str(base.get(step_a))]
+                        vals_b = [str(v) for v in options.get(step_b, []) if str(v) != str(base.get(step_b))]
+                        for value_a in vals_a:
+                            for value_b in vals_b:
+                                cfg = dict(base)
+                                cfg[step_a] = value_a
+                                cfg[step_b] = value_b
+                                cfg["name"] = mutation_name(base_name, [(step_a, value_a), (step_b, value_b)])
+                                if step_order:
+                                    cfg["step_order"] = list(step_order)
+                                if not add_candidate(cfg):
+                                    return self._dedupe_candidate_configs(candidates, options, step_order=order)
+
+        random_added = 0
+        max_attempts = max(50, int(random_candidates) * 20)
+        for _ in range(max_attempts):
+            if len(candidates) >= budget or random_added >= max(0, int(random_candidates)):
+                break
+            cfg = {step: str(options[step][int(rng.randint(0, len(options[step])))]) for step in order}
+            cfg["name"] = f"retrieval_local_random_{random_added + 1}"
+            if step_order:
+                cfg["step_order"] = list(step_order)
+            before = len(self._dedupe_candidate_configs(candidates, options, step_order=order))
+            candidates.append(cfg)
+            after = len(self._dedupe_candidate_configs(candidates, options, step_order=order))
+            if after > before:
+                random_added += 1
+            else:
+                candidates.pop()
+
+        return self._dedupe_candidate_configs(candidates, options, step_order=order)
+
+    def _search_pipelines_retrieval_local(
+        self,
+        *,
+        new_dataset: Any,
+        target_column: str,
+        new_metafeatures: np.ndarray,
+        options: Dict[str, List[str]],
+        proxy_settings: Optional[Dict[str, Any]],
+        n_pipelines: int,
+        sample_budget: int,
+        seed: int,
+        score_direction: str,
+        query_dataset_id: Optional[Any],
+        step_order: Optional[List[str]],
+        neighbor_k: int = 1,
+        top_l: int = 1,
+        radius: int = 1,
+        random_candidates: int = 0,
+    ) -> Tuple[
+        List[Tuple[Dict[str, Any], float]],
+        List[Tuple[Dict[str, Any], float]],
+        List[Dict[str, Any]],
+        List[Dict[str, Any]],
+    ]:
+        order = list(step_order) if step_order else list(options.keys())
+        seed_configs, seed_rows, neighbors = self._retrieved_seed_configs(
+            new_metafeatures=new_metafeatures,
+            options=options,
+            neighbor_k=neighbor_k,
+            top_l=top_l,
+            score_direction=score_direction,
+            query_dataset_id=query_dataset_id,
+            step_order=order,
+        )
+        if not seed_configs:
+            return [], [], [
+                {
+                    "iteration": 0,
+                    "best_score": None,
+                    "optimizer": "retrieval_local",
+                    "event": "no_seed_pipeline",
+                    "neighbor_k": int(neighbor_k),
+                    "top_l": int(top_l),
+                }
+            ], []
+
+        candidates = self._local_mutation_candidates(
+            seed_configs=seed_configs,
+            options=options,
+            sample_budget=sample_budget,
+            radius=radius,
+            random_candidates=random_candidates,
+            seed=seed,
+            step_order=order,
+        )
+        if self.verbose:
+            neighbor_desc = ", ".join(f"{ds}:{sim:.4f}" for ds, sim in neighbors[: max(1, int(neighbor_k))])
+            protected_names = ", ".join(str(cfg.get("name", "unnamed")) for cfg in seed_configs)
+            print(
+                "Retrieval-local search: "
+                f"neighbors=[{neighbor_desc}], protected=[{protected_names}], "
+                f"candidates={len(candidates)}, radius={int(radius)}"
+            )
+
+        best_cfg, best_score, sorted_results, unsorted_results = self._evaluate_candidates_with_simple_models(
+            new_dataset,
+            target_column,
+            candidates,
+            proxy_settings=proxy_settings,
+        )
+        if best_cfg is None or not sorted_results:
+            return [], [], [
+                {
+                    "iteration": 0,
+                    "best_score": None,
+                    "optimizer": "retrieval_local",
+                    "event": "no_valid_proxy_candidate",
+                    "neighbor_k": int(neighbor_k),
+                    "top_l": int(top_l),
+                    "candidate_count": int(len(candidates)),
+                }
+            ], seed_configs
+
+        history: List[Dict[str, Any]] = [
+            {
+                "iteration": 0,
+                "best_score": None,
+                "optimizer": "retrieval_local",
+                "event": "setup",
+                "neighbor_k": int(neighbor_k),
+                "top_l": int(top_l),
+                "radius": int(radius),
+                "sample_budget": int(sample_budget),
+                "seed_count": int(len(seed_configs)),
+                "candidate_count": int(len(candidates)),
+                "protected_candidates": [str(cfg.get("name", "unnamed")) for cfg in seed_configs],
+                "seed_rows": seed_rows,
+            }
+        ]
+        running_best: Optional[float] = None
+        for idx, (cfg, score) in enumerate(unsorted_results, start=1):
+            running_best = float(score) if running_best is None else max(float(running_best), float(score))
+            history.append(
+                {
+                    "iteration": int(idx),
+                    "best_score": float(running_best),
+                    "episode_score": float(score),
+                    "optimizer": "retrieval_local",
+                    "candidate_name": str(cfg.get("name", f"candidate_{idx}")),
+                }
+            )
+
+        return sorted_results[: max(1, int(n_pipelines))], unsorted_results, history, seed_configs
+
     def _search_pipelines_dqn(
         self,
         new_dataset: Any,
@@ -1246,6 +1569,7 @@ class MetaPipelineRecommender:
             per_feature_mode = bool(aco_params.get("per_feature_independent_search", False))
             if per_feature_mode and optimizer_name != "aco":
                 raise ValueError("per_feature_independent_search requires optimizer='aco'")
+            retrieval_local_protected_candidates: List[Dict[str, Any]] = []
 
             if per_feature_mode:
                 if target_column is None:
@@ -1407,6 +1731,40 @@ class MetaPipelineRecommender:
                             dqn_params=aco_params,
                             enable_internal_order_policy=not search_ordering,
                         )
+                    elif optimizer_name == "retrieval_local":
+                        (
+                            aco_results,
+                            aco_unsorted_res,
+                            aco_history,
+                            protected_candidates,
+                        ) = self._search_pipelines_retrieval_local(
+                            new_dataset=new_dataset,
+                            target_column=target_column,
+                            new_metafeatures=new_mf_scaled,
+                            options=ordered_options,
+                            proxy_settings=proxy_settings,
+                            n_pipelines=k,
+                            sample_budget=sample_budget,
+                            seed=aco_seed + order_idx - 1,
+                            score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                            query_dataset_id=aco_params.get("query_dataset_id"),
+                            step_order=order,
+                            neighbor_k=int(
+                                aco_params.get(
+                                    "retrieval_local_neighbor_k",
+                                    aco_params.get("heuristic_top_k", 1),
+                                )
+                            ),
+                            top_l=int(
+                                aco_params.get(
+                                    "retrieval_local_top_l",
+                                    aco_params.get("heuristic_top_l", 1),
+                                )
+                            ),
+                            radius=int(aco_params.get("retrieval_local_radius", 1)),
+                            random_candidates=int(aco_params.get("retrieval_local_random_candidates", 0)),
+                        )
+                        retrieval_local_protected_candidates.extend(protected_candidates)
                     else:
                         aco_results, aco_unsorted_res, aco_history = self._search_pipelines_optimizer(
                             optimizer=optimizer_name,
@@ -1592,6 +1950,12 @@ class MetaPipelineRecommender:
                             ag_candidates = [dict(cfg) for cfg, _sc in aco_results[:topk]]
                         else:
                             ag_candidates = [best_pipeline]
+                        if optimizer_name == "retrieval_local" and retrieval_local_protected_candidates:
+                            ag_candidates = self._dedupe_candidate_configs(
+                                [*retrieval_local_protected_candidates, *ag_candidates],
+                                options,
+                                step_order=base_order,
+                            )
                         ag_best_cfg, ag_score, ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
                             new_dataset,
                             target_column,
@@ -1627,6 +1991,12 @@ class MetaPipelineRecommender:
                                 fallback_candidates = [dict(cfg) for cfg, _sc in aco_results[:topk]]
                             else:
                                 fallback_candidates = [best_pipeline]
+                            if optimizer_name == "retrieval_local" and retrieval_local_protected_candidates:
+                                fallback_candidates = self._dedupe_candidate_configs(
+                                    [*retrieval_local_protected_candidates, *fallback_candidates],
+                                    options,
+                                    step_order=base_order,
+                                )
                             simple_best_cfg, simple_best_score, simple_all, _simple_unsorted = (
                                 self._evaluate_candidates_with_simple_models(
                                     new_dataset,
@@ -1675,6 +2045,21 @@ class MetaPipelineRecommender:
                     "heuristic_source": "phase2_transferred_eta_norm" if per_feature_mode else "n/a",
                     "log": per_feature_pipeline_log,
                 },
+                "retrieval_local_search": {
+                    "enabled": optimizer_name == "retrieval_local",
+                    "incumbent_protection": bool(
+                        optimizer_name == "retrieval_local" and retrieval_local_protected_candidates
+                    ),
+                    "protected_candidates": [
+                        str(cfg.get("name", "unnamed")) for cfg in retrieval_local_protected_candidates
+                    ],
+                    "neighbor_k": int(
+                        aco_params.get("retrieval_local_neighbor_k", aco_params.get("heuristic_top_k", 1))
+                    ),
+                    "top_l": int(aco_params.get("retrieval_local_top_l", aco_params.get("heuristic_top_l", 1))),
+                    "radius": int(aco_params.get("retrieval_local_radius", 1)),
+                    "random_candidates": int(aco_params.get("retrieval_local_random_candidates", 0)),
+                },
                 "proxy_settings": proxy_settings or {},
                 "final_autogluon_topk": max(1, int(final_autogluon_topk)),
                 "aco_hyperparams": {
@@ -1697,6 +2082,16 @@ class MetaPipelineRecommender:
                     "min_improvement": float(aco_params.get("min_improvement", 0.0)),
                     "per_feature_independent_search": bool(aco_params.get("per_feature_independent_search", False)),
                     "legacy_notebook_aco": bool(aco_params.get("legacy_notebook_aco", False)),
+                    "retrieval_local_neighbor_k": int(
+                        aco_params.get("retrieval_local_neighbor_k", aco_params.get("heuristic_top_k", 1))
+                    ),
+                    "retrieval_local_top_l": int(
+                        aco_params.get("retrieval_local_top_l", aco_params.get("heuristic_top_l", 1))
+                    ),
+                    "retrieval_local_radius": int(aco_params.get("retrieval_local_radius", 1)),
+                    "retrieval_local_random_candidates": int(
+                        aco_params.get("retrieval_local_random_candidates", 0)
+                    ),
                 },
             }
 

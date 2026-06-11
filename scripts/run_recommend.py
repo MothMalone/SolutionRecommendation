@@ -263,11 +263,51 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--optimizer",
-        choices=["aco", "dqn", "random", "ga", "sa", "greedy", "mcts", "beam", "tpe", "exhaustive"],
+        choices=[
+            "aco",
+            "dqn",
+            "retrieval_local",
+            "random",
+            "ga",
+            "sa",
+            "greedy",
+            "mcts",
+            "beam",
+            "tpe",
+            "exhaustive",
+        ],
         default="aco",
-        help="Search optimizer. ACO uses n-ants*n-iterations; DQN/others use sample-budget.",
+        help=(
+            "Search optimizer. ACO uses n-ants*n-iterations; DQN/others use sample-budget. "
+            "retrieval_local mutates retrieved full-pipeline incumbents."
+        ),
     )
     parser.add_argument("--sample-budget", type=int, default=100, help="Config evaluation budget for non-ACO optimizers")
+    parser.add_argument(
+        "--retrieval-local-neighbor-k",
+        type=int,
+        default=1,
+        help="Number of nearest non-self datasets used to seed optimizer=retrieval_local.",
+    )
+    parser.add_argument(
+        "--retrieval-local-top-l",
+        type=int,
+        default=1,
+        help="Number of top historical full pipelines per retrieved neighbor for optimizer=retrieval_local.",
+    )
+    parser.add_argument(
+        "--retrieval-local-radius",
+        type=int,
+        choices=[1, 2],
+        default=1,
+        help="Maximum local mutation radius around retrieved pipelines for optimizer=retrieval_local.",
+    )
+    parser.add_argument(
+        "--retrieval-local-random-candidates",
+        type=int,
+        default=0,
+        help="Optional extra random configs added after local mutations for optimizer=retrieval_local.",
+    )
     parser.add_argument(
         "--dqn-epochs",
         type=int,
@@ -1151,6 +1191,10 @@ def main() -> None:
             f"aco_min_improvement={float(args.aco_min_improvement)}, "
             f"per_feature_independent_search={bool(args.per_feature_independent_search)}, "
             f"legacy_notebook_aco={bool(args.legacy_notebook_aco)}, "
+            f"retrieval_local_neighbor_k={int(args.retrieval_local_neighbor_k)}, "
+            f"retrieval_local_top_l={int(args.retrieval_local_top_l)}, "
+            f"retrieval_local_radius={int(args.retrieval_local_radius)}, "
+            f"retrieval_local_random_candidates={int(args.retrieval_local_random_candidates)}, "
             f"score_direction={args.score_direction}, "
             f"require_autogluon={bool(args.require_autogluon)}, "
             f"proxy_clf_model={proxy_settings.get('classification_model')}, "
@@ -1252,6 +1296,10 @@ def main() -> None:
                     "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
                     "per_feature_max_features": int(args.per_feature_max_features),
                     "legacy_notebook_aco": bool(args.legacy_notebook_aco),
+                    "retrieval_local_neighbor_k": int(args.retrieval_local_neighbor_k),
+                    "retrieval_local_top_l": int(args.retrieval_local_top_l),
+                    "retrieval_local_radius": int(args.retrieval_local_radius),
+                    "retrieval_local_random_candidates": int(args.retrieval_local_random_candidates),
                 },
                 time_limit_per_model=args.time_limit,
                 metafeatures_func=_mf_func,
@@ -1322,6 +1370,10 @@ def main() -> None:
             "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
             "per_feature_max_features": int(args.per_feature_max_features),
             "legacy_notebook_aco": bool(args.legacy_notebook_aco),
+            "retrieval_local_neighbor_k": int(args.retrieval_local_neighbor_k),
+            "retrieval_local_top_l": int(args.retrieval_local_top_l),
+            "retrieval_local_radius": int(args.retrieval_local_radius),
+            "retrieval_local_random_candidates": int(args.retrieval_local_random_candidates),
             "proxy_clf_model": str(proxy_settings.get("classification_model")),
             "proxy_reg_model": str(proxy_settings.get("regression_model")),
             "proxy_split_seeds": list(proxy_settings.get("split_seeds", [])),
