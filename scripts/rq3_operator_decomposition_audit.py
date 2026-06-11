@@ -627,6 +627,40 @@ def _build_proxy_settings(args: argparse.Namespace) -> Dict[str, Any]:
     }
 
 
+def _build_aco_params(args: argparse.Namespace, dataset_id: Any) -> Dict[str, Any]:
+    return {
+        "n_ants": int(args.n_ants),
+        "n_iterations": int(args.n_iterations),
+        "seed": int(args.seed),
+        "alpha": float(args.alpha),
+        "beta": float(args.beta),
+        "evaporation": float(args.evaporation),
+        "top_k_pheromone": int(args.top_k_pheromone),
+        "weight_method": str(args.aco_weight_method),
+        "markov_order": int(args.aco_markov_order),
+        "lambda_smooth": float(args.aco_lambda_smooth),
+        "early_stop_rounds": int(args.aco_early_stop_rounds),
+        "min_improvement": float(args.aco_min_improvement),
+        "dataset_weighting": str(args.dataset_weighting),
+        "heuristic_top_k": int(args.heuristic_top_k),
+        "heuristic_top_l": int(args.heuristic_top_l),
+        "heuristic_transfer_method": str(args.heuristic_transfer_method),
+        "heuristic_similarity_temperature": float(args.similarity_temperature),
+        "heuristic_eta_floor": float(args.eta_floor),
+        "score_direction": "higher_is_better",
+        "query_dataset_id": dataset_id,
+        "require_autogluon": bool(args.require_autogluon),
+        "legacy_notebook_aco": bool(args.legacy_notebook_aco),
+        "per_feature_independent_search": bool(args.per_feature_independent_search),
+        "per_feature_steps": str(args.per_feature_steps),
+        "per_feature_early_stop_rounds": int(args.per_feature_early_stop_rounds),
+        "per_feature_min_improvement": float(args.per_feature_min_improvement),
+        "per_feature_feature_patience": int(args.per_feature_feature_patience),
+        "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
+        "per_feature_max_features": int(args.per_feature_max_features),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Audit full-pipeline vs decomposed-operator transfer")
     parser.add_argument("--root", default=os.environ.get("ROOT", str(ROOT)))
@@ -653,6 +687,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--time-limit", type=int, default=240)
     parser.add_argument("--require-autogluon", action="store_true")
     parser.add_argument("--k", type=int, default=1)
+    parser.add_argument("--eval-k", type=int, default=3)
+    parser.add_argument(
+        "--no-search-eval-k",
+        type=int,
+        default=None,
+        help="Number of retrieved no-search candidates to evaluate. Defaults to --eval-k.",
+    )
     parser.add_argument("--heuristic-top-k", type=int, default=1)
     parser.add_argument("--heuristic-top-l", type=int, default=1)
     parser.add_argument("--dataset-weighting", choices=["similarity", "equality"], default="similarity")
@@ -668,6 +709,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aco-weight-method", default="rank")
     parser.add_argument("--aco-markov-order", type=int, default=2)
     parser.add_argument("--aco-lambda-smooth", type=float, default=0.0)
+    parser.add_argument("--aco-early-stop-rounds", type=int, default=0)
+    parser.add_argument("--aco-min-improvement", type=float, default=0.0)
+    parser.add_argument("--per-feature-independent-search", action="store_true")
+    parser.add_argument("--per-feature-steps", default="imputation,scaling,encoding")
+    parser.add_argument("--per-feature-early-stop-rounds", type=int, default=2)
+    parser.add_argument("--per-feature-min-improvement", type=float, default=0.001)
+    parser.add_argument("--per-feature-feature-patience", type=int, default=0)
+    parser.add_argument("--per-feature-feature-min-improvement", type=float, default=0.0)
+    parser.add_argument("--per-feature-max-features", type=int, default=0)
     parser.add_argument("--legacy-notebook-aco", action="store_true")
     parser.add_argument("--notebook-legacy-options", action="store_true")
     parser.add_argument("--notebook-legacy-mode", action="store_true")
@@ -779,6 +829,11 @@ def main() -> int:
         "metric_embed_dim": int(args.metric_embed_dim),
         "metric_epochs": int(args.metric_epochs),
         "seed": int(args.seed),
+        "k": int(args.k),
+        "eval_k": int(args.eval_k),
+        "no_search_eval_k": int(args.no_search_eval_k or args.eval_k),
+        "per_feature_independent_search": bool(args.per_feature_independent_search),
+        "per_feature_steps": str(args.per_feature_steps),
         "performance_matrix": str(args.performance_matrix),
         "metafeatures": str(args.metafeatures),
         "pipeline_configs": str(args.pipeline_configs),
@@ -1383,11 +1438,55 @@ def main() -> int:
                 best_retrieved_sig = _config_signature(retrieved_top_cfg, options)
                 best_retrieved_score = np.nan
 
+            aco_params = _build_aco_params(args, dataset_id)
+            no_search_recommendation = recommender.recommend(
+                new_dataset=df,
+                target_column="target",
+                k=max(1, int(args.k)),
+                eval_k=max(1, int(args.no_search_eval_k or args.eval_k)),
+                use_autogluon=str(args.backend) == "autogluon",
+                time_limit_per_model=int(args.time_limit),
+                metafeatures_func=lambda _df, _dataset=dataset: _lookup_metafeatures(_dataset, meta),
+                use_aco=False,
+                options=options,
+                optimizer="aco",
+                final_autogluon_topk=max(1, int(args.final_autogluon_topk)),
+                proxy_settings=proxy_settings,
+                aco_params=aco_params,
+            )
+            no_search_cfg = no_search_recommendation.get("pipeline_config") or {}
+            no_search_sig = (
+                _config_signature(no_search_cfg, options)
+                if isinstance(no_search_cfg, Mapping)
+                else ""
+            )
+            no_search_score = no_search_recommendation.get("final_performance", np.nan)
+            no_search_eval = no_search_recommendation.get("final_evaluation") or {}
+            candidate_rows.append(
+                {
+                    "dataset_id": str(dataset_id),
+                    "candidate_type": "no_search_selected",
+                    "candidate_name": (
+                        str(no_search_cfg.get("name", "no_search_selected"))
+                        if isinstance(no_search_cfg, Mapping)
+                        else "no_search_selected"
+                    ),
+                    "signature": no_search_sig,
+                    "score": no_search_score,
+                    "eval_method": no_search_eval.get("method", ""),
+                    "pipeline_config": (
+                        _display_config(no_search_cfg, options)
+                        if isinstance(no_search_cfg, Mapping)
+                        else ""
+                    ),
+                }
+            )
+
             recommendation = recommender.recommend(
                 new_dataset=df,
                 target_column="target",
                 k=max(1, int(args.k)),
-                eval_k=max(1, int(args.heuristic_top_l)),
+                eval_k=max(1, int(args.eval_k)),
                 use_autogluon=str(args.backend) == "autogluon",
                 time_limit_per_model=int(args.time_limit),
                 metafeatures_func=lambda _df, _dataset=dataset: _lookup_metafeatures(_dataset, meta),
@@ -1396,28 +1495,7 @@ def main() -> int:
                 optimizer="aco",
                 final_autogluon_topk=max(1, int(args.final_autogluon_topk)),
                 proxy_settings=proxy_settings,
-                aco_params={
-                    "n_ants": int(args.n_ants),
-                    "n_iterations": int(args.n_iterations),
-                    "seed": int(args.seed),
-                    "alpha": float(args.alpha),
-                    "beta": float(args.beta),
-                    "evaporation": float(args.evaporation),
-                    "top_k_pheromone": int(args.top_k_pheromone),
-                    "weight_method": str(args.aco_weight_method),
-                    "markov_order": int(args.aco_markov_order),
-                    "lambda_smooth": float(args.aco_lambda_smooth),
-                    "dataset_weighting": str(args.dataset_weighting),
-                    "heuristic_top_k": int(args.heuristic_top_k),
-                    "heuristic_top_l": int(args.heuristic_top_l),
-                    "heuristic_transfer_method": str(args.heuristic_transfer_method),
-                    "heuristic_similarity_temperature": float(args.similarity_temperature),
-                    "heuristic_eta_floor": float(args.eta_floor),
-                    "score_direction": "higher_is_better",
-                    "query_dataset_id": dataset_id,
-                    "require_autogluon": bool(args.require_autogluon),
-                    "legacy_notebook_aco": bool(args.legacy_notebook_aco),
-                },
+                aco_params=aco_params,
             )
 
             aco_history = recommendation.get("aco_history") or []
@@ -1462,12 +1540,29 @@ def main() -> int:
                     "eta_raw_source": eta_raw_source,
                     "heuristic_top_k": int(args.heuristic_top_k),
                     "heuristic_top_l": int(args.heuristic_top_l),
+                    "k": int(args.k),
+                    "eval_k": int(args.eval_k),
+                    "no_search_eval_k": int(args.no_search_eval_k or args.eval_k),
                     "backend": str(args.backend),
+                    "per_feature_independent_search": bool(args.per_feature_independent_search),
+                    "per_feature_steps": str(args.per_feature_steps),
                     "retrieved_top_pipeline": str(retrieved_top_cfg.get("name", "")),
                     "retrieved_top_pipeline_config": _display_config(retrieved_top_cfg, options),
                     "best_retrieved_pipeline": str(best_retrieved_cfg.get("name", "")),
                     "best_retrieved_pipeline_config": _display_config(best_retrieved_cfg, options),
                     "best_retrieved_score": best_retrieved_score,
+                    "no_search_pipeline": (
+                        str(no_search_cfg.get("name", ""))
+                        if isinstance(no_search_cfg, Mapping)
+                        else ""
+                    ),
+                    "no_search_pipeline_config": (
+                        _display_config(no_search_cfg, options)
+                        if isinstance(no_search_cfg, Mapping)
+                        else ""
+                    ),
+                    "no_search_score": no_search_score,
+                    "no_search_method": no_search_eval.get("method", ""),
                     "eta_top_pipeline_config": _display_config(eta_top_cfg, options),
                     "eta_top_score": eta_top_score,
                     "eta_top_minus_best_retrieved": (
@@ -1484,6 +1579,11 @@ def main() -> int:
                         if np.isfinite(aco_final_score) and np.isfinite(best_retrieved_score)
                         else np.nan
                     ),
+                    "aco_final_minus_no_search": (
+                        float(aco_final_score - no_search_score)
+                        if np.isfinite(aco_final_score) and np.isfinite(no_search_score)
+                        else np.nan
+                    ),
                     "aco_final_minus_eta_top": (
                         float(aco_final_score - eta_top_score)
                         if np.isfinite(aco_final_score) and np.isfinite(eta_top_score)
@@ -1491,8 +1591,14 @@ def main() -> int:
                     ),
                     "eta_top_matches_best_retrieved_signature": bool(eta_sig == best_retrieved_sig),
                     "aco_matches_best_retrieved_signature": bool(aco_sig == best_retrieved_sig),
+                    "aco_matches_no_search_signature": bool(aco_sig == no_search_sig),
                     "aco_matches_eta_top_signature": bool(aco_sig == eta_sig),
                     "risky_operator_count_retrieved_top": int(_risky_count(retrieved_top_cfg, options)),
+                    "risky_operator_count_no_search": (
+                        int(_risky_count(no_search_cfg, options))
+                        if isinstance(no_search_cfg, Mapping)
+                        else np.nan
+                    ),
                     "risky_operator_count_eta_top": int(_risky_count(eta_top_cfg, options)),
                     "risky_operator_count_aco": int(_risky_count(aco_cfg, options)) if isinstance(aco_cfg, Mapping) else np.nan,
                     "elapsed_seconds": float(time.perf_counter() - start),
@@ -1544,12 +1650,21 @@ def main() -> int:
         aggregate = {
             "n_datasets": int(ok["dataset_id"].nunique()),
             "mean_best_retrieved_score": col_mean("best_retrieved_score"),
+            "mean_no_search_score": col_mean("no_search_score"),
             "mean_eta_top_score": col_mean("eta_top_score"),
             "mean_aco_final_score": col_mean("aco_final_score"),
             "mean_eta_top_minus_best_retrieved": col_mean("eta_top_minus_best_retrieved"),
+            "mean_aco_final_minus_no_search": col_mean("aco_final_minus_no_search"),
             "mean_aco_final_minus_best_retrieved": col_mean("aco_final_minus_best_retrieved"),
             "mean_aco_proxy_gain": col_mean("aco_proxy_gain"),
             "eta_top_wins_vs_retrieved_rate": float((pd.to_numeric(ok["eta_top_minus_best_retrieved"], errors="coerce") > 0).mean()),
+            "aco_wins_vs_no_search_rate": float((pd.to_numeric(ok["aco_final_minus_no_search"], errors="coerce") > 0).mean()),
+            "aco_losses_vs_no_search_rate": float((pd.to_numeric(ok["aco_final_minus_no_search"], errors="coerce") < 0).mean()),
+            "aco_matches_no_search_rate": (
+                float(ok["aco_matches_no_search_signature"].mean())
+                if "aco_matches_no_search_signature" in ok.columns
+                else np.nan
+            ),
             "aco_wins_vs_retrieved_rate": float((pd.to_numeric(ok["aco_final_minus_best_retrieved"], errors="coerce") > 0).mean()),
             "mean_eta_target_controlled_spearman": col_mean("eta_target_controlled_spearman"),
             "mean_neighbor_best_target_controlled_spearman": col_mean("neighbor_best_target_controlled_spearman"),
@@ -1564,9 +1679,11 @@ def main() -> int:
 
         tex_cols = [
             "dataset_id",
+            "no_search_score",
             "best_retrieved_score",
             "eta_top_score",
             "aco_final_score",
+            "aco_final_minus_no_search",
             "eta_top_minus_best_retrieved",
             "aco_final_minus_best_retrieved",
             "aco_proxy_gain",
