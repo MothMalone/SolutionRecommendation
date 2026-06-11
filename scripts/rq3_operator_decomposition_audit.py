@@ -673,6 +673,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--notebook-legacy-mode", action="store_true")
     parser.add_argument("--metric-path", default=None)
     parser.add_argument("--train-metric-inline", action="store_true")
+    parser.add_argument(
+        "--no-train-metric-inline",
+        action="store_true",
+        help=(
+            "Disable inline Siamese metric training even when --notebook-legacy-mode would enable it. "
+            "Without --metric-path, retrieval falls back to raw metafeature cosine."
+        ),
+    )
     parser.add_argument("--metric-hidden-dim", type=int, default=64)
     parser.add_argument("--metric-embed-dim", type=int, default=64)
     parser.add_argument("--metric-epochs", type=int, default=100)
@@ -707,6 +715,8 @@ def main() -> int:
         args.metric_embed_dim = 32
         if not args.metric_path:
             args.train_metric_inline = True
+    if args.no_train_metric_inline:
+        args.train_metric_inline = False
 
     root = Path(args.root)
     out_dir = Path(args.output_dir)
@@ -732,9 +742,20 @@ def main() -> int:
     proxy_settings = _build_proxy_settings(args)
 
     recommender = MetaPipelineRecommender(perf, meta, configs, verbose=args.verbose)
+    similarity_source = "raw_metafeature_cosine"
     if args.metric_path:
+        print(f"Similarity source: loaded Siamese metric from {args.metric_path}")
         recommender.load_metric(args.metric_path)
+        similarity_source = "loaded_siamese_metric"
     elif args.train_metric_inline:
+        print(
+            "Similarity source: training Siamese metric inline "
+            f"(hidden_dim={int(args.metric_hidden_dim)}, "
+            f"embed_dim={int(args.metric_embed_dim)}, "
+            f"epochs={int(args.metric_epochs)}, "
+            f"seed={int(args.seed)}, "
+            f"target={str(args.metric_similarity_target)})"
+        )
         recommender.train_metric(
             method="regression",
             hidden_dim=int(args.metric_hidden_dim),
@@ -745,10 +766,31 @@ def main() -> int:
             similarity_target=str(args.metric_similarity_target),
             score_direction="higher_is_better",
         )
+        similarity_source = "inline_siamese_metric"
+    else:
+        print("Similarity source: raw metafeature cosine (no Siamese metric loaded/trained)")
+
+    run_metadata = {
+        "similarity_source": similarity_source,
+        "metric_path": args.metric_path,
+        "train_metric_inline": bool(args.train_metric_inline),
+        "metric_similarity_target": str(args.metric_similarity_target),
+        "metric_hidden_dim": int(args.metric_hidden_dim),
+        "metric_embed_dim": int(args.metric_embed_dim),
+        "metric_epochs": int(args.metric_epochs),
+        "seed": int(args.seed),
+        "performance_matrix": str(args.performance_matrix),
+        "metafeatures": str(args.metafeatures),
+        "pipeline_configs": str(args.pipeline_configs),
+        "aligned_dataset_count": int(len(recommender.metafeatures_df.index)),
+    }
+    with (out_dir / "similarity_run_metadata.json").open("w", encoding="utf-8") as f:
+        json.dump(run_metadata, f, indent=2, default=str)
 
     summary_rows: List[Dict[str, Any]] = []
     eta_rows: List[Dict[str, Any]] = []
     retrieval_rows: List[Dict[str, Any]] = []
+    neighbor_rank_rows: List[Dict[str, Any]] = []
     aco_history_rows: List[Dict[str, Any]] = []
     candidate_rows: List[Dict[str, Any]] = []
     controlled_operator_rows: List[Dict[str, Any]] = []
@@ -784,6 +826,24 @@ def main() -> int:
                 top_k=max(1, int(args.heuristic_top_k)),
                 query_dataset_id=dataset_id,
             )
+            ranking_neighbors = select_top_k_neighbors(
+                dataset_similarities=dataset_similarities,
+                top_k=max(10, int(args.heuristic_top_k)),
+                query_dataset_id=dataset_id,
+            )
+            for rank, (neighbor_id, sim) in enumerate(ranking_neighbors, start=1):
+                neighbor_rank_rows.append(
+                    {
+                        "dataset_id": str(dataset_id),
+                        "rank": int(rank),
+                        "neighbor_id": str(neighbor_id),
+                        "similarity": float(sim),
+                        "selected_for_transfer": bool(
+                            any(_normalize_id(neighbor_id) == _normalize_id(sel_id) for sel_id, _ in top_neighbors)
+                        ),
+                        "similarity_source": similarity_source,
+                    }
+                )
             similarity_weights = compute_similarity_weights(
                 top_k_neighbors=top_neighbors,
                 dataset_weighting=str(args.dataset_weighting),
@@ -1392,6 +1452,11 @@ def main() -> int:
                     "error": "",
                     "top_neighbor": top_neighbor_id,
                     "top_neighbor_similarity": top_neighbor_sim,
+                    "similarity_source": similarity_source,
+                    "metric_similarity_target": str(args.metric_similarity_target),
+                    "metric_hidden_dim": int(args.metric_hidden_dim),
+                    "metric_embed_dim": int(args.metric_embed_dim),
+                    "metric_epochs": int(args.metric_epochs),
                     "decomposition_method": str(args.heuristic_transfer_method),
                     "aco_heuristic_transfer_method": str(args.heuristic_transfer_method),
                     "eta_raw_source": eta_raw_source,
@@ -1452,6 +1517,7 @@ def main() -> int:
     summary_df = pd.DataFrame(summary_rows)
     eta_df = pd.DataFrame(eta_rows)
     retrieval_df = pd.DataFrame(retrieval_rows)
+    neighbor_rank_df = pd.DataFrame(neighbor_rank_rows)
     history_df = pd.DataFrame(aco_history_rows)
     candidate_df = pd.DataFrame(candidate_rows)
     controlled_operator_df = pd.DataFrame(controlled_operator_rows)
@@ -1461,6 +1527,7 @@ def main() -> int:
     summary_df.to_csv(out_dir / "decomposition_audit_summary.csv", index=False)
     eta_df.to_csv(out_dir / "operator_eta_detail.csv", index=False)
     retrieval_df.to_csv(out_dir / "retrieved_pipeline_detail.csv", index=False)
+    neighbor_rank_df.to_csv(out_dir / "neighbor_ranking.csv", index=False)
     history_df.to_csv(out_dir / "aco_proxy_history.csv", index=False)
     candidate_df.to_csv(out_dir / "candidate_score_detail.csv", index=False)
     controlled_operator_df.to_csv(out_dir / "controlled_operator_effect_rows.csv", index=False)

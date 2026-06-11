@@ -414,6 +414,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Train the Siamese regression metric before recommendation instead of requiring a saved --metric-path.",
     )
+    parser.add_argument(
+        "--no-train-metric-inline",
+        action="store_true",
+        help=(
+            "Disable inline Siamese metric training even when --notebook-legacy-mode would enable it. "
+            "Use this to keep legacy ACO/options while falling back to raw metafeature cosine retrieval."
+        ),
+    )
     parser.add_argument("--metric-hidden-dim", type=int, default=64)
     parser.add_argument("--metric-embed-dim", type=int, default=64)
     parser.add_argument("--metric-epochs", type=int, default=100)
@@ -540,6 +548,9 @@ def main() -> None:
         args.metric_embed_dim = 32
         if not args.metric_path:
             args.train_metric_inline = True
+
+    if args.no_train_metric_inline:
+        args.train_metric_inline = False
 
     if args.metric_path and args.train_metric_inline:
         raise ValueError("Use either --metric-path or --train-metric-inline, not both.")
