@@ -43,6 +43,37 @@ def compute_sampling_probabilities(
     return probs
 
 
+def compute_legacy_mixed_sampling_probabilities(
+    marginal_pheromone: np.ndarray,
+    eta_step: np.ndarray,
+    alpha: float,
+    beta: float,
+    conditional_pheromone: Optional[np.ndarray] = None,
+    lambda_smooth: float = 0.7,
+) -> np.ndarray:
+    """Notebook-compatible Markov ACO probability calculation.
+
+    The old notebook mixed unnormalized marginal and conditional scores first,
+    then normalized once. This is intentionally different from mixing two
+    already-normalized distributions.
+    """
+    marginal = np.asarray(marginal_pheromone, dtype=float)
+    eta_arr = np.asarray(eta_step, dtype=float)
+    probs_m = (marginal ** float(alpha)) * (eta_arr ** float(beta))
+
+    if conditional_pheromone is None:
+        probs = probs_m
+    else:
+        conditional = np.asarray(conditional_pheromone, dtype=float)
+        probs_k = (conditional ** float(alpha)) * (eta_arr ** float(beta))
+        lam = float(lambda_smooth)
+        probs = lam * probs_k + (1.0 - lam) * probs_m
+
+    if probs.sum() <= 0 or not np.isfinite(probs).all():
+        return np.ones_like(marginal, dtype=float) / max(1, len(marginal))
+    return probs / probs.sum()
+
+
 def search_pipelines_aco(
     options: Mapping[str, List[str]],
     evaluate_fn: Callable[[List[Dict[str, Any]]], Tuple[Any, float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]],
@@ -63,8 +94,19 @@ def search_pipelines_aco(
     min_improvement: float = 0.0,
     verbose: bool = False,
     return_history: bool = False,
+    legacy_notebook_aco: bool = False,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
-    rng = np.random.RandomState(seed)
+    if legacy_notebook_aco:
+        # Match the old notebook exactly: it seeded and sampled from NumPy's
+        # global RNG, so downstream evaluation code that resets np.random can
+        # affect later ACO samples.
+        import random
+
+        random.seed(seed)
+        np.random.seed(seed)
+        rng = None
+    else:
+        rng = np.random.RandomState(seed)
 
     step_order = list(options.keys())
     safe_eta: Dict[str, np.ndarray] = {}
@@ -103,18 +145,39 @@ def search_pipelines_aco(
             if len(path_history) >= markov_order:
                 context = tuple(path_history[-markov_order:])
                 k_pher = get_k_pheromone(step, context)
-                probs_k = compute_sampling_probabilities(k_pher, eta_step, alpha=alpha, beta=beta)
-                probs_m = compute_sampling_probabilities(pheromones[step], eta_step, alpha=alpha, beta=beta)
-                probs = lambda_smooth * probs_k + (1 - lambda_smooth) * probs_m
+                if legacy_notebook_aco:
+                    probs = compute_legacy_mixed_sampling_probabilities(
+                        marginal_pheromone=pheromones[step],
+                        conditional_pheromone=k_pher,
+                        eta_step=eta_step,
+                        alpha=alpha,
+                        beta=beta,
+                        lambda_smooth=lambda_smooth,
+                    )
+                else:
+                    probs_k = compute_sampling_probabilities(k_pher, eta_step, alpha=alpha, beta=beta)
+                    probs_m = compute_sampling_probabilities(pheromones[step], eta_step, alpha=alpha, beta=beta)
+                    probs = lambda_smooth * probs_k + (1 - lambda_smooth) * probs_m
             else:
-                probs = compute_sampling_probabilities(pheromones[step], eta_step, alpha=alpha, beta=beta)
+                if legacy_notebook_aco:
+                    probs = compute_legacy_mixed_sampling_probabilities(
+                        marginal_pheromone=pheromones[step],
+                        eta_step=eta_step,
+                        alpha=alpha,
+                        beta=beta,
+                    )
+                else:
+                    probs = compute_sampling_probabilities(pheromones[step], eta_step, alpha=alpha, beta=beta)
 
             if probs.sum() <= 0 or not np.isfinite(probs).all():
                 probs = np.ones(len(options[step])) / len(options[step])
             else:
                 probs = probs / probs.sum()
 
-            idx = rng.choice(len(options[step]), p=probs)
+            if legacy_notebook_aco:
+                idx = np.random.choice(len(options[step]), p=probs)
+            else:
+                idx = rng.choice(len(options[step]), p=probs)
             cfg[step] = options[step][idx]
             path_history.append((step, idx))
         return cfg

@@ -1,7 +1,11 @@
 import numpy as np
 import pytest
 
-from automl_aco.search.aco import compute_sampling_probabilities, search_pipelines_aco
+from automl_aco.search.aco import (
+    compute_legacy_mixed_sampling_probabilities,
+    compute_sampling_probabilities,
+    search_pipelines_aco,
+)
 
 
 def _make_eta(options):
@@ -54,6 +58,37 @@ def test_compute_sampling_probabilities_are_finite_and_normalized():
     assert np.isfinite(probs).all()
     assert np.isclose(float(np.sum(probs)), 1.0)
     assert (probs > 0.0).all()
+
+
+def test_legacy_mixed_sampling_probabilities_match_notebook_raw_mix():
+    marginal = np.array([1.0, 20.0, 2.0], dtype=float)
+    conditional = np.array([30.0, 1.0, 4.0], dtype=float)
+    eta = np.array([1.0, 0.5, 0.2], dtype=float)
+    alpha = 1.0
+    beta = 2.0
+    lam = 0.7
+
+    probs = compute_legacy_mixed_sampling_probabilities(
+        marginal_pheromone=marginal,
+        conditional_pheromone=conditional,
+        eta_step=eta,
+        alpha=alpha,
+        beta=beta,
+        lambda_smooth=lam,
+    )
+
+    raw_m = (marginal ** alpha) * (eta ** beta)
+    raw_k = (conditional ** alpha) * (eta ** beta)
+    expected = lam * raw_k + (1.0 - lam) * raw_m
+    expected = expected / expected.sum()
+
+    separately_normalized = (
+        lam * compute_sampling_probabilities(conditional, eta, alpha, beta)
+        + (1.0 - lam) * compute_sampling_probabilities(marginal, eta, alpha, beta)
+    )
+
+    assert np.allclose(probs, expected)
+    assert not np.allclose(probs, separately_normalized)
 
 
 def test_aco_rejects_mismatched_eta_shape():

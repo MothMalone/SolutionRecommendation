@@ -19,7 +19,7 @@ from ..metalearning.dqn_policy import (
     WarmStartOrderPolicy,
     build_action_offsets,
 )
-from ..search.heuristics import compute_aco_heuristic
+from ..search.heuristics import compute_aco_heuristic, select_top_k_neighbors
 from ..search.aco import search_pipelines_aco
 from ..search.optimizers import search_pipelines_with_optimizer
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
@@ -353,6 +353,7 @@ class MetaPipelineRecommender:
         early_stop_rounds: int = 0,
         min_improvement: float = 0.0,
         step_order: Optional[List[str]] = None,
+        legacy_notebook_aco: bool = False,
     ):
         eta = self._compute_aco_heuristic(
             new_metafeatures,
@@ -421,6 +422,7 @@ class MetaPipelineRecommender:
             min_improvement=min_improvement,
             verbose=self.verbose,
             return_history=True,
+            legacy_notebook_aco=legacy_notebook_aco,
         )
         if isinstance(result, tuple) and len(result) == 3:
             return result
@@ -1376,6 +1378,7 @@ class MetaPipelineRecommender:
                             step_order=order,
                             early_stop_rounds=int(aco_params.get("early_stop_rounds", 0)),
                             min_improvement=float(aco_params.get("min_improvement", 0.0)),
+                            legacy_notebook_aco=bool(aco_params.get("legacy_notebook_aco", False)),
                         )
                     elif optimizer_name == "dqn":
                         aco_results, aco_unsorted_res, aco_history = self._search_pipelines_dqn(
@@ -1693,14 +1696,22 @@ class MetaPipelineRecommender:
                     "early_stop_rounds": int(aco_params.get("early_stop_rounds", 0)),
                     "min_improvement": float(aco_params.get("min_improvement", 0.0)),
                     "per_feature_independent_search": bool(aco_params.get("per_feature_independent_search", False)),
+                    "legacy_notebook_aco": bool(aco_params.get("legacy_notebook_aco", False)),
                 },
             }
 
         sims = self._compute_dataset_similarities(new_mf_scaled)
+        query_dataset_id = aco_params.get("query_dataset_id")
+        top_neighbors = select_top_k_neighbors(
+            dataset_similarities=sims,
+            top_k=k,
+            query_dataset_id=query_dataset_id,
+        )
+        if not top_neighbors:
+            raise RuntimeError("No eligible similar datasets found after self-query exclusion.")
 
-        sims = sorted(sims, key=lambda x: x[1], reverse=True)
-        top_datasets = [ds for ds, _ in sims[:k]]
-        top_sims = np.array([s for _, s in sims[:k]], dtype=float)
+        top_datasets = [ds for ds, _ in top_neighbors]
+        top_sims = np.array([s for _, s in top_neighbors], dtype=float)
         if top_sims.sum() == 0:
             top_sims = np.ones_like(top_sims)
 
@@ -1752,7 +1763,7 @@ class MetaPipelineRecommender:
                     "pipeline_ranking": pipeline_ranking[:k],
                     "top_candidates": [(cfg["name"], float(candidate_perfs[cfg["name"]])) for cfg in top_candidate_configs],
                     "confidence": "low",
-                    "similarity_scores": dict(sims[:k]),
+                    "similarity_scores": dict(top_neighbors),
                     "model_type": self.metric_type,
                     "evaluation_method": "fallback_prediction_only",
                 }
@@ -1774,7 +1785,7 @@ class MetaPipelineRecommender:
                 "pipeline_ranking": all_results,
                 "top_candidates_evaluated": [(cfg["name"], sc) for cfg, sc in all_results],
                 "confidence": "high",
-                "similarity_scores": dict(sims[:k]),
+                "similarity_scores": dict(top_neighbors),
                 "model_type": self.metric_type,
                 "evaluation_method": eval_method,
             }
@@ -1796,7 +1807,7 @@ class MetaPipelineRecommender:
             "pipeline_ranking": pipeline_ranking[:k],
             "top_candidates": [(cfg["name"], float(candidate_perfs[cfg["name"]])) for cfg in top_candidate_configs],
             "confidence": "medium",
-            "similarity_scores": dict(sims[:k]),
+            "similarity_scores": dict(top_neighbors),
             "model_type": self.metric_type,
             "evaluation_method": "prediction_only",
         }

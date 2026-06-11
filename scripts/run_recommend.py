@@ -154,8 +154,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Compatibility mode for the old notebook: legacy eta averaging, equality dataset weighting, "
-            "Markov smoothing 0.7, legacy metric target, and old encoding option space. "
+            "old Markov ACO sampling, Markov smoothing 0.7, legacy metric target, and old encoding option space. "
             "The current self-query guard remains enabled."
+        ),
+    )
+    parser.add_argument(
+        "--legacy-notebook-aco",
+        action="store_true",
+        help=(
+            "Use the old notebook ACO sampler exactly: raw Markov/marginal probability mixing "
+            "and NumPy global RNG behavior."
         ),
     )
     parser.add_argument(
@@ -484,7 +492,9 @@ def main() -> None:
         args.notebook_legacy_options = True
         args.heuristic_transfer_method = "legacy_weighted_average"
         args.dataset_weighting = "equality"
+        args.legacy_notebook_aco = True
         args.aco_lambda_smooth = 0.7
+        args.proxy_logreg_max_iter = 1000
         args.metric_similarity_target = "legacy_global_zscore_cosine"
         args.metric_hidden_dim = 32
         args.metric_embed_dim = 32
@@ -1118,7 +1128,7 @@ def main() -> None:
             print(
                 "Notebook legacy mode enabled: "
                 "legacy eta averaging, equality weighting, lambda_smooth=0.7, "
-                "old option space, and leave-one-out self-query guard."
+                "old ACO sampler, old option space, and leave-one-out self-query guard."
             )
         print(
             "Proxy profile: "
@@ -1140,6 +1150,7 @@ def main() -> None:
             f"aco_early_stop_rounds={int(args.aco_early_stop_rounds)}, "
             f"aco_min_improvement={float(args.aco_min_improvement)}, "
             f"per_feature_independent_search={bool(args.per_feature_independent_search)}, "
+            f"legacy_notebook_aco={bool(args.legacy_notebook_aco)}, "
             f"score_direction={args.score_direction}, "
             f"require_autogluon={bool(args.require_autogluon)}, "
             f"proxy_clf_model={proxy_settings.get('classification_model')}, "
@@ -1240,6 +1251,7 @@ def main() -> None:
                     "per_feature_feature_patience": int(args.per_feature_feature_patience),
                     "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
                     "per_feature_max_features": int(args.per_feature_max_features),
+                    "legacy_notebook_aco": bool(args.legacy_notebook_aco),
                 },
                 time_limit_per_model=args.time_limit,
                 metafeatures_func=_mf_func,
@@ -1309,6 +1321,7 @@ def main() -> None:
             "per_feature_feature_patience": int(args.per_feature_feature_patience),
             "per_feature_feature_min_improvement": float(args.per_feature_feature_min_improvement),
             "per_feature_max_features": int(args.per_feature_max_features),
+            "legacy_notebook_aco": bool(args.legacy_notebook_aco),
             "proxy_clf_model": str(proxy_settings.get("classification_model")),
             "proxy_reg_model": str(proxy_settings.get("regression_model")),
             "proxy_split_seeds": list(proxy_settings.get("split_seeds", [])),

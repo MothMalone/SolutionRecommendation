@@ -94,3 +94,47 @@ def test_require_autogluon_fails_fast_when_runtime_unavailable(monkeypatch):
         assert "AutoGluon is required for evaluation but is unavailable" in str(exc)
     else:
         raise AssertionError("Expected RuntimeError when AutoGluon is required and unavailable")
+
+
+def test_no_search_recommendation_excludes_query_dataset(monkeypatch):
+    performance_matrix = pd.DataFrame(
+        [[1.0, 0.0], [0.0, 1.0]],
+        index=["self_best", "neighbor_best"],
+        columns=["target_ds", "neighbor_ds"],
+    )
+    metafeatures = pd.DataFrame(
+        [[1.0, 0.0], [0.0, 1.0]],
+        index=["target_ds", "neighbor_ds"],
+        columns=["f1", "f2"],
+    )
+    pipeline_configs: List[Dict[str, Any]] = [
+        {"name": "self_best", "imputation": "mean"},
+        {"name": "neighbor_best", "imputation": "median"},
+    ]
+    recommender = MetaPipelineRecommender(
+        performance_matrix=performance_matrix,
+        metafeatures_df=metafeatures,
+        pipeline_configs=pipeline_configs,
+        verbose=False,
+    )
+    monkeypatch.setattr(
+        recommender,
+        "_compute_dataset_similarities",
+        lambda _mf: [("target_ds", 1.0), ("neighbor_ds", 0.9)],
+    )
+
+    df = pd.DataFrame({"x1": [0.0, 1.0, 2.0, 3.0], "target": [0, 1, 0, 1]})
+    result = recommender.recommend(
+        new_dataset=df,
+        target_column="target",
+        k=1,
+        eval_k=1,
+        use_autogluon=False,
+        use_aco=False,
+        options={"imputation": ["mean", "median"]},
+        aco_params={"query_dataset_id": "target_ds"},
+        metafeatures_func=lambda _dataset: {"f1": 1.0, "f2": 0.0},
+    )
+
+    assert result["similar_datasets"] == ["neighbor_ds"]
+    assert result["pipeline_config"]["name"] == "neighbor_best"
