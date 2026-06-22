@@ -252,6 +252,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--hybrid-select",
+        action="store_true",
+        help=(
+            "Overprocessing guard: add the no-preprocessing baseline as a final candidate and pick "
+            "the winner by AutoGluon on the held-out VALIDATION split (leak-free), reporting its TEST "
+            "score. Fixes cases where no-search beats search. Recommended for the strong config."
+        ),
+    )
+    parser.add_argument(
         "--retrieval-incumbent-topk",
         type=int,
         default=None,
@@ -480,6 +489,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric-embed-dim", type=int, default=64)
     parser.add_argument("--metric-epochs", type=int, default=100)
     parser.add_argument("--metric-lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--metric-loss",
+        choices=["mse", "pearson"],
+        default="mse",
+        help=(
+            "Siamese training loss. 'pearson' (1 - batch correlation) is collapse-resistant and "
+            "optimizes ranking agreement for top-K retrieval; 'mse' is the original (collapses on "
+            "the low-variance rank_cosine target). Recommended strong config: --metric-loss pearson."
+        ),
+    )
+    parser.add_argument("--metric-weight-decay", type=float, default=0.0, help="Adam weight decay for the Siamese metric")
     parser.add_argument(
         "--metric-objective",
         choices=["embedding_cosine", "projector_product"],
@@ -1148,6 +1168,8 @@ def main() -> None:
             similarity_target=str(args.metric_similarity_target),
             score_direction=str(args.score_direction),
             metric_objective=str(args.metric_objective),
+            metric_loss=str(args.metric_loss),
+            weight_decay=float(args.metric_weight_decay),
         )
         if args.save_trained_metric:
             saved_metric_path = recommender.save_metric(args.save_trained_metric)
@@ -1525,6 +1547,7 @@ def main() -> None:
                     "interaction_prior_strength": float(args.interaction_prior_strength),
                     "interaction_prior_floor": float(args.interaction_prior_floor),
                     "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
+                    "hybrid_select": bool(args.hybrid_select),
                     "retrieval_incumbent_topk": int(args.retrieval_incumbent_topk or args.eval_k),
                     "early_stop_rounds": int(args.aco_early_stop_rounds),
                     "min_improvement": float(args.aco_min_improvement),

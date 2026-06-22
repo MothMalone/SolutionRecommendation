@@ -222,6 +222,8 @@ class MetaPipelineRecommender:
             score_direction=kwargs.get("score_direction", "higher_is_better"),
             metafeatures_are_preprocessed=True,
             metric_objective=kwargs.get("metric_objective", "embedding_cosine"),
+            metric_loss=kwargs.get("metric_loss", "mse"),
+            weight_decay=kwargs.get("weight_decay", 0.0),
         )
         self.embedder = model.embedder
         self.projector = model.projector
@@ -885,6 +887,7 @@ class MetaPipelineRecommender:
         candidate_configs,
         time_limit_per_model=300,
         autogluon_profile: str = "best_quality",
+        select_on_val: bool = False,
     ):
         return evaluate_candidates_autogluon(
             dataset=dataset,
@@ -893,6 +896,7 @@ class MetaPipelineRecommender:
             time_limit_per_model=time_limit_per_model,
             autogluon_profile=autogluon_profile,
             verbose=self.verbose,
+            select_on_val=select_on_val,
         )
 
     def _evaluate_candidates_with_simple_models(
@@ -1684,6 +1688,7 @@ class MetaPipelineRecommender:
                 raise ValueError("per_feature_independent_search requires optimizer='aco'")
             retrieval_local_protected_candidates: List[Dict[str, Any]] = []
             protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
+            hybrid_select = bool(aco_params.get("hybrid_select", False))
             retrieval_incumbent_candidates: List[Dict[str, Any]] = []
             retrieval_incumbent_names: List[str] = []
             retrieval_incumbent_neighbors: List[Tuple[Any, float]] = []
@@ -2090,12 +2095,23 @@ class MetaPipelineRecommender:
                                 options,
                                 step_order=base_order,
                             )
+                        if hybrid_select:
+                            # Add the no-preprocessing baseline as an explicit no-search candidate;
+                            # the val-based selection then picks it when search would over-process.
+                            no_prep = {step: "none" for step in options}
+                            if "encoding" in no_prep:
+                                no_prep["encoding"] = "onehot"  # encoding is required for AutoGluon input
+                            no_prep["name"] = "no_preprocessing"
+                            ag_candidates = self._dedupe_candidate_configs(
+                                [*ag_candidates, no_prep], options, step_order=base_order,
+                            )
                         ag_best_cfg, ag_score, ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
                             new_dataset,
                             target_column,
                             ag_candidates,
                             time_limit_per_model=time_limit_per_model,
                             autogluon_profile=autogluon_profile,
+                            select_on_val=hybrid_select,
                         )
                         if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
                             best_pipeline = ag_best_cfg

@@ -161,6 +161,7 @@ def _fit_predict_with_autogluon(
     verbosity: int,
     autogluon_profile: str = "best_quality",
     excluded_model_types: Optional[Sequence[str]] = None,
+    select_df: Optional[pd.DataFrame] = None,
 ):
     import os
     import shutil
@@ -211,11 +212,12 @@ def _fit_predict_with_autogluon(
         try:
             model_names = predictor.model_names()
             if len(model_names) == 0:
-                return None, "no_models_fitted"
+                return None, None, "no_models_fitted"
         except Exception:
             pass
         preds = predictor.predict(test_df)
-        return preds, None
+        select_preds = predictor.predict(select_df) if select_df is not None else None
+        return preds, select_preds, None
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -227,7 +229,12 @@ def evaluate_candidates_autogluon(
     time_limit_per_model: int = 300,
     autogluon_profile: str = "best_quality",
     verbose: bool = False,
+    select_on_val: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
+    # When select_on_val is True, every candidate is trained on the train split and scored on the
+    # VALIDATION split for SELECTION; the winner's TEST score is reported. This is the leak-free way
+    # to choose among candidates (e.g. ACO pipeline vs no-preprocessing) without selecting on test,
+    # and it is the mechanism that protects against over-preprocessing.
     try:
         import numpy as _np
         ver = _np.__version__.split(".")
@@ -246,6 +253,7 @@ def evaluate_candidates_autogluon(
     problem_type, eval_metric = _detect_problem_type(y)
 
     results: List[Tuple[Dict[str, Any], float]] = []
+    val_scores: Dict[str, Optional[float]] = {}
 
     for cfg in candidate_configs:
         if "name" not in cfg or cfg.get("name") is None:
@@ -256,7 +264,7 @@ def evaluate_candidates_autogluon(
             X = df.drop(columns=[target_column]).copy()
             y = df[target_column].copy()
 
-            X_train, y_train, _X_val, _y_val, X_test, y_test = split_train_val_test(X, y)
+            X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y)
 
             pre = _make_preprocessor(cfg)
             result = pre.fit_transform(X_train, y_train)
@@ -268,6 +276,14 @@ def evaluate_candidates_autogluon(
 
             X_test_proc = pre.transform(X_test)
             y_test_proc = y_test.reset_index(drop=True)
+
+            val_df = None
+            y_val_proc = None
+            if select_on_val:
+                X_val_proc = pre.transform(X_val)
+                y_val_proc = y_val.reset_index(drop=True)
+                if len(y_val_proc) == len(X_val_proc) and X_val_proc.shape[0] > 0:
+                    val_df = X_val_proc.copy()
 
             if X_train_proc.shape[0] == 0:
                 if verbose:
@@ -288,7 +304,7 @@ def evaluate_candidates_autogluon(
                 continue
 
             try:
-                preds, ag_issue = _fit_predict_with_autogluon(
+                preds, select_preds, ag_issue = _fit_predict_with_autogluon(
                     TabularPredictor=TabularPredictor,
                     IdentityFeatureGenerator=IdentityFeatureGenerator,
                     train_df=train_df,
@@ -299,6 +315,7 @@ def evaluate_candidates_autogluon(
                     time_limit_per_model=time_limit_per_model,
                     verbosity=2 if verbose else 0,
                     autogluon_profile=autogluon_profile,
+                    select_df=val_df,
                 )
 
                 if ag_issue == "no_models_fitted":
@@ -308,15 +325,12 @@ def evaluate_candidates_autogluon(
                         logger.info("%s - AutoGluon fitted no models", name)
                     continue
 
-                if problem_type == "regression":
-                    score = r2_score(y_test_proc, preds)
-                else:
-                    score = accuracy_score(y_test_proc, preds)
+                score = (r2_score if problem_type == "regression" else accuracy_score)(y_test_proc, preds)
             except Exception as exc:
                 if _should_retry_without_xgb(exc):
                     if verbose:
                         print(f"    ! {name} hit XGBoost compatibility issue, retrying without XGB models")
-                    preds, ag_issue = _fit_predict_with_autogluon(
+                    preds, select_preds, ag_issue = _fit_predict_with_autogluon(
                         TabularPredictor=TabularPredictor,
                         IdentityFeatureGenerator=IdentityFeatureGenerator,
                         train_df=train_df,
@@ -328,6 +342,7 @@ def evaluate_candidates_autogluon(
                         verbosity=2 if verbose else 0,
                         autogluon_profile=autogluon_profile,
                         excluded_model_types=["XGB"],
+                        select_df=val_df,
                     )
                     if ag_issue == "no_models_fitted":
                         if verbose:
@@ -335,16 +350,23 @@ def evaluate_candidates_autogluon(
                         else:
                             logger.info("%s - AutoGluon fitted no models (retry without XGB)", name)
                         continue
-                    if problem_type == "regression":
-                        score = r2_score(y_test_proc, preds)
-                    else:
-                        score = accuracy_score(y_test_proc, preds)
+                    score = (r2_score if problem_type == "regression" else accuracy_score)(y_test_proc, preds)
                 else:
                     raise
 
+            # Selection score on the held-out validation split (leak-free), when requested.
+            val_score = None
+            if select_on_val and val_df is not None and select_preds is not None and y_val_proc is not None:
+                try:
+                    val_score = float((r2_score if problem_type == "regression" else accuracy_score)(y_val_proc, select_preds))
+                except Exception:
+                    val_score = None
+
             results.append((cfg, float(score)))
+            val_scores[name] = val_score
             if verbose:
-                print(f"    ✓ {name} -> {score:.4f}")
+                vtxt = f" (val={val_score:.4f})" if val_score is not None else ""
+                print(f"    ✓ {name} -> {score:.4f}{vtxt}")
         except Exception as exc:
             if verbose:
                 print(f"    ✗ Error evaluating cfg {name}: {exc}")
@@ -360,6 +382,18 @@ def evaluate_candidates_autogluon(
         return None, np.nan, [], []
 
     unsorted_res = results.copy()
+    if select_on_val and any(v is not None for v in val_scores.values()):
+        # Pick the candidate with the best VALIDATION score (leak-free selection); report its TEST
+        # score. Missing val scores fall back to the test score so a candidate is always chosen.
+        def _sel_key(item):
+            cfg, test_score = item
+            v = val_scores.get(cfg.get("name"))
+            return (v if v is not None else -np.inf, test_score)
+        results_sorted = sorted(results, key=_sel_key, reverse=True)
+        best_cfg, best_score = results_sorted[0]
+        if verbose:
+            print(f"    [hybrid-select] chose {best_cfg.get('name')} by val; reporting its test={best_score:.4f}")
+        return best_cfg, best_score, results_sorted, unsorted_res
     results.sort(key=lambda x: x[1], reverse=True)
     best_cfg, best_score = results[0]
     return best_cfg, best_score, results, unsorted_res

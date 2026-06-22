@@ -27,6 +27,7 @@ SIMILARITY_TARGET_CHOICES = {
 
 SCORE_DIRECTION_CHOICES = {"higher_is_better", "lower_is_better"}
 METRIC_OBJECTIVE_CHOICES = {"embedding_cosine", "projector_product"}
+METRIC_LOSS_CHOICES = {"mse", "pearson"}
 
 
 def _require_torch():
@@ -154,6 +155,8 @@ def train_siamese_regression_metric(
     score_direction: str = "higher_is_better",
     metafeatures_are_preprocessed: bool = False,
     metric_objective: str = "embedding_cosine",
+    metric_loss: str = "mse",
+    weight_decay: float = 0.0,
 ) -> MetricModel:
     torch = _require_torch()
     import torch.nn as nn
@@ -161,6 +164,9 @@ def train_siamese_regression_metric(
 
     np.random.seed(seed)
     objective = _validate_metric_objective(metric_objective)
+    loss_kind = str(metric_loss).strip().lower()
+    if loss_kind not in METRIC_LOSS_CHOICES:
+        raise ValueError(f"Unsupported metric_loss={metric_loss!r}. Expected one of {sorted(METRIC_LOSS_CHOICES)}.")
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -196,8 +202,23 @@ def train_siamese_regression_metric(
     pairs = [(i, j) for i in range(N) for j in range(i + 1, N)]
 
     embedder, projector = build_metric_models(d, hidden_dim, embed_dim)
-    optimizer = optim.Adam(list(embedder.parameters()) + list(projector.parameters()), lr=lr)
+    optimizer = optim.Adam(
+        list(embedder.parameters()) + list(projector.parameters()),
+        lr=lr,
+        weight_decay=float(weight_decay),
+    )
     loss_fn = nn.MSELoss()
+
+    def _pearson_loss(pred_t, target_t):
+        # 1 - Pearson correlation over the batch. Scale/shift-invariant, so it optimizes
+        # *ranking agreement* (what top-K retrieval uses) and cannot collapse to predicting the
+        # mean of a low-variance target the way MSE does on the compressed rank_cosine target.
+        p = pred_t.reshape(-1)
+        t = target_t.reshape(-1)
+        p = p - p.mean()
+        t = t - t.mean()
+        denom = (p.norm() * t.norm()) + 1e-8
+        return 1.0 - (p * t).sum() / denom
 
     X_i = torch.tensor(np.array([mf_scaled[i] for i, _ in pairs]), dtype=torch.float32)
     X_j = torch.tensor(np.array([mf_scaled[j] for _, j in pairs]), dtype=torch.float32)
@@ -215,7 +236,7 @@ def train_siamese_regression_metric(
         else:
             x_pair = emb_i * emb_j
             pred = projector(x_pair)
-        loss = loss_fn(pred, y_pairs)
+        loss = _pearson_loss(pred, y_pairs) if loss_kind == "pearson" else loss_fn(pred, y_pairs)
 
         optimizer.zero_grad()
         loss.backward()
@@ -229,6 +250,8 @@ def train_siamese_regression_metric(
         "score_direction": str(score_direction),
         "metafeature_preprocessing": preprocessing_mode,
         "metric_objective": objective,
+        "metric_loss": loss_kind,
+        "weight_decay": float(weight_decay),
     }
     return MetricModel(embedder=embedder, projector=projector, params=params)
 

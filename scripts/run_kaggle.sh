@@ -28,6 +28,7 @@ export PYTHONPATH="$DEPS:$ROOT/src:$ROOT:${PYTHONPATH:-}"
 EVAL_IDS="248 1066 1164 1047 862 2 40663 1054 1387 876 18 1520 1548 184 378 381 382 993 1485 14 27 29 31"
 
 python3 "$ROOT/scripts/run_recommend.py" \
+  --kaggle-root "$ROOT" \
   --dataset-source openml \
   --openml-local-folder "/kaggle/input/openml" \
   --dataset-ids $EVAL_IDS \
