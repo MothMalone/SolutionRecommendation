@@ -14,7 +14,7 @@ from ..utils.operator_spec import base_operator_name
 logger = get_logger(__name__)
 
 EPS = 1e-8
-HEURISTIC_TRANSFER_METHODS = {"weighted_topk_topl", "legacy_weighted_average"}
+HEURISTIC_TRANSFER_METHODS = {"weighted_topk_topl", "legacy_weighted_average", "paper_flat_average"}
 SCORE_DIRECTION_CHOICES = {"higher_is_better", "lower_is_better"}
 
 
@@ -284,6 +284,130 @@ def aggregate_operator_heuristics(
 
         raw_eta[step] = step_values
     return raw_eta
+
+
+def aggregate_operator_heuristics_flat(
+    top_l_pipelines: Mapping[Any, Sequence[Mapping[str, Any]]],
+    pipeline_configs: Sequence[Mapping[str, Any]],
+    options: Mapping[str, Sequence[str]],
+) -> Dict[str, np.ndarray]:
+    """Paper-faithful Eq 7: η_{s,o} = Avg(S(p) : p_s = o, p in top-set).
+
+    The top-set is the union of the best pipeline(s) per neighbor (Eq 6, ``top_l`` records).
+    S(p) is the pipeline's oriented historical score on its source neighbor. This is a FLAT
+    (unweighted) average — every top-set member counts equally, with no similarity or
+    relative-quality weighting. That is the literal paper definition and the reproducibility
+    baseline; the weighted variants live in ``weighted_topk_topl``.
+    """
+    cfg_map = {str(cfg["name"]): cfg for cfg in pipeline_configs if "name" in cfg}
+
+    # Flatten the top-set: one entry per (neighbor, best-pipeline) with its oriented score.
+    top_set: List[Tuple[str, float]] = []
+    for _neighbor, records in top_l_pipelines.items():
+        for row in records:
+            top_set.append((str(row["pipeline"]), float(row["oriented_score"])))
+
+    raw_eta: Dict[str, np.ndarray] = {}
+    for step, operators in options.items():
+        step_values = np.full(len(operators), np.nan, dtype=float)
+        for idx, operator in enumerate(operators):
+            target_base = base_operator_name(operator)
+            scores: List[float] = []
+            for pipeline_name, oriented_score in top_set:
+                cfg = cfg_map.get(pipeline_name)
+                if cfg is None or step not in cfg:
+                    continue
+                if base_operator_name(cfg.get(step)) != target_base:
+                    continue
+                if np.isfinite(oriented_score):
+                    scores.append(oriented_score)
+            if scores:
+                step_values[idx] = float(np.mean(scores))  # flat average (Eq 7)
+
+        observed = step_values[np.isfinite(step_values)]
+        if observed.size > 0:
+            # Operators absent from the top-set fall back to this step's weakest signal,
+            # so they are not selected ahead of operators with observed support.
+            step_values[~np.isfinite(step_values)] = float(np.min(observed))
+        else:
+            step_values[:] = 1.0
+        raw_eta[step] = step_values
+    return raw_eta
+
+
+def build_pairwise_interaction_priors(
+    transfer_candidates: Sequence[Mapping[str, Any]],
+    pipeline_configs: Sequence[Mapping[str, Any]],
+    options: Mapping[str, Sequence[str]],
+    interaction_prior_floor: float = 0.2,
+) -> Dict[Tuple[str, int, str], np.ndarray]:
+    """Build conditional operator priors from retrieved historical pipelines.
+
+    For each previously selected operator (prev_step, prev_idx), this returns a
+    per-operator multiplier for a later step. Values near 1 indicate historical
+    co-occurrence in high-weight retrieved pipelines; values near floor indicate
+    weak or absent support. This preserves cross-step structure that flat eta
+    discards.
+    """
+    floor = float(interaction_prior_floor)
+    if not np.isfinite(floor):
+        floor = 0.2
+    floor = min(max(floor, EPS), 1.0)
+
+    cfg_map = {str(cfg["name"]): cfg for cfg in pipeline_configs if "name" in cfg}
+    step_order = list(options.keys())
+    counts: Dict[Tuple[str, int, str], np.ndarray] = {}
+
+    def _matching_option_indices(step: str, value: Any) -> List[int]:
+        target_base = base_operator_name(value)
+        return [
+            idx
+            for idx, operator in enumerate(options[step])
+            if base_operator_name(operator) == target_base
+        ]
+
+    for candidate in transfer_candidates:
+        pipeline_name = str(candidate.get("pipeline"))
+        cfg = cfg_map.get(pipeline_name)
+        if cfg is None:
+            continue
+        weight = float(candidate.get("candidate_weight", 0.0))
+        if weight <= 0.0 or not np.isfinite(weight):
+            continue
+
+        active_indices: Dict[str, List[int]] = {}
+        for step in step_order:
+            if step not in cfg:
+                continue
+            matches = _matching_option_indices(step, cfg.get(step))
+            if matches:
+                active_indices[step] = matches
+
+        for i, prev_step in enumerate(step_order):
+            prev_indices = active_indices.get(prev_step, [])
+            if not prev_indices:
+                continue
+            for next_step in step_order[i + 1 :]:
+                next_indices = active_indices.get(next_step, [])
+                if not next_indices:
+                    continue
+                for prev_idx in prev_indices:
+                    key = (prev_step, int(prev_idx), next_step)
+                    arr = counts.setdefault(key, np.zeros(len(options[next_step]), dtype=float))
+                    for next_idx in next_indices:
+                        arr[int(next_idx)] += weight
+
+    priors: Dict[Tuple[str, int, str], np.ndarray] = {}
+    for key, arr in counts.items():
+        if arr.size == 0:
+            continue
+        if np.max(arr) <= EPS:
+            prior = np.ones_like(arr, dtype=float)
+        else:
+            prior = floor + (1.0 - floor) * (arr / (float(np.max(arr)) + EPS))
+            prior = np.clip(prior, floor, 1.0)
+        priors[key] = prior
+    return priors
 
 
 def normalize_eta_with_floor(raw_eta: Mapping[str, np.ndarray], eta_floor: float = 0.05) -> Dict[str, np.ndarray]:
@@ -559,6 +683,39 @@ def compute_aco_heuristic(
             query_dataset_id=query_dataset_id,
         )
 
+    if method == "paper_flat_average":
+        # Paper-faithful Phase 2: Eq 5 top-K neighbors, Eq 6 best pipeline per neighbor,
+        # Eq 7 flat average of top-set scores per operator, per-step min-max norm.
+        dataset_similarities = compute_dataset_similarities(
+            metafeatures_df=metafeatures_df,
+            new_metafeatures=new_metafeatures,
+            metafeatures_scaled=metafeatures_scaled,
+            dataset_similarity_scores=dataset_similarity_scores,
+        )
+        top_k_neighbors = select_top_k_neighbors(
+            dataset_similarities=dataset_similarities,
+            top_k=top_k,
+            query_dataset_id=query_dataset_id,
+        )
+        top_l_pipelines = select_top_l_pipelines_per_neighbor(
+            performance_matrix=performance_matrix,
+            top_k_neighbors=top_k_neighbors,
+            top_l=top_l,  # paper baseline uses top_l=1 (Eq 6 argmax)
+            score_direction=score_direction,
+        )
+        raw_eta = aggregate_operator_heuristics_flat(
+            top_l_pipelines=top_l_pipelines,
+            pipeline_configs=pipeline_configs,
+            options=options,
+        )
+        normalized_eta = initialize_aco_with_transferred_eta(raw_eta=raw_eta, eta_floor=eta_floor)
+        if verbose:
+            print(
+                f"[phase2:paper_flat_average] top_k={top_k} top_l={top_l} "
+                f"neighbors={len(top_k_neighbors)}"
+            )
+        return normalized_eta
+
     dataset_similarities = compute_dataset_similarities(
         metafeatures_df=metafeatures_df,
         new_metafeatures=new_metafeatures,
@@ -606,3 +763,56 @@ def compute_aco_heuristic(
         normalized_eta=normalized_eta,
     )
     return normalized_eta
+
+
+def compute_aco_interaction_priors(
+    performance_matrix: pd.DataFrame,
+    metafeatures_df: pd.DataFrame,
+    pipeline_configs: Sequence[Mapping[str, Any]],
+    options: Mapping[str, Sequence[str]],
+    new_metafeatures: np.ndarray,
+    dataset_weighting: str = "similarity",
+    top_k: Optional[int] = 10,
+    top_l: int = 3,
+    similarity_temperature: float = 1.0,
+    score_direction: str = "higher_is_better",
+    query_dataset_id: Optional[Any] = None,
+    metafeatures_scaled: Optional[np.ndarray] = None,
+    dataset_similarity_scores: Optional[Mapping[Any, float]] = None,
+    interaction_prior_floor: float = 0.2,
+) -> Dict[Tuple[str, int, str], np.ndarray]:
+    dataset_similarities = compute_dataset_similarities(
+        metafeatures_df=metafeatures_df,
+        new_metafeatures=new_metafeatures,
+        metafeatures_scaled=metafeatures_scaled,
+        dataset_similarity_scores=dataset_similarity_scores,
+    )
+    top_k_neighbors = select_top_k_neighbors(
+        dataset_similarities=dataset_similarities,
+        top_k=top_k,
+        query_dataset_id=query_dataset_id,
+    )
+    similarity_weights = compute_similarity_weights(
+        top_k_neighbors=top_k_neighbors,
+        dataset_weighting=dataset_weighting,
+        similarity_temperature=similarity_temperature,
+    )
+    top_l_pipelines = select_top_l_pipelines_per_neighbor(
+        performance_matrix=performance_matrix,
+        top_k_neighbors=top_k_neighbors,
+        top_l=top_l,
+        score_direction=score_direction,
+    )
+    transfer_candidates = build_transfer_candidates(
+        performance_matrix=performance_matrix,
+        top_k_neighbors=top_k_neighbors,
+        top_l_pipelines=top_l_pipelines,
+        similarity_weights=similarity_weights,
+        score_direction=score_direction,
+    )
+    return build_pairwise_interaction_priors(
+        transfer_candidates=transfer_candidates,
+        pipeline_configs=pipeline_configs,
+        options=options,
+        interaction_prior_floor=interaction_prior_floor,
+    )

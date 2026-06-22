@@ -42,6 +42,10 @@ from automl_aco.search.evaluation import _detect_problem_type
 from automl_aco.utils.operator_spec import base_operator_name
 
 
+def _cli_flag_was_passed(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
+
+
 PIPELINE_STEPS = [
     "imputation",
     "scaling",
@@ -306,6 +310,8 @@ def _build_aco_params(args: argparse.Namespace, dataset_id: Any) -> Dict[str, An
         "weight_method": str(args.aco_weight_method),
         "markov_order": int(args.aco_markov_order),
         "lambda_smooth": float(args.aco_lambda_smooth),
+        "interaction_prior_strength": float(args.interaction_prior_strength),
+        "interaction_prior_floor": float(args.interaction_prior_floor),
         "early_stop_rounds": int(args.aco_early_stop_rounds),
         "min_improvement": float(args.aco_min_improvement),
         "dataset_weighting": str(args.dataset_weighting),
@@ -540,6 +546,86 @@ def _collect_candidates(
     return candidates
 
 
+def _source_priority(source: str) -> int:
+    order = {
+        "no_search_selected": 0,
+        "search_selected": 1,
+        "no_search_inner_topk": 2,
+        "search_inner_topk": 3,
+    }
+    return order.get(source, 99)
+
+
+def _select_hybrid_candidate(
+    valid_candidates: Sequence[Tuple[str, str, Dict[str, Any], float, str, str, str]],
+    *,
+    no_sig: str,
+    search_sig: str,
+    margin: float,
+    tie_breaker: str,
+) -> Tuple[str, str, Dict[str, Any], float, str, str, float]:
+    """Select a candidate conservatively from selector scores.
+
+    If search and no-search are tied or nearly tied, the selector has weak
+    evidence. In that case, prefer the chosen incumbent instead of letting a
+    tiny validation fluctuation drive the final decision.
+    """
+    valid = [item for item in valid_candidates if item[5] == "ok" and np.isfinite(item[3])]
+    if not valid:
+        raise RuntimeError("No candidate produced valid selector score")
+
+    by_sig = {sig: item for item in valid for sig in [item[0]]}
+    no_item = by_sig.get(no_sig)
+    search_item = by_sig.get(search_sig)
+    no_score = float(no_item[3]) if no_item is not None else np.nan
+    search_score = float(search_item[3]) if search_item is not None else np.nan
+    safe_margin = max(0.0, float(margin))
+
+    baseline_item: Tuple[str, str, Dict[str, Any], float, str, str, str]
+    baseline_reason: str
+    if no_item is not None and search_item is not None:
+        diff = search_score - no_score
+        if diff > safe_margin:
+            baseline_item = search_item
+            baseline_reason = "search_beats_no_search_margin"
+        elif diff < -safe_margin:
+            baseline_item = no_item
+            baseline_reason = "no_search_beats_search_margin"
+        elif tie_breaker == "search":
+            baseline_item = search_item
+            baseline_reason = "within_margin_default_search"
+        else:
+            baseline_item = no_item
+            baseline_reason = "within_margin_default_no_search"
+    elif no_item is not None:
+        baseline_item = no_item
+        baseline_reason = "only_no_search_valid"
+    elif search_item is not None:
+        baseline_item = search_item
+        baseline_reason = "only_search_valid"
+    else:
+        baseline_item = sorted(valid, key=lambda item: (-float(item[3]), _source_priority(item[1]), item[0]))[0]
+        baseline_reason = "no_selected_baseline_valid"
+
+    best_item = sorted(valid, key=lambda item: (-float(item[3]), _source_priority(item[1]), item[0]))[0]
+    baseline_score = float(baseline_item[3])
+    best_score = float(best_item[3])
+    best_margin = best_score - baseline_score
+
+    if best_item[0] == baseline_item[0]:
+        chosen = baseline_item
+        decision = baseline_reason
+    elif best_score > baseline_score + safe_margin:
+        chosen = best_item
+        decision = "non_baseline_beats_baseline_margin"
+    else:
+        chosen = baseline_item
+        decision = f"best_within_margin_default_baseline:{baseline_reason}"
+
+    sig, source, cfg, score, metric, _status, _error = chosen
+    return sig, source, cfg, float(score), metric, decision, float(best_margin)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Hybrid outer-holdout validation for retrieval and ACO search")
     parser.add_argument("--root", default=os.environ.get("ROOT", str(ROOT)))
@@ -575,6 +661,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aco-weight-method", default="rank")
     parser.add_argument("--aco-markov-order", type=int, default=2)
     parser.add_argument("--aco-lambda-smooth", type=float, default=0.0)
+    parser.add_argument("--interaction-prior-strength", type=float, default=0.0)
+    parser.add_argument("--interaction-prior-floor", type=float, default=0.2)
     parser.add_argument("--aco-early-stop-rounds", type=int, default=0)
     parser.add_argument("--aco-min-improvement", type=float, default=0.0)
     parser.add_argument("--per-feature-independent-search", action="store_true")
@@ -595,6 +683,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric-epochs", type=int, default=100)
     parser.add_argument("--metric-lr", type=float, default=1e-3)
     parser.add_argument(
+        "--metric-objective",
+        choices=["embedding_cosine", "projector_product"],
+        default="embedding_cosine",
+    )
+    parser.add_argument(
         "--metric-similarity-target",
         choices=["rank_cosine", "row_zscore_cosine", "row_minmax_cosine", "legacy_global_zscore_cosine"],
         default="rank_cosine",
@@ -609,6 +702,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--include-inner-topk-candidates", action="store_true")
     parser.add_argument("--inner-topk-candidates", type=int, default=3)
     parser.add_argument("--evaluate-all-candidates-on-final", action="store_true")
+    parser.add_argument(
+        "--selector-tie-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "Minimum selector-score improvement required before switching away from "
+            "the conservative selected baseline. Use a small value such as 0.005 or "
+            "0.01 for accuracy metrics."
+        ),
+    )
+    parser.add_argument(
+        "--selector-tie-breaker",
+        choices=["no_search", "search"],
+        default="no_search",
+        help="Which selected baseline to keep when search and no-search are tied within --selector-tie-margin.",
+    )
     parser.add_argument("--output-dir", default="/kaggle/working/rq3_hybrid_outer_holdout")
     parser.add_argument("--verbose", action="store_true")
     return parser
@@ -616,6 +725,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    metric_target_explicit = _cli_flag_was_passed("--metric-similarity-target")
     if args.notebook_legacy_mode:
         args.notebook_legacy_options = True
         args.heuristic_transfer_method = "legacy_weighted_average"
@@ -623,7 +733,8 @@ def main() -> int:
         args.legacy_notebook_aco = True
         args.aco_lambda_smooth = 0.7
         args.proxy_logreg_max_iter = 1000
-        args.metric_similarity_target = "legacy_global_zscore_cosine"
+        if not metric_target_explicit:
+            args.metric_similarity_target = "legacy_global_zscore_cosine"
         args.metric_hidden_dim = 32
         args.metric_embed_dim = 32
         if not args.metric_path:
@@ -650,7 +761,8 @@ def main() -> int:
             print(
                 "Training Siamese metric inline: "
                 f"hidden_dim={args.metric_hidden_dim}, embed_dim={args.metric_embed_dim}, "
-                f"epochs={args.metric_epochs}, target={args.metric_similarity_target}"
+                f"epochs={args.metric_epochs}, target={args.metric_similarity_target}, "
+                f"objective={args.metric_objective}"
             )
         recommender.train_metric(
             method="regression",
@@ -661,6 +773,7 @@ def main() -> int:
             seed=int(args.seed),
             similarity_target=str(args.metric_similarity_target),
             score_direction="higher_is_better",
+            metric_objective=str(args.metric_objective),
         )
 
     proxy_settings = _build_proxy_settings(args)
@@ -764,12 +877,20 @@ def main() -> int:
             no_selector = next((float(sc) for sig, _src, _cfg, sc, _m, st, _err in selector_scored if sig == no_sig and st == "ok"), np.nan)
             search_selector = next((float(sc) for sig, _src, _cfg, sc, _m, st, _err in selector_scored if sig == search_sig and st == "ok"), np.nan)
 
-            valid_selector = [item for item in selector_scored if item[5] == "ok" and np.isfinite(item[3])]
-            if not valid_selector:
-                raise RuntimeError("No candidate produced valid selector score")
-            best_sig, best_source, best_cfg, best_selector_score, best_selector_metric, _status, _error = max(
-                valid_selector,
-                key=lambda item: float(item[3]),
+            (
+                best_sig,
+                best_source,
+                best_cfg,
+                best_selector_score,
+                best_selector_metric,
+                selector_decision_reason,
+                selector_best_minus_baseline,
+            ) = _select_hybrid_candidate(
+                selector_scored,
+                no_sig=no_sig,
+                search_sig=search_sig,
+                margin=float(args.selector_tie_margin),
+                tie_breaker=str(args.selector_tie_breaker),
             )
 
             final_train_df = pd.concat([search_df, selector_df], ignore_index=True)
@@ -813,6 +934,8 @@ def main() -> int:
                         "final_status": final_status,
                         "final_error": final_error,
                         "selected_by_hybrid": bool(sig == best_sig),
+                        "selector_tie_margin": float(args.selector_tie_margin),
+                        "selector_decision_reason": selector_decision_reason,
                         "pipeline_config": _display_config(cfg, options),
                     }
                 )
@@ -853,6 +976,10 @@ def main() -> int:
                     "hybrid_selector_metric": best_selector_metric,
                     "hybrid_final_score": float(hybrid_final),
                     "hybrid_source": best_source,
+                    "selector_tie_margin": float(args.selector_tie_margin),
+                    "selector_tie_breaker": str(args.selector_tie_breaker),
+                    "selector_decision_reason": selector_decision_reason,
+                    "selector_best_minus_baseline": selector_best_minus_baseline,
                     "hybrid_final_metric": hybrid_final_metric,
                     "hybrid_final_status": hybrid_final_status,
                     "hybrid_pipeline": _display_config(best_cfg, options),

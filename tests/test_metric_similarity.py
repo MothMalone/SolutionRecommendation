@@ -1,6 +1,9 @@
 import numpy as np
+import pandas as pd
+import pytest
 
 from automl_aco.metalearning.metric import build_similarity_target_matrix
+from automl_aco.metalearning.recommender import MetaPipelineRecommender
 
 
 def test_rank_cosine_target_is_scale_robust():
@@ -60,3 +63,34 @@ def test_legacy_similarity_target_mode_still_supported():
     )
     assert np.isfinite(sim).all()
     assert np.allclose(np.diag(sim), np.ones(3))
+
+
+def test_recommender_trains_metric_on_preprocessed_metafeatures():
+    pytest.importorskip("torch")
+
+    perf = pd.DataFrame(
+        {
+            "1": [0.80, 0.70],
+            "2": [0.79, 0.71],
+            "3": [0.20, 0.90],
+        },
+        index=["p1", "p2"],
+    )
+    meta = pd.DataFrame(
+        {
+            "rows": [100.0, 110.0, 10_000.0],
+            "cols": [20.0, np.nan, 80.0],
+        },
+        index=["1", "2", "3"],
+    )
+    recommender = MetaPipelineRecommender(
+        perf,
+        meta,
+        pipeline_configs=[{"name": "p1"}, {"name": "p2"}],
+    )
+
+    model = recommender.train_metric(hidden_dim=4, embed_dim=3, epochs=1, seed=7)
+
+    assert model.params["metafeature_preprocessing"] == "preprocessed_input"
+    assert model.params["metric_objective"] == "embedding_cosine"
+    assert recommender.metric_params["metafeature_preprocessing"] == "preprocessed_input"

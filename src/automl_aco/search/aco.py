@@ -43,6 +43,42 @@ def compute_sampling_probabilities(
     return probs
 
 
+def _normalized_entropy(probs: np.ndarray) -> float:
+    """Shannon entropy of a selection distribution, normalized to [0,1] by log(n).
+
+    1.0 = uniform exploration over a step's operators; ~0.0 = the colony has collapsed onto a
+    single operator at that step. Used as the per-step collapse signal.
+    """
+    p = np.asarray(probs, dtype=float)
+    p = p[p > 0]
+    n = len(probs)
+    if n <= 1 or p.size == 0:
+        return 0.0 if n <= 1 else 1.0
+    h = -float(np.sum(p * np.log(p)))
+    return h / float(np.log(n))
+
+
+def _resolve_mmas_bounds(
+    evaporation: float,
+    tau_min: Optional[float],
+    tau_max: Optional[float],
+    tau_min_ratio: float,
+) -> Tuple[float, float]:
+    """Standard MMAS bounds. Auto τ_max = max reward steady state 1/ρ (since the per-iteration
+    min-max reward Δ(p) ∈ [0,1], τ → (1-ρ)τ + 1 converges to 1/ρ); τ_min = ratio·τ_max.
+
+    Bounds keep every operator selectable (τ_min > 0 ⇒ non-zero probability) while capping
+    runaway exploitation (τ_max), which is MMAS's defining anti-collapse mechanism.
+    """
+    rho = float(evaporation)
+    auto_max = (1.0 / rho) if rho > EPS else 1e6
+    t_max = float(tau_max) if tau_max is not None else auto_max
+    t_min = float(tau_min) if tau_min is not None else max(EPS, float(tau_min_ratio) * t_max)
+    if t_min > t_max:
+        t_min, t_max = t_max, t_min
+    return t_min, t_max
+
+
 def compute_legacy_mixed_sampling_probabilities(
     marginal_pheromone: np.ndarray,
     eta_step: np.ndarray,
@@ -74,6 +110,40 @@ def compute_legacy_mixed_sampling_probabilities(
     return probs / probs.sum()
 
 
+def apply_interaction_prior(
+    eta_step: np.ndarray,
+    step: str,
+    path_history: Sequence[Tuple[str, int]],
+    interaction_priors: Optional[Mapping[Tuple[str, int, str], np.ndarray]] = None,
+    interaction_prior_strength: float = 0.0,
+) -> np.ndarray:
+    """Adjust a step heuristic using fixed historical pairwise priors.
+
+    Unlike Markov pheromones, these priors are computed before search from
+    retrieved historical pipelines and are not updated from target proxy scores.
+    """
+    eta_arr = np.asarray(eta_step, dtype=float)
+    strength = float(interaction_prior_strength)
+    if strength <= 0.0 or not interaction_priors or len(path_history) == 0:
+        return eta_arr
+
+    adjusted = eta_arr.copy()
+    for prev_step, prev_idx in path_history:
+        prior = interaction_priors.get((str(prev_step), int(prev_idx), str(step)))
+        if prior is None:
+            continue
+        prior_arr = np.asarray(prior, dtype=float)
+        if prior_arr.shape != adjusted.shape:
+            continue
+        prior_arr = np.nan_to_num(prior_arr, nan=1.0, posinf=1.0, neginf=1.0)
+        prior_arr = np.clip(prior_arr, EPS, None)
+        adjusted *= prior_arr ** strength
+
+    adjusted[~np.isfinite(adjusted)] = EPS
+    adjusted[adjusted <= 0] = EPS
+    return adjusted
+
+
 def search_pipelines_aco(
     options: Mapping[str, List[str]],
     evaluate_fn: Callable[[List[Dict[str, Any]]], Tuple[Any, float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]],
@@ -95,6 +165,12 @@ def search_pipelines_aco(
     verbose: bool = False,
     return_history: bool = False,
     legacy_notebook_aco: bool = False,
+    interaction_priors: Optional[Mapping[Tuple[str, int, str], np.ndarray]] = None,
+    interaction_prior_strength: float = 0.0,
+    mmas_bounds: bool = False,
+    tau_min: Optional[float] = None,
+    tau_max: Optional[float] = None,
+    tau_min_ratio: float = 0.05,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     if legacy_notebook_aco:
         # Match the old notebook exactly: it seeded and sampled from NumPy's
@@ -125,6 +201,44 @@ def search_pipelines_aco(
     pheromones = {step: np.ones(len(vals), dtype=float) for step, vals in options.items()}
     k_conditional_pheromones: Dict[Tuple[str, Tuple[Any, ...]], np.ndarray] = {}
 
+    if mmas_bounds:
+        bound_min, bound_max = _resolve_mmas_bounds(evaporation, tau_min, tau_max, tau_min_ratio)
+        if verbose:
+            print(f"[aco:mmas] pheromone bounds [tau_min={bound_min:.4f}, tau_max={bound_max:.4f}]")
+    else:
+        bound_min, bound_max = None, None
+
+    def _clip_pheromones() -> None:
+        if bound_min is None:
+            return
+        for step in pheromones:
+            np.clip(pheromones[step], bound_min, bound_max, out=pheromones[step])
+        for key in k_conditional_pheromones:
+            np.clip(k_conditional_pheromones[key], bound_min, bound_max, out=k_conditional_pheromones[key])
+
+    def _step_diagnostics() -> Dict[str, Any]:
+        ent: Dict[str, float] = {}
+        pher_min = np.inf
+        pher_max = -np.inf
+        saturated = 0
+        total = 0
+        for step in step_order:
+            probs = compute_sampling_probabilities(pheromones[step], eta[step], alpha, beta)
+            ent[step] = _normalized_entropy(probs)
+            ph = pheromones[step]
+            pher_min = min(pher_min, float(ph.min()))
+            pher_max = max(pher_max, float(ph.max()))
+            if bound_max is not None:
+                saturated += int(np.sum(ph >= bound_max - EPS) + np.sum(ph <= bound_min + EPS))
+                total += ph.size
+        return {
+            "step_entropy": ent,
+            "mean_entropy": float(np.mean(list(ent.values()))) if ent else None,
+            "pheromone_min": None if not np.isfinite(pher_min) else pher_min,
+            "pheromone_max": None if not np.isfinite(pher_max) else pher_max,
+            "pheromone_saturation": (saturated / total) if total else None,
+        }
+
     def get_k_pheromone(step: str, context: Sequence[Any]) -> np.ndarray:
         key = (step, tuple(context))
         if key not in k_conditional_pheromones:
@@ -141,7 +255,13 @@ def search_pipelines_aco(
         cfg: Dict[str, Any] = {}
         path_history: List[Tuple[str, int]] = []
         for step in step_order:
-            eta_step = eta[step]
+            eta_step = apply_interaction_prior(
+                eta_step=eta[step],
+                step=step,
+                path_history=path_history,
+                interaction_priors=interaction_priors,
+                interaction_prior_strength=interaction_prior_strength,
+            )
             if len(path_history) >= markov_order:
                 context = tuple(path_history[-markov_order:])
                 k_pher = get_k_pheromone(step, context)
@@ -339,6 +459,9 @@ def search_pipelines_aco(
                     k_pher[val_idx] += weight
                 path_context.append((step, val_idx))
 
+        # MMAS bounds: clip pheromones to [tau_min, tau_max] after evaporation+reinforcement.
+        _clip_pheromones()
+
         candidate_pipelines.extend(unsorted_res)
         current_best = float(max(sc for _cfg, sc in eval_cache.values()))
         previous_best = best_so_far
@@ -363,6 +486,7 @@ def search_pipelines_aco(
                 ),
                 "no_improve_rounds": int(no_improve_rounds),
                 "status": "ok",
+                **_step_diagnostics(),
             }
         )
         if best_so_far is None or current_best > (best_so_far + float(min_improvement)):

@@ -48,6 +48,10 @@ base = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(base)
 
 
+def _cli_flag_was_passed(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
+
+
 def _df_from_xy(X: pd.DataFrame, y: pd.Series, target_column: str = "target") -> pd.DataFrame:
     df = X.reset_index(drop=True).copy()
     df[target_column] = y.reset_index(drop=True)
@@ -373,6 +377,7 @@ def build_parser():
 
 def main() -> int:
     args = build_parser().parse_args()
+    metric_target_explicit = _cli_flag_was_passed("--metric-similarity-target")
     if args.notebook_legacy_mode:
         args.notebook_legacy_options = True
         args.heuristic_transfer_method = "legacy_weighted_average"
@@ -380,7 +385,8 @@ def main() -> int:
         args.legacy_notebook_aco = True
         args.aco_lambda_smooth = 0.7
         args.proxy_logreg_max_iter = 1000
-        args.metric_similarity_target = "legacy_global_zscore_cosine"
+        if not metric_target_explicit:
+            args.metric_similarity_target = "legacy_global_zscore_cosine"
         args.metric_hidden_dim = 32
         args.metric_embed_dim = 32
         if not args.metric_path:
@@ -404,7 +410,8 @@ def main() -> int:
             print(
                 "Training Siamese metric inline: "
                 f"hidden_dim={args.metric_hidden_dim}, embed_dim={args.metric_embed_dim}, "
-                f"epochs={args.metric_epochs}, target={args.metric_similarity_target}"
+                f"epochs={args.metric_epochs}, target={args.metric_similarity_target}, "
+                f"objective={args.metric_objective}"
             )
         recommender.train_metric(
             method="regression",
@@ -415,6 +422,7 @@ def main() -> int:
             seed=int(args.seed),
             similarity_target=str(args.metric_similarity_target),
             score_direction="higher_is_better",
+            metric_objective=str(args.metric_objective),
         )
 
     proxy_settings = base._build_proxy_settings(args)

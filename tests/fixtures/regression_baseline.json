@@ -1,0 +1,8 @@
+{
+  "best_pipeline": {
+    "imputation": "mean",
+    "outlier_removal": "none",
+    "scaling": "standard"
+  },
+  "best_score": 0.9
+}

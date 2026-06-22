@@ -2,10 +2,12 @@ import numpy as np
 import pytest
 
 from automl_aco.search.aco import (
+    apply_interaction_prior,
     compute_legacy_mixed_sampling_probabilities,
     compute_sampling_probabilities,
     search_pipelines_aco,
 )
+from automl_aco.search.heuristics import build_pairwise_interaction_priors
 
 
 def _make_eta(options):
@@ -58,6 +60,49 @@ def test_compute_sampling_probabilities_are_finite_and_normalized():
     assert np.isfinite(probs).all()
     assert np.isclose(float(np.sum(probs)), 1.0)
     assert (probs > 0.0).all()
+
+
+def test_apply_interaction_prior_boosts_supported_pair():
+    eta = np.ones(2, dtype=float)
+    priors = {("imputation", 0, "scaling"): np.array([0.2, 1.0], dtype=float)}
+
+    adjusted = apply_interaction_prior(
+        eta_step=eta,
+        step="scaling",
+        path_history=[("imputation", 0)],
+        interaction_priors=priors,
+        interaction_prior_strength=1.0,
+    )
+
+    assert adjusted[1] > adjusted[0]
+
+
+def test_build_pairwise_interaction_priors_preserves_pipeline_context():
+    options = {
+        "imputation": ["none", "median"],
+        "scaling": ["standard", "robust"],
+    }
+    pipeline_configs = [
+        {"name": "p_good", "imputation": "median", "scaling": "robust"},
+        {"name": "p_weak", "imputation": "none", "scaling": "standard"},
+    ]
+    candidates = [
+        {"pipeline": "p_good", "candidate_weight": 1.0},
+        {"pipeline": "p_weak", "candidate_weight": 0.2},
+    ]
+
+    priors = build_pairwise_interaction_priors(
+        transfer_candidates=candidates,
+        pipeline_configs=pipeline_configs,
+        options=options,
+        interaction_prior_floor=0.2,
+    )
+
+    median_idx = options["imputation"].index("median")
+    robust_idx = options["scaling"].index("robust")
+    standard_idx = options["scaling"].index("standard")
+    prior = priors[("imputation", median_idx, "scaling")]
+    assert prior[robust_idx] > prior[standard_idx]
 
 
 def test_legacy_mixed_sampling_probabilities_match_notebook_raw_mix():

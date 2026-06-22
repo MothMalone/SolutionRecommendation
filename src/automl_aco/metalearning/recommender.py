@@ -19,7 +19,7 @@ from ..metalearning.dqn_policy import (
     WarmStartOrderPolicy,
     build_action_offsets,
 )
-from ..search.heuristics import compute_aco_heuristic, select_top_k_neighbors
+from ..search.heuristics import compute_aco_heuristic, compute_aco_interaction_priors, select_top_k_neighbors
 from ..search.aco import search_pipelines_aco
 from ..search.optimizers import search_pipelines_with_optimizer
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
@@ -205,8 +205,13 @@ class MetaPipelineRecommender:
     def train_metric(self, method: str = "regression", **kwargs):
         if method != "regression":
             raise ValueError("Only 'regression' metric training is implemented")
+        metafeatures_scaled_df = pd.DataFrame(
+            self.metafeatures_scaled,
+            index=self.metafeatures_df.index,
+            columns=self.metafeatures_df.columns,
+        )
         model = train_siamese_regression_metric(
-            metafeatures_df=self.metafeatures_df,
+            metafeatures_df=metafeatures_scaled_df,
             performance_matrix_imputed=self.performance_matrix_imputed,
             hidden_dim=kwargs.get("hidden_dim", 64),
             embed_dim=kwargs.get("embed_dim", 64),
@@ -215,6 +220,8 @@ class MetaPipelineRecommender:
             seed=kwargs.get("seed", 42),
             similarity_target=kwargs.get("similarity_target", "rank_cosine"),
             score_direction=kwargs.get("score_direction", "higher_is_better"),
+            metafeatures_are_preprocessed=True,
+            metric_objective=kwargs.get("metric_objective", "embedding_cosine"),
         )
         self.embedder = model.embedder
         self.projector = model.projector
@@ -272,8 +279,14 @@ class MetaPipelineRecommender:
                 emb_new = emb_new / (emb_new.norm() + 1e-8)
 
                 for ds_id, h_known in zip(self.metafeatures_df.index, emb_known):
-                    inter = (emb_new * h_known).unsqueeze(0)
-                    sim = float(self.projector(inter).item())
+                    objective = "projector_product"
+                    if isinstance(self.metric_params, dict):
+                        objective = str(self.metric_params.get("metric_objective", objective))
+                    if objective == "embedding_cosine":
+                        sim = float((emb_new * h_known).sum().item())
+                    else:
+                        inter = (emb_new * h_known).unsqueeze(0)
+                        sim = float(self.projector(inter).item())
                     sims.append((ds_id, sim))
             return sims
 
@@ -354,6 +367,12 @@ class MetaPipelineRecommender:
         min_improvement: float = 0.0,
         step_order: Optional[List[str]] = None,
         legacy_notebook_aco: bool = False,
+        interaction_prior_strength: float = 0.0,
+        interaction_prior_floor: float = 0.2,
+        mmas_bounds: bool = False,
+        tau_min: Optional[float] = None,
+        tau_max: Optional[float] = None,
+        tau_min_ratio: float = 0.05,
     ):
         eta = self._compute_aco_heuristic(
             new_metafeatures,
@@ -381,6 +400,32 @@ class MetaPipelineRecommender:
         )
         if self.verbose:
             print("Phase 3 handoff: received transferred eta_norm for ACO sampling.")
+
+        interaction_priors = None
+        if float(interaction_prior_strength) > 0.0:
+            dataset_similarity_scores = dict(self._compute_dataset_similarities(new_metafeatures))
+            interaction_priors = compute_aco_interaction_priors(
+                performance_matrix=self.performance_matrix_imputed,
+                metafeatures_df=self.metafeatures_df,
+                pipeline_configs=self.pipeline_configs,
+                options=options,
+                new_metafeatures=new_metafeatures,
+                dataset_weighting=dataset_weighting,
+                top_k=max(1, int(heuristic_top_k)),
+                top_l=max(1, int(heuristic_top_l)),
+                similarity_temperature=float(heuristic_similarity_temperature),
+                score_direction=str(score_direction),
+                query_dataset_id=query_dataset_id,
+                metafeatures_scaled=self.metafeatures_scaled,
+                dataset_similarity_scores=dataset_similarity_scores,
+                interaction_prior_floor=float(interaction_prior_floor),
+            )
+            if self.verbose:
+                print(
+                    "Phase 3 handoff: received "
+                    f"{len(interaction_priors)} interaction priors "
+                    f"(strength={float(interaction_prior_strength):.3f})."
+                )
 
         def _evaluate(sampled_configs):
             if step_order:
@@ -423,6 +468,12 @@ class MetaPipelineRecommender:
             verbose=self.verbose,
             return_history=True,
             legacy_notebook_aco=legacy_notebook_aco,
+            interaction_priors=interaction_priors,
+            interaction_prior_strength=float(interaction_prior_strength),
+            mmas_bounds=bool(mmas_bounds),
+            tau_min=tau_min,
+            tau_max=tau_max,
+            tau_min_ratio=float(tau_min_ratio),
         )
         if isinstance(result, tuple) and len(result) == 3:
             return result
@@ -827,12 +878,20 @@ class MetaPipelineRecommender:
             unsorted = list(top)
         return top[: max(1, int(n_pipelines))], unsorted, all_history, feature_logs
 
-    def _evaluate_candidates_with_autogluon(self, dataset, target_column, candidate_configs, time_limit_per_model=300):
+    def _evaluate_candidates_with_autogluon(
+        self,
+        dataset,
+        target_column,
+        candidate_configs,
+        time_limit_per_model=300,
+        autogluon_profile: str = "best_quality",
+    ):
         return evaluate_candidates_autogluon(
             dataset=dataset,
             target_column=target_column,
             candidate_configs=candidate_configs,
             time_limit_per_model=time_limit_per_model,
+            autogluon_profile=autogluon_profile,
             verbose=self.verbose,
         )
 
@@ -957,6 +1016,59 @@ class MetaPipelineRecommender:
             seen.add(key)
             deduped.append(dict(cfg))
         return deduped
+
+    def _retrieval_prediction_candidates(
+        self,
+        *,
+        new_metafeatures: np.ndarray,
+        options: Mapping[str, Sequence[str]],
+        neighbor_k: int,
+        n_candidates: int,
+        score_direction: str,
+        query_dataset_id: Optional[Any],
+        step_order: Optional[Sequence[str]],
+    ) -> Tuple[List[Dict[str, Any]], List[str], List[Tuple[Any, float]]]:
+        sims = self._compute_dataset_similarities(new_metafeatures)
+        top_neighbors = select_top_k_neighbors(
+            dataset_similarities=sims,
+            top_k=max(1, int(neighbor_k)),
+            query_dataset_id=query_dataset_id,
+        )
+        if not top_neighbors:
+            return [], [], []
+
+        top_datasets = [ds for ds, _sim in top_neighbors]
+        top_sims = np.array([sim for _ds, sim in top_neighbors], dtype=float)
+        if top_sims.sum() == 0:
+            top_sims = np.ones_like(top_sims)
+
+        perf_subset = self.performance_matrix.loc[:, top_datasets].fillna(0)
+        weighted_avg_perf = np.average(perf_subset.values, axis=1, weights=top_sims)
+        candidate_perfs = pd.Series(weighted_avg_perf, index=self.performance_matrix.index)
+        ascending = str(score_direction).lower().strip() not in {"higher_is_better", "max", "maximize"}
+        pipeline_ranking = candidate_perfs.sort_values(ascending=ascending).index.tolist()
+        top_names = [str(name) for name in pipeline_ranking[: max(1, int(n_candidates))]]
+
+        cfg_by_name = {
+            str(cfg.get("name")): cfg
+            for cfg in self.pipeline_configs
+            if isinstance(cfg, dict) and cfg.get("name") is not None
+        }
+        candidates: List[Dict[str, Any]] = []
+        for name in top_names:
+            cfg = cfg_by_name.get(name)
+            if cfg is None:
+                continue
+            candidates.append(
+                self._coerce_pipeline_to_options(
+                    cfg,
+                    options,
+                    name=name,
+                    step_order=step_order,
+                )
+            )
+        candidates = self._dedupe_candidate_configs(candidates, options, step_order=step_order)
+        return candidates, top_names, top_neighbors
 
     def _retrieved_seed_configs(
         self,
@@ -1537,6 +1649,7 @@ class MetaPipelineRecommender:
         sample_budget: int = 100,
         proxy_settings: Optional[Dict[str, Any]] = None,
         final_autogluon_topk: int = 1,
+        autogluon_profile: str = "best_quality",
     ) -> Dict[str, Any]:
         if metafeatures_func is None:
             raise ValueError("metafeatures_func must be provided")
@@ -1570,6 +1683,22 @@ class MetaPipelineRecommender:
             if per_feature_mode and optimizer_name != "aco":
                 raise ValueError("per_feature_independent_search requires optimizer='aco'")
             retrieval_local_protected_candidates: List[Dict[str, Any]] = []
+            protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
+            retrieval_incumbent_candidates: List[Dict[str, Any]] = []
+            retrieval_incumbent_names: List[str] = []
+            retrieval_incumbent_neighbors: List[Tuple[Any, float]] = []
+            if protect_retrieval_incumbent:
+                retrieval_incumbent_candidates, retrieval_incumbent_names, retrieval_incumbent_neighbors = (
+                    self._retrieval_prediction_candidates(
+                        new_metafeatures=new_mf_scaled,
+                        options=options,
+                        neighbor_k=max(1, int(aco_params.get("retrieval_incumbent_neighbor_k", k))),
+                        n_candidates=max(1, int(aco_params.get("retrieval_incumbent_topk", eval_k))),
+                        score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                        query_dataset_id=aco_params.get("query_dataset_id"),
+                        step_order=base_order,
+                    )
+                )
 
             if per_feature_mode:
                 if target_column is None:
@@ -1685,6 +1814,12 @@ class MetaPipelineRecommender:
                             weight_method=str(aco_params.get("weight_method", "rank")),
                             markov_order=int(aco_params.get("markov_order", 2)),
                             lambda_smooth=float(aco_params.get("lambda_smooth", 0.0)),
+                            interaction_prior_strength=float(aco_params.get("interaction_prior_strength", 0.0)),
+                            interaction_prior_floor=float(aco_params.get("interaction_prior_floor", 0.2)),
+                            mmas_bounds=bool(aco_params.get("mmas_bounds", False)),
+                            tau_min=aco_params.get("tau_min"),
+                            tau_max=aco_params.get("tau_max"),
+                            tau_min_ratio=float(aco_params.get("tau_min_ratio", 0.05)),
                             dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
                             heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
                             heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
@@ -1801,6 +1936,7 @@ class MetaPipelineRecommender:
                                 target_column,
                                 [order_best_cfg],
                                 time_limit_per_model=quick_order_eval_time_limit,
+                                autogluon_profile=autogluon_profile,
                             )
                             if ag_cfg is not None and ag_results and np.isfinite(ag_score):
                                 order_best_cfg = dict(ag_cfg)
@@ -1948,11 +2084,18 @@ class MetaPipelineRecommender:
                                 options,
                                 step_order=base_order,
                             )
+                        if retrieval_incumbent_candidates:
+                            ag_candidates = self._dedupe_candidate_configs(
+                                [*retrieval_incumbent_candidates, *ag_candidates],
+                                options,
+                                step_order=base_order,
+                            )
                         ag_best_cfg, ag_score, ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
                             new_dataset,
                             target_column,
                             ag_candidates,
                             time_limit_per_model=time_limit_per_model,
+                            autogluon_profile=autogluon_profile,
                         )
                         if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
                             best_pipeline = ag_best_cfg
@@ -1989,6 +2132,12 @@ class MetaPipelineRecommender:
                                     options,
                                     step_order=base_order,
                                 )
+                            if retrieval_incumbent_candidates:
+                                fallback_candidates = self._dedupe_candidate_configs(
+                                    [*retrieval_incumbent_candidates, *fallback_candidates],
+                                    options,
+                                    step_order=base_order,
+                                )
                             simple_best_cfg, simple_best_score, simple_all, _simple_unsorted = (
                                 self._evaluate_candidates_with_simple_models(
                                     new_dataset,
@@ -2016,6 +2165,15 @@ class MetaPipelineRecommender:
                 "aco_results": aco_unsorted_res,
                 "aco_history": all_history,
                 "optimizer": optimizer_name,
+                "retrieval_incumbent_protection": {
+                    "enabled": bool(protect_retrieval_incumbent),
+                    "candidate_names": list(retrieval_incumbent_names),
+                    "candidate_count": int(len(retrieval_incumbent_candidates)),
+                    "neighbors": [
+                        {"dataset_id": str(ds), "similarity": float(sim)}
+                        for ds, sim in retrieval_incumbent_neighbors
+                    ],
+                },
                 "ordering_search": {
                     "enabled": bool(search_ordering and not per_feature_mode),
                     "strategy": order_strategy,
@@ -2118,6 +2276,7 @@ class MetaPipelineRecommender:
                     target_column,
                     top_candidate_configs,
                     time_limit_per_model=time_limit_per_model,
+                    autogluon_profile=autogluon_profile,
                 )
             except Exception as exc:
                 logger.warning("AutoGluon evaluation failed, falling back to simple models: %s", exc)

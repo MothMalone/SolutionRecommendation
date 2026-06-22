@@ -159,6 +159,7 @@ def _fit_predict_with_autogluon(
     eval_metric: str,
     time_limit_per_model: int,
     verbosity: int,
+    autogluon_profile: str = "best_quality",
     excluded_model_types: Optional[Sequence[str]] = None,
 ):
     import os
@@ -175,13 +176,34 @@ def _fit_predict_with_autogluon(
             eval_metric=eval_metric,
             verbosity=verbosity,
         )
+        profile = str(autogluon_profile or "best_quality").strip().lower()
         fit_kwargs = dict(
             train_data=train_df,
             time_limit=time_limit_per_model,
-            presets="best_quality",
             feature_generator=IdentityFeatureGenerator(),
             raise_on_no_models_fitted=False,
         )
+        if profile == "best_quality":
+            fit_kwargs["presets"] = "best_quality"
+        elif profile == "medium_quality":
+            fit_kwargs["presets"] = "medium_quality_faster_train"
+        elif profile == "local_rf_xt":
+            # Local debugging profile: avoids model families that are fragile
+            # on lightweight macOS/dev installs while still using AutoGluon.
+            if problem_type == "regression":
+                fit_kwargs["hyperparameters"] = {
+                    "RF": {"criterion": "squared_error"},
+                    "XT": {"criterion": "squared_error"},
+                }
+            else:
+                fit_kwargs["hyperparameters"] = {
+                    "RF": {"criterion": "gini"},
+                    "XT": {"criterion": "gini"},
+                }
+        else:
+            raise ValueError(
+                "autogluon_profile must be one of: best_quality, medium_quality, local_rf_xt"
+            )
         if excluded_model_types:
             fit_kwargs["excluded_model_types"] = list(excluded_model_types)
 
@@ -203,6 +225,7 @@ def evaluate_candidates_autogluon(
     target_column: str,
     candidate_configs: List[Dict[str, Any]],
     time_limit_per_model: int = 300,
+    autogluon_profile: str = "best_quality",
     verbose: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     try:
@@ -275,6 +298,7 @@ def evaluate_candidates_autogluon(
                     eval_metric=eval_metric,
                     time_limit_per_model=time_limit_per_model,
                     verbosity=2 if verbose else 0,
+                    autogluon_profile=autogluon_profile,
                 )
 
                 if ag_issue == "no_models_fitted":
@@ -302,6 +326,7 @@ def evaluate_candidates_autogluon(
                         eval_metric=eval_metric,
                         time_limit_per_model=time_limit_per_model,
                         verbosity=2 if verbose else 0,
+                        autogluon_profile=autogluon_profile,
                         excluded_model_types=["XGB"],
                     )
                     if ag_issue == "no_models_fitted":

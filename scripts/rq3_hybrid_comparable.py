@@ -36,6 +36,10 @@ base = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(base)
 
 
+def _cli_flag_was_passed(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
+
+
 def _source_priority(source: str) -> int:
     order = {
         "no_search_selected": 0,
@@ -58,6 +62,12 @@ def _build_parser():
             "Require the best non-baseline hybrid candidate to beat the better selected "
             "pipeline by this margin. If not, keep the better selected search/no-search pipeline."
         ),
+    )
+    parser.add_argument(
+        "--hybrid-tie-breaker",
+        choices=["no_search", "search"],
+        default="no_search",
+        help="Which selected baseline to keep when search and no-search are tied within --hybrid-selection-margin.",
     )
     return parser
 
@@ -88,6 +98,7 @@ def _lookup_score_by_sig(results: List[Tuple[Dict[str, Any], float]]) -> Dict[st
 
 def main() -> int:
     args = _build_parser().parse_args()
+    metric_target_explicit = _cli_flag_was_passed("--metric-similarity-target")
 
     if args.notebook_legacy_mode:
         args.notebook_legacy_options = True
@@ -96,7 +107,8 @@ def main() -> int:
         args.legacy_notebook_aco = True
         args.aco_lambda_smooth = 0.7
         args.proxy_logreg_max_iter = 1000
-        args.metric_similarity_target = "legacy_global_zscore_cosine"
+        if not metric_target_explicit:
+            args.metric_similarity_target = "legacy_global_zscore_cosine"
         args.metric_hidden_dim = 32
         args.metric_embed_dim = 32
         if not args.metric_path:
@@ -123,7 +135,8 @@ def main() -> int:
             print(
                 "Training Siamese metric inline: "
                 f"hidden_dim={args.metric_hidden_dim}, embed_dim={args.metric_embed_dim}, "
-                f"epochs={args.metric_epochs}, target={args.metric_similarity_target}"
+                f"epochs={args.metric_epochs}, target={args.metric_similarity_target}, "
+                f"objective={args.metric_objective}"
             )
         recommender.train_metric(
             method="regression",
@@ -134,6 +147,7 @@ def main() -> int:
             seed=int(args.seed),
             similarity_target=str(args.metric_similarity_target),
             score_direction="higher_is_better",
+            metric_objective=str(args.metric_objective),
         )
 
     proxy_settings = base._build_proxy_settings(args)
@@ -219,26 +233,29 @@ def main() -> int:
             search_sig = base._config_signature(search_rec.get("pipeline_config") or {}, options)
             no_score = float(score_by_sig.get(no_sig, np.nan))
             search_score = float(score_by_sig.get(search_sig, np.nan))
-            selected_baseline_sig = no_sig
-            selected_baseline_score = no_score
-            selected_baseline_source = "no_search_selected"
-            if np.isfinite(search_score) and (not np.isfinite(no_score) or search_score > no_score):
-                selected_baseline_sig = search_sig
-                selected_baseline_score = search_score
-                selected_baseline_source = "search_selected"
-
             valid = [(sig, source, cfg, score_by_sig.get(sig, np.nan)) for sig, (source, cfg) in candidates.items()]
             valid = [item for item in valid if np.isfinite(item[3])]
-            valid.sort(key=lambda item: float(item[3]), reverse=True)
-            best_sig, best_source, best_cfg, best_score = valid[0]
-
             margin = float(args.hybrid_selection_margin)
-            if margin > 0 and best_sig not in {no_sig, search_sig}:
-                if not np.isfinite(selected_baseline_score) or best_score < selected_baseline_score + margin:
-                    best_sig = selected_baseline_sig
-                    best_source = selected_baseline_source
-                    best_cfg = candidates[best_sig][1]
-                    best_score = selected_baseline_score
+            selector_like = [
+                (sig, source, cfg, float(score), "comparable_autogluon", "ok", "")
+                for sig, source, cfg, score in valid
+            ]
+            (
+                best_sig,
+                best_source,
+                best_cfg,
+                best_score,
+                _best_metric,
+                selector_decision_reason,
+                selector_best_minus_baseline,
+            ) = base._select_hybrid_candidate(
+                selector_like,
+                no_sig=no_sig,
+                search_sig=search_sig,
+                margin=margin,
+                tie_breaker=str(args.hybrid_tie_breaker),
+            )
+            valid.sort(key=lambda item: (-float(item[3]), _source_priority(item[1]), item[0]))
 
             for sig, source, cfg, score in valid:
                 candidate_rows.append(
@@ -248,6 +265,8 @@ def main() -> int:
                         "signature": sig,
                         "comparable_autogluon_score": float(score),
                         "selected_by_hybrid": bool(sig == best_sig),
+                        "hybrid_selection_margin": margin,
+                        "selector_decision_reason": selector_decision_reason,
                         "pipeline_config": base._display_config(cfg, options),
                     }
                 )
@@ -269,6 +288,10 @@ def main() -> int:
                     "search_pipeline": base._display_config(search_rec.get("pipeline_config") or {}, options),
                     "hybrid_comparable_score": float(best_score),
                     "hybrid_source": best_source,
+                    "hybrid_selection_margin": margin,
+                    "hybrid_tie_breaker": str(args.hybrid_tie_breaker),
+                    "selector_decision_reason": selector_decision_reason,
+                    "selector_best_minus_baseline": selector_best_minus_baseline,
                     "hybrid_pipeline": base._display_config(best_cfg, options),
                     "hybrid_minus_no_search": float(best_score - no_score) if np.isfinite(no_score) else np.nan,
                     "hybrid_minus_search": float(best_score - search_score) if np.isfinite(search_score) else np.nan,

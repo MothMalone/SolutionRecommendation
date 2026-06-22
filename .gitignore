@@ -364,3 +364,11 @@ workspace/
 # =============================================================================
 *.orig
 *.rej
+
+agent
+
+.claude/*
+docs/ANALYSIS.md
+docs/BASELINES_TODO.md
+docs/IMPROVEMENTS.md
+docs/PLAN.md

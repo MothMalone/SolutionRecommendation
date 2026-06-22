@@ -54,6 +54,10 @@ from automl_aco.search.heuristics import (
 from automl_aco.utils.operator_spec import base_operator_name
 
 
+def _cli_flag_was_passed(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
+
+
 PIPELINE_STEPS = [
     "imputation",
     "scaling",
@@ -428,6 +432,7 @@ def _score_candidates(
     *,
     backend: str,
     time_limit: int,
+    autogluon_profile: str,
     require_autogluon: bool,
     proxy_settings: Mapping[str, Any],
     verbose: bool,
@@ -442,6 +447,7 @@ def _score_candidates(
                 target_column="target",
                 candidate_configs=[dict(cfg) for cfg in candidates],
                 time_limit_per_model=int(time_limit),
+                autogluon_profile=str(autogluon_profile),
                 verbose=verbose,
             )
             return {
@@ -560,6 +566,67 @@ def _risky_count(cfg: Mapping[str, Any], options: Mapping[str, Sequence[str]]) -
     return count
 
 
+def _dataset_stats(df: pd.DataFrame, *, target_column: str = "target") -> Dict[str, Any]:
+    if target_column not in df.columns:
+        return {}
+    X = df.drop(columns=[target_column])
+    y = df[target_column]
+    n_rows = int(X.shape[0])
+    n_features = int(X.shape[1])
+    numeric_count = int(X.select_dtypes(include=[np.number]).shape[1])
+    categorical_count = int(n_features - numeric_count)
+    missing_ratio = float(X.isna().to_numpy().mean()) if n_rows > 0 and n_features > 0 else 0.0
+    n_classes = int(y.nunique(dropna=True))
+    counts = y.value_counts(dropna=True)
+    if len(counts) > 1 and float(counts.max()) > 0:
+        class_min_max_ratio = float(counts.min() / counts.max())
+    else:
+        class_min_max_ratio = np.nan
+    feature_row_ratio = float(n_features / max(1, n_rows))
+
+    tags: List[str] = []
+    if n_rows < 500:
+        tags.append("small_n")
+    elif n_rows >= 5000:
+        tags.append("large_n")
+    else:
+        tags.append("medium_n")
+    if n_features >= 500 or feature_row_ratio >= 0.5:
+        tags.append("high_dimensional")
+    elif n_features <= 30:
+        tags.append("low_dimensional")
+    else:
+        tags.append("medium_dimensional")
+    if n_classes > 2:
+        tags.append("multiclass")
+    else:
+        tags.append("binary")
+    if missing_ratio > 0.05:
+        tags.append("missing_data")
+    if np.isfinite(class_min_max_ratio) and class_min_max_ratio < 0.25:
+        tags.append("imbalanced")
+    if categorical_count > 0:
+        tags.append("categorical_features")
+
+    return {
+        "n_rows": n_rows,
+        "n_features": n_features,
+        "numeric_feature_count": numeric_count,
+        "categorical_feature_count": categorical_count,
+        "feature_row_ratio": feature_row_ratio,
+        "missing_ratio": missing_ratio,
+        "n_classes": n_classes,
+        "class_min_max_ratio": class_min_max_ratio,
+        "dataset_archetype": "+".join(tags),
+        "is_small_n": bool(n_rows < 500),
+        "is_large_n": bool(n_rows >= 5000),
+        "is_high_dimensional": bool(n_features >= 500 or feature_row_ratio >= 0.5),
+        "is_multiclass": bool(n_classes > 2),
+        "is_imbalanced": bool(np.isfinite(class_min_max_ratio) and class_min_max_ratio < 0.25),
+        "has_missing_data": bool(missing_ratio > 0.05),
+    }
+
+
 def _history_summary(history: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     rows = [row for row in history if isinstance(row, Mapping)]
 
@@ -639,6 +706,10 @@ def _build_aco_params(args: argparse.Namespace, dataset_id: Any) -> Dict[str, An
         "weight_method": str(args.aco_weight_method),
         "markov_order": int(args.aco_markov_order),
         "lambda_smooth": float(args.aco_lambda_smooth),
+        "interaction_prior_strength": float(args.interaction_prior_strength),
+        "interaction_prior_floor": float(args.interaction_prior_floor),
+        "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
+        "retrieval_incumbent_topk": int(args.retrieval_incumbent_topk or args.eval_k),
         "early_stop_rounds": int(args.aco_early_stop_rounds),
         "min_improvement": float(args.aco_min_improvement),
         "dataset_weighting": str(args.dataset_weighting),
@@ -676,6 +747,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-ids", nargs="+", required=True)
     parser.add_argument("--backend", choices=["simple", "autogluon"], default="simple")
     parser.add_argument(
+        "--autogluon-profile",
+        choices=["best_quality", "medium_quality", "local_rf_xt"],
+        default="best_quality",
+        help=(
+            "AutoGluon fit profile used when --backend autogluon. "
+            "Use best_quality for Kaggle reporting; local_rf_xt for stable local smoke tests."
+        ),
+    )
+    parser.add_argument(
         "--operator-effect-backend",
         choices=["same", "simple", "autogluon"],
         default="simple",
@@ -709,6 +789,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aco-weight-method", default="rank")
     parser.add_argument("--aco-markov-order", type=int, default=2)
     parser.add_argument("--aco-lambda-smooth", type=float, default=0.0)
+    parser.add_argument("--interaction-prior-strength", type=float, default=0.0)
+    parser.add_argument("--interaction-prior-floor", type=float, default=0.2)
+    parser.add_argument("--protect-retrieval-incumbent", action="store_true")
+    parser.add_argument("--retrieval-incumbent-topk", type=int, default=None)
     parser.add_argument("--aco-early-stop-rounds", type=int, default=0)
     parser.add_argument("--aco-min-improvement", type=float, default=0.0)
     parser.add_argument("--per-feature-independent-search", action="store_true")
@@ -736,6 +820,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric-epochs", type=int, default=100)
     parser.add_argument("--metric-lr", type=float, default=1e-3)
     parser.add_argument(
+        "--metric-objective",
+        choices=["embedding_cosine", "projector_product"],
+        default="embedding_cosine",
+    )
+    parser.add_argument(
         "--metric-similarity-target",
         choices=["rank_cosine", "row_zscore_cosine", "row_minmax_cosine", "legacy_global_zscore_cosine"],
         default="rank_cosine",
@@ -753,6 +842,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    metric_target_explicit = _cli_flag_was_passed("--metric-similarity-target")
     if args.notebook_legacy_mode:
         args.notebook_legacy_options = True
         args.heuristic_transfer_method = "legacy_weighted_average"
@@ -760,7 +850,8 @@ def main() -> int:
         args.legacy_notebook_aco = True
         args.aco_lambda_smooth = 0.7
         args.proxy_logreg_max_iter = 1000
-        args.metric_similarity_target = "legacy_global_zscore_cosine"
+        if not metric_target_explicit:
+            args.metric_similarity_target = "legacy_global_zscore_cosine"
         args.metric_hidden_dim = 32
         args.metric_embed_dim = 32
         if not args.metric_path:
@@ -804,7 +895,8 @@ def main() -> int:
             f"embed_dim={int(args.metric_embed_dim)}, "
             f"epochs={int(args.metric_epochs)}, "
             f"seed={int(args.seed)}, "
-            f"target={str(args.metric_similarity_target)})"
+            f"target={str(args.metric_similarity_target)}, "
+            f"objective={str(args.metric_objective)})"
         )
         recommender.train_metric(
             method="regression",
@@ -815,6 +907,7 @@ def main() -> int:
             seed=int(args.seed),
             similarity_target=str(args.metric_similarity_target),
             score_direction="higher_is_better",
+            metric_objective=str(args.metric_objective),
         )
         similarity_source = "inline_siamese_metric"
     else:
@@ -825,6 +918,7 @@ def main() -> int:
         "metric_path": args.metric_path,
         "train_metric_inline": bool(args.train_metric_inline),
         "metric_similarity_target": str(args.metric_similarity_target),
+        "metric_objective": str(args.metric_objective),
         "metric_hidden_dim": int(args.metric_hidden_dim),
         "metric_embed_dim": int(args.metric_embed_dim),
         "metric_epochs": int(args.metric_epochs),
@@ -837,6 +931,7 @@ def main() -> int:
         "performance_matrix": str(args.performance_matrix),
         "metafeatures": str(args.metafeatures),
         "pipeline_configs": str(args.pipeline_configs),
+        "autogluon_profile": str(args.autogluon_profile),
         "aligned_dataset_count": int(len(recommender.metafeatures_df.index)),
     }
     with (out_dir / "similarity_run_metadata.json").open("w", encoding="utf-8") as f:
@@ -851,6 +946,7 @@ def main() -> int:
     controlled_operator_rows: List[Dict[str, Any]] = []
     contextual_operator_rows: List[Dict[str, Any]] = []
     eta_target_step_rows: List[Dict[str, Any]] = []
+    dataset_stat_rows: List[Dict[str, Any]] = []
 
     dataset_ids = _parse_dataset_ids(args.dataset_ids)
     for dataset_id in dataset_ids:
@@ -864,6 +960,8 @@ def main() -> int:
                 kaggle_target_column=str(args.kaggle_target_column),
                 verbose=bool(args.verbose),
             )
+            ds_stats = _dataset_stats(df, target_column="target")
+            dataset_stat_rows.append({"dataset_id": str(dataset_id), **ds_stats})
 
             target_mf = _lookup_metafeatures(dataset, meta)
             target_mf_df = pd.DataFrame([target_mf]).reindex(columns=recommender.metafeatures_df.columns, fill_value=0)
@@ -999,6 +1097,7 @@ def main() -> int:
                 eval_configs,
                 backend=str(args.backend),
                 time_limit=int(args.time_limit),
+                autogluon_profile=str(args.autogluon_profile),
                 require_autogluon=bool(args.require_autogluon),
                 proxy_settings=proxy_settings,
                 verbose=bool(args.verbose),
@@ -1076,6 +1175,7 @@ def main() -> int:
                 operator_eval_configs,
                 backend=effect_backend,
                 time_limit=int(args.time_limit),
+                autogluon_profile=str(args.autogluon_profile),
                 require_autogluon=bool(args.require_autogluon and effect_backend == "autogluon"),
                 proxy_settings=proxy_settings,
                 verbose=bool(args.verbose),
@@ -1259,6 +1359,7 @@ def main() -> int:
                 contextual_eval_configs,
                 backend=effect_backend,
                 time_limit=int(args.time_limit),
+                autogluon_profile=str(args.autogluon_profile),
                 require_autogluon=bool(args.require_autogluon and effect_backend == "autogluon"),
                 proxy_settings=proxy_settings,
                 verbose=bool(args.verbose),
@@ -1451,6 +1552,7 @@ def main() -> int:
                 options=options,
                 optimizer="aco",
                 final_autogluon_topk=max(1, int(args.final_autogluon_topk)),
+                autogluon_profile=str(args.autogluon_profile),
                 proxy_settings=proxy_settings,
                 aco_params=aco_params,
             )
@@ -1494,6 +1596,7 @@ def main() -> int:
                 options=options,
                 optimizer="aco",
                 final_autogluon_topk=max(1, int(args.final_autogluon_topk)),
+                autogluon_profile=str(args.autogluon_profile),
                 proxy_settings=proxy_settings,
                 aco_params=aco_params,
             )
@@ -1530,6 +1633,7 @@ def main() -> int:
                     "error": "",
                     "top_neighbor": top_neighbor_id,
                     "top_neighbor_similarity": top_neighbor_sim,
+                    **ds_stats,
                     "similarity_source": similarity_source,
                     "metric_similarity_target": str(args.metric_similarity_target),
                     "metric_hidden_dim": int(args.metric_hidden_dim),
@@ -1544,6 +1648,7 @@ def main() -> int:
                     "eval_k": int(args.eval_k),
                     "no_search_eval_k": int(args.no_search_eval_k or args.eval_k),
                     "backend": str(args.backend),
+                    "autogluon_profile": str(args.autogluon_profile),
                     "per_feature_independent_search": bool(args.per_feature_independent_search),
                     "per_feature_steps": str(args.per_feature_steps),
                     "retrieved_top_pipeline": str(retrieved_top_cfg.get("name", "")),
@@ -1629,6 +1734,7 @@ def main() -> int:
     controlled_operator_df = pd.DataFrame(controlled_operator_rows)
     contextual_operator_df = pd.DataFrame(contextual_operator_rows)
     eta_target_step_df = pd.DataFrame(eta_target_step_rows)
+    dataset_stats_df = pd.DataFrame(dataset_stat_rows)
 
     summary_df.to_csv(out_dir / "decomposition_audit_summary.csv", index=False)
     eta_df.to_csv(out_dir / "operator_eta_detail.csv", index=False)
@@ -1639,6 +1745,7 @@ def main() -> int:
     controlled_operator_df.to_csv(out_dir / "controlled_operator_effect_rows.csv", index=False)
     contextual_operator_df.to_csv(out_dir / "contextual_operator_effect_rows.csv", index=False)
     eta_target_step_df.to_csv(out_dir / "eta_target_step_summary.csv", index=False)
+    dataset_stats_df.to_csv(out_dir / "dataset_statistics.csv", index=False)
 
     ok = summary_df[summary_df.get("status", "") == "ok"].copy() if not summary_df.empty else pd.DataFrame()
     if not ok.empty:
@@ -1679,6 +1786,10 @@ def main() -> int:
 
         tex_cols = [
             "dataset_id",
+            "n_rows",
+            "n_features",
+            "n_classes",
+            "dataset_archetype",
             "no_search_score",
             "best_retrieved_score",
             "eta_top_score",
@@ -1698,6 +1809,33 @@ def main() -> int:
         ]
         available = [col for col in tex_cols if col in ok.columns]
         ok[available].to_latex(out_dir / "decomposition_audit_summary.tex", index=False, float_format="%.4f")
+        if "dataset_archetype" in ok.columns:
+            type_rows: List[Dict[str, Any]] = []
+            for archetype, group in ok.groupby("dataset_archetype", dropna=False):
+                deltas = pd.to_numeric(group.get("aco_final_minus_no_search"), errors="coerce")
+                type_rows.append(
+                    {
+                        "dataset_archetype": str(archetype),
+                        "n_datasets": int(group["dataset_id"].nunique()),
+                        "mean_aco_minus_no_search": float(deltas.mean()),
+                        "win_rate_vs_no_search": float((deltas > 0).mean()),
+                        "loss_rate_vs_no_search": float((deltas < 0).mean()),
+                        "mean_eta_entropy": float(
+                            pd.to_numeric(group.get("eta_mean_entropy_norm"), errors="coerce").mean()
+                        ),
+                        "mean_eta_target_spearman": float(
+                            pd.to_numeric(group.get("eta_target_controlled_spearman"), errors="coerce").mean()
+                        ),
+                        "mean_aco_proxy_gain": float(
+                            pd.to_numeric(group.get("aco_proxy_gain"), errors="coerce").mean()
+                        ),
+                    }
+                )
+            type_df = pd.DataFrame(type_rows).sort_values(
+                ["mean_aco_minus_no_search", "n_datasets"],
+                ascending=[False, False],
+            )
+            type_df.to_csv(out_dir / "decomposition_audit_by_dataset_type.csv", index=False)
         print(pd.DataFrame([aggregate]).to_string(index=False))
     else:
         print("No successful audit rows.")

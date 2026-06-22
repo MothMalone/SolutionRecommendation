@@ -56,7 +56,13 @@ def test_retrieval_local_protects_nearest_neighbor_incumbent(monkeypatch):
 
     autogluon_candidates = []
 
-    def fake_autogluon(_dataset, _target_column, candidate_configs, time_limit_per_model=300):
+    def fake_autogluon(
+        _dataset,
+        _target_column,
+        candidate_configs,
+        time_limit_per_model=300,
+        autogluon_profile="best_quality",
+    ):
         autogluon_candidates.extend([dict(cfg) for cfg in candidate_configs])
         results = []
         for cfg in candidate_configs:

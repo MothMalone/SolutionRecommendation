@@ -39,11 +39,16 @@ from automl_aco.data.loaders import (
     load_csv_dataset,
 )
 from automl_aco.data.metafeatures import extract_enhanced_metafeatures
+from automl_aco.eval_ids import EVAL_IDS, holdout_reference
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
 from automl_aco.utils.operator_spec import base_operator_name
 from automl_aco.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+
+def _cli_flag_was_passed(flag: str) -> bool:
+    return any(arg == flag or arg.startswith(f"{flag}=") for arg in sys.argv[1:])
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -71,9 +76,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dataset-source",
-        choices=["openml", "kaggle", "csv", "dummy"],
+        choices=["openml", "kaggle", "csv", "dummy", "local"],
         default=None,
-        help="Dataset source (openml|kaggle|csv|dummy). If omitted, inferred.",
+        help=(
+            "Dataset source. 'local' = read from --openml-local-folder (default test_data_local) "
+            "with OpenML fetch as fallback. If omitted, inferred."
+        ),
     )
     parser.add_argument("--dataset-csv", required=False, help="Path to dataset CSV (csv source only)")
     parser.add_argument("--target-column", default="target", help="Target column name")
@@ -118,9 +126,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--heuristic-transfer-method",
-        choices=["weighted_topk_topl", "legacy_weighted_average"],
+        choices=["weighted_topk_topl", "legacy_weighted_average", "paper_flat_average"],
         default="weighted_topk_topl",
-        help="Phase-2 heuristic transfer algorithm",
+        help="Phase-2 heuristic transfer algorithm (paper_flat_average = literal Eq 6+7)",
     )
     parser.add_argument(
         "--heuristic-similarity-temperature",
@@ -189,6 +197,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Weighting scheme for pheromone reinforcement among selected pipelines (ACO only)",
     )
     parser.add_argument(
+        "--aco-mmas-bounds",
+        action="store_true",
+        help=(
+            "Enable MMAS pheromone bounds [tau_min, tau_max] (anti-collapse). Auto tau_max=1/rho, "
+            "tau_min=tau_min_ratio*tau_max unless --aco-tau-min/--aco-tau-max are given. "
+            "Enabled automatically by --paper-faithful."
+        ),
+    )
+    parser.add_argument("--aco-tau-min", type=float, default=None, help="Explicit MMAS tau_min (overrides auto)")
+    parser.add_argument("--aco-tau-max", type=float, default=None, help="Explicit MMAS tau_max (overrides auto)")
+    parser.add_argument(
+        "--aco-tau-min-ratio",
+        type=float,
+        default=0.05,
+        help="tau_min = ratio * tau_max when tau_min is auto (MMAS bounds)",
+    )
+    parser.add_argument(
         "--aco-markov-order",
         type=int,
         default=2,
@@ -202,6 +227,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Interpolation weight between conditional/global pheromone sampling (ACO only). "
             "Default 0.0 disables Markov conditional influence."
         ),
+    )
+    parser.add_argument(
+        "--interaction-prior-strength",
+        type=float,
+        default=0.0,
+        help=(
+            "Strength of fixed retrieval-conditioned pairwise operator priors. "
+            "0 disables interaction-aware transfer and reproduces flat eta behavior."
+        ),
+    )
+    parser.add_argument(
+        "--interaction-prior-floor",
+        type=float,
+        default=0.2,
+        help="Minimum multiplier for weak/unsupported historical operator pairs when interaction priors are enabled.",
+    )
+    parser.add_argument(
+        "--protect-retrieval-incumbent",
+        action="store_true",
+        help=(
+            "During search, always include the retrieval/no-search incumbent candidates in final evaluation. "
+            "This makes search a safe refinement step instead of replacing the retrieval baseline."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-incumbent-topk",
+        type=int,
+        default=None,
+        help="Number of retrieval-ranked incumbent candidates to protect (default: --eval-k).",
     )
     parser.add_argument(
         "--aco-early-stop-rounds",
@@ -427,6 +481,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric-epochs", type=int, default=100)
     parser.add_argument("--metric-lr", type=float, default=1e-3)
     parser.add_argument(
+        "--metric-objective",
+        choices=["embedding_cosine", "projector_product"],
+        default="embedding_cosine",
+        help=(
+            "Siamese metric objective. embedding_cosine trains the embedding space directly; "
+            "projector_product keeps the older projector(emb_i * emb_j) objective."
+        ),
+    )
+    parser.add_argument(
         "--metric-similarity-target",
         choices=[
             "rank_cosine",
@@ -451,6 +514,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output-dir",
         required=False,
         help="Output directory for saved recommendation and plots (default: /kaggle/working or ./outputs)",
+    )
+    parser.add_argument(
+        "--shard",
+        default=None,
+        help="Split dataset IDs across sessions as 'i/n' (1-indexed), e.g. '1/4' runs the first quarter.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Run a shard's datasets concurrently via N subprocesses (each capped to 1 thread). 1 = serial.",
+    )
+    parser.add_argument(
+        "--local-test-mode",
+        action="store_true",
+        help=(
+            "Pre-flight smoke path: serial, CPU, small search budget (n_ants=4, n_iterations=3, "
+            "short time limit). NOT the final numbers. Overrides budget flags unless passed explicitly."
+        ),
+    )
+    parser.add_argument(
+        "--tar-outputs",
+        action="store_true",
+        help="After all datasets finish, tar the output directory to <output-dir>.tar.gz (for Kaggle).",
+    )
+    parser.add_argument(
+        "--skip-aco-plot",
+        action="store_true",
+        help="Skip saving the ACO progress PNG for local/headless environments with fragile Matplotlib font caches.",
     )
     parser.add_argument(
         "--show-warnings",
@@ -496,6 +588,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Re-evaluate top-k proxy pipelines with final AutoGluon (default: 1)",
     )
     parser.add_argument(
+        "--autogluon-profile",
+        choices=["best_quality", "medium_quality", "local_rf_xt"],
+        default="best_quality",
+        help=(
+            "AutoGluon fit profile for final candidate evaluation. "
+            "Use best_quality for final Kaggle reporting; local_rf_xt is a stable local smoke-test profile."
+        ),
+    )
+    parser.add_argument(
         "--require-autogluon",
         dest="require_autogluon",
         action="store_true",
@@ -509,15 +610,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.set_defaults(require_autogluon=True)
     parser.add_argument(
-        "--dataset378-profile",
-        choices=["off", "conservative", "scaling_only"],
-        default="off",
-        help=(
-            "Apply dataset-specific option constraints only when dataset_id=378. "
-            "Use conservative or scaling_only to reduce over-processing risk."
-        ),
-    )
-    parser.add_argument(
         "--operator-param-search",
         action="store_true",
         help="Enable parameterized operator tokens (e.g., knn@k=7, pca@n=20) in search space.",
@@ -529,12 +621,111 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Grid size for parameterized operator search.",
     )
     parser.add_argument("--verbose", action="store_true", help="Match notebook-style progress output")
+    parser.add_argument(
+        "--paper-faithful",
+        action="store_true",
+        help=(
+            "Reproducibility preset: restore the literal paper method as the baseline. Sets "
+            "metric_objective=projector_product (Eq 2/5 learned projector), "
+            "heuristic_transfer_method=paper_flat_average + heuristic_top_l=1 (Eq 6/7), "
+            "aco_weight_method=linear (Eq 10 per-iteration min-max reward), Markov mixing off "
+            "(lambda_smooth=0). Override any individual flag after this to ablate."
+        ),
+    )
+    parser.add_argument(
+        "--disable-leakage-holdout",
+        action="store_true",
+        help=(
+            "DANGER: do NOT remove the 24 evaluation IDs from the reference set before "
+            "training/normalizing/neighbor retrieval. Reproduces the old leaky behavior for "
+            "comparison only. Any number produced this way is contaminated and not reportable."
+        ),
+    )
     return parser
+
+
+def _strip_parallel_flags(argv: List[str]) -> List[str]:
+    """Drop dataset-selection and parallel flags from a copy of argv so each worker subprocess
+    can be given a single --dataset-ids and --workers 1."""
+    value_flags = {"--workers", "--shard", "--dataset-id", "--output-dir"}
+    zero_flags = {"--tar-outputs"}
+    out: List[str] = []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in value_flags:
+            i += 2  # skip flag and its single value
+            continue
+        if tok in zero_flags:
+            i += 1
+            continue
+        if tok == "--dataset-ids":
+            i += 1
+            while i < len(argv) and not str(argv[i]).startswith("--"):
+                i += 1  # consume the nargs=+ values
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
+def _dispatch_workers(dataset_ids: List[Any], output_dir: str, workers: int) -> None:
+    """Run one subprocess per dataset, ``workers`` at a time, each capped to a single thread so
+    AutoGluon does not oversubscribe (~2 cores/Kaggle session). Each dataset writes to its own
+    ``<output_dir>/dataset_<id>`` subdir; a dataset is skipped if its recommendation.json already
+    exists (resumable). Subprocesses inherit the same flags minus parallel/selection flags."""
+    import concurrent.futures
+    import subprocess
+
+    base = [sys.executable, os.path.abspath(__file__)] + _strip_parallel_flags(sys.argv[1:])
+    env = dict(os.environ)
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        env[var] = "1"
+
+    def _child_dir(did: Any) -> str:
+        return os.path.join(output_dir, f"dataset_{did}")
+
+    pending = []
+    for did in dataset_ids:
+        if os.path.exists(os.path.join(_child_dir(did), "recommendation.json")):
+            print(f"[workers] dataset {did}: SKIP (output exists)")
+        else:
+            pending.append(did)
+
+    def _run_one(did: Any) -> Tuple[Any, int]:
+        child_dir = _child_dir(did)
+        os.makedirs(child_dir, exist_ok=True)
+        cmd = base + ["--dataset-ids", str(did), "--workers", "1", "--output-dir", child_dir]
+        proc = subprocess.run(cmd, env=env)
+        return did, proc.returncode
+
+    print(f"[workers] dispatching {len(pending)} datasets across {workers} subprocess workers "
+          f"({len(dataset_ids) - len(pending)} already done)")
+    failures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for did, rc in pool.map(_run_one, pending):
+            status = "ok" if rc == 0 else f"FAILED(rc={rc})"
+            print(f"[workers] dataset {did}: {status}")
+            if rc != 0:
+                failures.append(did)
+    if failures:
+        print(f"[workers] {len(failures)} dataset(s) failed: {failures}")
+
+
+def _tar_output_dir(output_dir: str) -> Optional[str]:
+    import tarfile
+
+    tar_path = str(output_dir).rstrip("/") + ".tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tar:
+        tar.add(output_dir, arcname=os.path.basename(str(output_dir).rstrip("/")))
+    print(f"[tar] wrote {tar_path}")
+    return tar_path
 
 
 def main() -> None:
     configure_logging()
     args = build_arg_parser().parse_args()
+    metric_target_explicit = _cli_flag_was_passed("--metric-similarity-target")
 
     if args.notebook_legacy_mode:
         args.notebook_legacy_options = True
@@ -543,14 +734,48 @@ def main() -> None:
         args.legacy_notebook_aco = True
         args.aco_lambda_smooth = 0.7
         args.proxy_logreg_max_iter = 1000
-        args.metric_similarity_target = "legacy_global_zscore_cosine"
+        if not metric_target_explicit:
+            args.metric_similarity_target = "legacy_global_zscore_cosine"
         args.metric_hidden_dim = 32
         args.metric_embed_dim = 32
         if not args.metric_path:
             args.train_metric_inline = True
 
+    if args.paper_faithful:
+        if args.notebook_legacy_mode:
+            raise ValueError("--paper-faithful and --notebook-legacy-mode are mutually exclusive.")
+        # Each value is applied only if the user did not pass that flag explicitly, so
+        # `--paper-faithful --heuristic-top-l 2` ablates a single component on top of the baseline.
+        if not _cli_flag_was_passed("--metric-objective"):
+            args.metric_objective = "projector_product"
+        if not _cli_flag_was_passed("--heuristic-transfer-method"):
+            args.heuristic_transfer_method = "paper_flat_average"
+        if not _cli_flag_was_passed("--heuristic-top-l"):
+            args.heuristic_top_l = 1
+        if not _cli_flag_was_passed("--aco-weight-method"):
+            args.aco_weight_method = "linear"
+        if not _cli_flag_was_passed("--aco-lambda-smooth"):
+            args.aco_lambda_smooth = 0.0
+        if not _cli_flag_was_passed("--aco-mmas-bounds"):
+            args.aco_mmas_bounds = True  # paper claims MMAS; bounds are its defining mechanism
+        if not args.metric_path:
+            args.train_metric_inline = True
+
     if args.no_train_metric_inline:
         args.train_metric_inline = False
+
+    if args.local_test_mode:
+        # Smoke/pre-flight: small budget, serial. Explicit budget flags still win.
+        if not _cli_flag_was_passed("--n-ants"):
+            args.n_ants = 4
+        if not _cli_flag_was_passed("--n-iterations"):
+            args.n_iterations = 3
+        if not _cli_flag_was_passed("--time-limit"):
+            args.time_limit = 60
+        if not _cli_flag_was_passed("--workers"):
+            args.workers = 1
+        print("[local-test-mode] smoke budget: n_ants=%d n_iterations=%d time_limit=%d (NOT final numbers)"
+              % (args.n_ants, args.n_iterations, args.time_limit))
 
     if args.metric_path and args.train_metric_inline:
         raise ValueError("Use either --metric-path or --train-metric-inline, not both.")
@@ -818,6 +1043,11 @@ def main() -> None:
             )
 
     dataset_source = args.dataset_source
+    if dataset_source == "local":
+        # 'local' is an alias: read from a local folder, fall back to OpenML fetch.
+        dataset_source = "openml"
+        if not args.openml_local_folder:
+            args.openml_local_folder = "test_data_local"
     if dataset_source is None:
         if args.dataset_csv:
             dataset_source = "csv"
@@ -861,7 +1091,39 @@ def main() -> None:
     if dataset_source == "csv" and not dataset_ids:
         dataset_ids = [None]
 
-    recommender = MetaPipelineRecommender(perf, meta, pipeline_configs, verbose=args.verbose)
+    # --shard "i/n": deterministically split the dataset IDs across N sessions (1-indexed).
+    if args.shard:
+        try:
+            shard_i, shard_n = (int(x) for x in str(args.shard).split("/"))
+        except Exception as exc:
+            raise ValueError(f"--shard must be 'i/n' with integers, got {args.shard!r}") from exc
+        if not (1 <= shard_i <= shard_n):
+            raise ValueError(f"--shard i/n requires 1 <= i <= n, got {args.shard!r}")
+        ordered = sorted(dataset_ids, key=lambda d: str(d))
+        dataset_ids = [d for idx, d in enumerate(ordered) if idx % shard_n == (shard_i - 1)]
+        print(f"[shard {shard_i}/{shard_n}] this session runs {len(dataset_ids)} datasets: {dataset_ids}")
+
+    # Leakage prevention: hold the 24 evaluation IDs out of the reference used to TRAIN /
+    # NORMALIZE / RETRIEVE. `meta` (full table) is retained for target-row metafeature lookup,
+    # since a new dataset's metafeatures are read from the same precomputed file. The current
+    # query is additionally excluded at inference via aco_params["query_dataset_id"].
+    holdout_report = None
+    if args.disable_leakage_holdout:
+        print(
+            "\n*** WARNING: --disable-leakage-holdout set. The 24 eval IDs remain in the "
+            "reference set; results are CONTAMINATED and must not be reported. ***\n"
+        )
+        perf_ref, meta_ref = perf, meta
+    else:
+        perf_ref, meta_ref, holdout_report = holdout_reference(perf, meta, verbose=args.verbose)
+        if args.verbose:
+            print(
+                f"[leakage-holdout] reference now disjoint from {len(EVAL_IDS)} eval IDs: "
+                f"perf {holdout_report['perf_cols_before']}->{holdout_report['perf_cols_after']} cols, "
+                f"meta {holdout_report['meta_rows_before']}->{holdout_report['meta_rows_after']} rows."
+            )
+
+    recommender = MetaPipelineRecommender(perf_ref, meta_ref, pipeline_configs, verbose=args.verbose)
     if args.metric_path:
         recommender.load_metric(args.metric_path)
         if args.verbose:
@@ -873,7 +1135,8 @@ def main() -> None:
                 f"hidden_dim={int(args.metric_hidden_dim)}, "
                 f"embed_dim={int(args.metric_embed_dim)}, "
                 f"epochs={int(args.metric_epochs)}, "
-                f"target={args.metric_similarity_target}"
+                f"target={args.metric_similarity_target}, "
+                f"objective={args.metric_objective}"
             )
         recommender.train_metric(
             method="regression",
@@ -884,6 +1147,7 @@ def main() -> None:
             seed=int(args.seed),
             similarity_target=str(args.metric_similarity_target),
             score_direction=str(args.score_direction),
+            metric_objective=str(args.metric_objective),
         )
         if args.save_trained_metric:
             saved_metric_path = recommender.save_metric(args.save_trained_metric)
@@ -1065,39 +1329,9 @@ def main() -> None:
                 ]
             profile_note = f"operator_param_search={args.operator_param_grid}"
 
-        if args.dataset378_profile == "off":
-            return options, profile_note
-
-        try:
-            did = int(str(dataset_id))
-        except Exception:
-            did = None
-        if did != 378:
-            return options, profile_note
-
-        if args.dataset378_profile == "conservative":
-            options["imputation"] = ["none", "median", "most_frequent"]
-            options["outlier_removal"] = ["none"]
-            options["feature_selection"] = ["none", "variance_threshold"]
-            options["dimensionality_reduction"] = ["none"]
-            profile_note = (
-                "dataset378_profile=conservative "
-                "(imputation limited; outlier_removal and dim_reduction constrained)"
-            )
-            return options, profile_note
-
-        if args.dataset378_profile == "scaling_only":
-            options["imputation"] = ["none"]
-            options["outlier_removal"] = ["none"]
-            options["feature_selection"] = ["none"]
-            options["dimensionality_reduction"] = ["none"]
-            options["scaling"] = ["none", "standard", "minmax", "robust", "maxabs"]
-            profile_note = (
-                "dataset378_profile=scaling_only "
-                "(only scaling varies; all other preprocessing steps fixed to none)"
-            )
-            return options, profile_note
-
+        # NOTE: a per-dataset `--dataset378-profile` flag (option constraints keyed to eval ID
+        # 378) was removed as an evaluation-integrity violation: tuning option spaces to a
+        # specific test dataset is indefensible under review. No dataset-ID-keyed branches remain.
         return options, profile_note
 
     def _adapt_options_to_dataset(options: dict, X: pd.DataFrame):
@@ -1159,6 +1393,14 @@ def main() -> None:
 
     output_dir = _get_output_dir()
     n_runs = len(dataset_ids)
+
+    # --workers K: fan out one subprocess per dataset, then (optionally) tar and exit.
+    if int(args.workers) > 1 and n_runs > 1:
+        _dispatch_workers(dataset_ids, output_dir, int(args.workers))
+        if args.tar_outputs:
+            _tar_output_dir(output_dir)
+        return
+
     run_summaries = []
     search_enabled = False if args.no_search else (args.use_aco or args.optimizer != "aco")
     proxy_settings = _build_proxy_settings()
@@ -1198,6 +1440,10 @@ def main() -> None:
             f"weight_method={args.aco_weight_method}, "
             f"markov_order={int(args.aco_markov_order)}, "
             f"lambda_smooth={float(args.aco_lambda_smooth)}, "
+            f"interaction_prior_strength={float(args.interaction_prior_strength)}, "
+            f"interaction_prior_floor={float(args.interaction_prior_floor)}, "
+            f"protect_retrieval_incumbent={bool(args.protect_retrieval_incumbent)}, "
+            f"autogluon_profile={args.autogluon_profile}, "
             f"aco_early_stop_rounds={int(args.aco_early_stop_rounds)}, "
             f"aco_min_improvement={float(args.aco_min_improvement)}, "
             f"per_feature_independent_search={bool(args.per_feature_independent_search)}, "
@@ -1225,6 +1471,13 @@ def main() -> None:
     for run_idx, dataset_id in enumerate(dataset_ids, start=1):
         if n_runs > 1:
             print(f"\n=== Dataset {dataset_id} ({run_idx}/{n_runs}) ===")
+
+        # Resumable: skip if this dataset's recommendation already exists.
+        _tag = str(dataset_id) if dataset_id is not None else ("single" if n_runs == 1 else f"run{run_idx}")
+        _expected_dir = output_dir if n_runs == 1 else os.path.join(output_dir, f"dataset_{_tag}")
+        if os.path.exists(os.path.join(_expected_dir, "recommendation.json")):
+            print(f"  Skip {dataset_id}: output already exists at {_expected_dir}")
+            continue
 
         run_start = time.perf_counter()
         try:
@@ -1265,6 +1518,14 @@ def main() -> None:
                     "weight_method": str(args.aco_weight_method),
                     "markov_order": int(args.aco_markov_order),
                     "lambda_smooth": float(args.aco_lambda_smooth),
+                    "mmas_bounds": bool(args.aco_mmas_bounds),
+                    "tau_min": args.aco_tau_min,
+                    "tau_max": args.aco_tau_max,
+                    "tau_min_ratio": float(args.aco_tau_min_ratio),
+                    "interaction_prior_strength": float(args.interaction_prior_strength),
+                    "interaction_prior_floor": float(args.interaction_prior_floor),
+                    "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
+                    "retrieval_incumbent_topk": int(args.retrieval_incumbent_topk or args.eval_k),
                     "early_stop_rounds": int(args.aco_early_stop_rounds),
                     "min_improvement": float(args.aco_min_improvement),
                     "dataset_weighting": args.dataset_weighting,
@@ -1321,6 +1582,7 @@ def main() -> None:
                 sample_budget=args.sample_budget,
                 proxy_settings=proxy_settings,
                 final_autogluon_topk=args.final_autogluon_topk,
+                autogluon_profile=str(args.autogluon_profile),
             )
         except Exception as exc:
             elapsed = time.perf_counter() - run_start
@@ -1350,7 +1612,7 @@ def main() -> None:
 
         rec_path = os.path.join(run_output_dir, "recommendation.json")
         recommendation["search_options"] = run_options
-        recommendation["dataset_profile"] = args.dataset378_profile
+        recommendation["leakage_holdout"] = holdout_report
         recommendation["search_hyperparams"] = {
             "k": int(args.k),
             "heuristic_top_k": int(heuristic_top_k),
@@ -1361,6 +1623,7 @@ def main() -> None:
             "heuristic_eta_floor": float(args.heuristic_eta_floor),
             "score_direction": str(args.score_direction),
             "require_autogluon": bool(args.require_autogluon),
+            "autogluon_profile": str(args.autogluon_profile),
             "optimizer": str(args.optimizer),
             "n_ants": int(args.n_ants),
             "n_iterations": int(args.n_iterations),
@@ -1371,6 +1634,10 @@ def main() -> None:
             "weight_method": str(args.aco_weight_method),
             "markov_order": int(args.aco_markov_order),
             "lambda_smooth": float(args.aco_lambda_smooth),
+            "interaction_prior_strength": float(args.interaction_prior_strength),
+            "interaction_prior_floor": float(args.interaction_prior_floor),
+            "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
+            "retrieval_incumbent_topk": int(args.retrieval_incumbent_topk or args.eval_k),
             "aco_early_stop_rounds": int(args.aco_early_stop_rounds),
             "aco_min_improvement": float(args.aco_min_improvement),
             "per_feature_independent_search": bool(args.per_feature_independent_search),
@@ -1400,8 +1667,10 @@ def main() -> None:
             "metric_embed_dim": int(args.metric_embed_dim),
             "metric_epochs": int(args.metric_epochs),
             "metric_lr": float(args.metric_lr),
+            "metric_objective": str(args.metric_objective),
             "metric_similarity_target": str(args.metric_similarity_target),
             "save_trained_metric": str(args.save_trained_metric) if args.save_trained_metric else None,
+            "skip_aco_plot": bool(args.skip_aco_plot),
         }
         with open(rec_path, "w", encoding="utf-8") as f:
             json.dump(recommendation, f, indent=2, default=str)
@@ -1411,7 +1680,7 @@ def main() -> None:
             history_path = os.path.join(run_output_dir, "aco_history.csv")
             pd.DataFrame(history).to_csv(history_path, index=False)
 
-        plot_path = _save_history_plot(history, run_output_dir)
+        plot_path = None if args.skip_aco_plot else _save_history_plot(history, run_output_dir)
 
         pipeline_cfg = recommendation.get("pipeline_config") or {}
         if "recommended_performance" in recommendation:
@@ -1423,8 +1692,6 @@ def main() -> None:
 
         print("\nFinal recommendation")
         print(f"  Dataset: {dataset_tag}")
-        if args.dataset378_profile != "off":
-            print(f"  Dataset378 profile: {args.dataset378_profile}")
         if args.operator_param_search:
             print(f"  Operator-param profile: {args.operator_param_grid}")
         print(f"  Pipeline: {_format_pipeline(pipeline_cfg)}")
@@ -1464,11 +1731,11 @@ def main() -> None:
                 "proxy_score": proxy_score,
                 "final_score": final_score,
                 "final_method": final_eval.get("method") if isinstance(final_eval, dict) else None,
+                "autogluon_profile": str(args.autogluon_profile),
                 "elapsed_seconds": elapsed,
                 "recommendation_path": rec_path,
                 "history_path": history_path,
                 "plot_path": plot_path,
-                "dataset_profile": args.dataset378_profile,
             }
         )
 
@@ -1522,6 +1789,9 @@ def main() -> None:
         if avg_ag is not None:
             print(f"  Avg autogluon score: {avg_ag:.4f}")
         print(f"\nSaved multi-run summary: {summary_path}")
+
+    if args.tar_outputs:
+        _tar_output_dir(output_dir)
 
 
 if __name__ == "__main__":

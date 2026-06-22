@@ -30,6 +30,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--metric-objective",
+        choices=["embedding_cosine", "projector_product"],
+        default="embedding_cosine",
+        help=(
+            "embedding_cosine trains the embedding space directly; projector_product "
+            "keeps the older projector(emb_i * emb_j) objective."
+        ),
+    )
+    parser.add_argument(
         "--similarity-target",
         choices=[
             "rank_cosine",
@@ -66,6 +75,7 @@ def main() -> None:
         seed=args.seed,
         similarity_target=args.similarity_target,
         score_direction=args.score_direction,
+        metric_objective=args.metric_objective,
     )
 
     output_path = args.output or recommender.default_metric_path()

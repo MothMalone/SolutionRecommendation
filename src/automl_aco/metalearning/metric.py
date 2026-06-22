@@ -6,7 +6,8 @@ from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
 
 
@@ -25,6 +26,7 @@ SIMILARITY_TARGET_CHOICES = {
 }
 
 SCORE_DIRECTION_CHOICES = {"higher_is_better", "lower_is_better"}
+METRIC_OBJECTIVE_CHOICES = {"embedding_cosine", "projector_product"}
 
 
 def _require_torch():
@@ -60,6 +62,16 @@ def _validate_score_direction(score_direction: str) -> str:
             f"Expected one of {sorted(SCORE_DIRECTION_CHOICES)}."
         )
     return direction
+
+
+def _validate_metric_objective(metric_objective: str) -> str:
+    objective = str(metric_objective).strip().lower()
+    if objective not in METRIC_OBJECTIVE_CHOICES:
+        raise ValueError(
+            f"Unsupported metric_objective={metric_objective!r}. "
+            f"Expected one of {sorted(METRIC_OBJECTIVE_CHOICES)}."
+        )
+    return objective
 
 
 def _to_higher_is_better(perf_profiles: np.ndarray, score_direction: str) -> np.ndarray:
@@ -140,12 +152,15 @@ def train_siamese_regression_metric(
     seed: int = 42,
     similarity_target: str = "rank_cosine",
     score_direction: str = "higher_is_better",
+    metafeatures_are_preprocessed: bool = False,
+    metric_objective: str = "embedding_cosine",
 ) -> MetricModel:
     torch = _require_torch()
     import torch.nn as nn
     import torch.optim as optim
 
     np.random.seed(seed)
+    objective = _validate_metric_objective(metric_objective)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -162,7 +177,14 @@ def train_siamese_regression_metric(
     meta_aligned = metafeatures_df.loc[common_names]
     assert list(perf_aligned.columns) == list(meta_aligned.index)
 
-    mf_scaled = pd.DataFrame(meta_aligned).fillna(0).values.astype(np.float32)
+    if metafeatures_are_preprocessed:
+        mf_scaled = meta_aligned.to_numpy(dtype=np.float32, copy=True)
+        preprocessing_mode = "preprocessed_input"
+    else:
+        mf_imputed = SimpleImputer(strategy="mean").fit_transform(meta_aligned)
+        mf_scaled = MinMaxScaler().fit_transform(mf_imputed).astype(np.float32, copy=False)
+        preprocessing_mode = "mean_impute_minmax"
+    mf_scaled = np.nan_to_num(mf_scaled, nan=0.0, posinf=0.0, neginf=0.0)
     perf_profiles = perf_aligned.T.values
     S_perf = build_similarity_target_matrix(
         perf_profiles=perf_profiles,
@@ -188,8 +210,11 @@ def train_siamese_regression_metric(
         emb_i = emb_i / (emb_i.norm(dim=1, keepdim=True) + 1e-8)
         emb_j = emb_j / (emb_j.norm(dim=1, keepdim=True) + 1e-8)
 
-        x_pair = emb_i * emb_j
-        pred = projector(x_pair)
+        if objective == "embedding_cosine":
+            pred = (emb_i * emb_j).sum(dim=1, keepdim=True)
+        else:
+            x_pair = emb_i * emb_j
+            pred = projector(x_pair)
         loss = loss_fn(pred, y_pairs)
 
         optimizer.zero_grad()
@@ -202,6 +227,8 @@ def train_siamese_regression_metric(
         "embed_dim": embed_dim,
         "similarity_target": str(similarity_target),
         "score_direction": str(score_direction),
+        "metafeature_preprocessing": preprocessing_mode,
+        "metric_objective": objective,
     }
     return MetricModel(embedder=embedder, projector=projector, params=params)
 
