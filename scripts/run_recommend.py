@@ -252,6 +252,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--baseline-only",
+        choices=["off", "no_preprocessing", "autogluon_native"],
+        default="off",
+        help=(
+            "Skip ACORec entirely and just AutoGluon-evaluate a baseline on the same 0.6/0.2/0.2 "
+            "split/seed, for apples-to-apples comparison. 'no_preprocessing' = all-none pipeline "
+            "(onehot encoding only); 'autogluon_native' = raw data straight to AutoGluon."
+        ),
+    )
+    parser.add_argument(
         "--hybrid-select",
         action="store_true",
         help=(
@@ -1517,6 +1527,42 @@ def main() -> None:
                 print(f"  Auto option guard: {note}")
             test_dataset_df = X.copy()
             test_dataset_df["target"] = y
+
+            if args.baseline_only != "off":
+                from automl_aco.search.evaluation import evaluate_candidates_autogluon
+                if args.baseline_only == "autogluon_native":
+                    # Raw data straight to AutoGluon (identity pipeline: AG's own preprocessing only).
+                    base_cfg = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    base_cfg["encoding"] = "none"
+                    base_cfg["name"] = "autogluon_native"
+                else:
+                    base_cfg = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    base_cfg["encoding"] = "onehot"
+                    base_cfg["name"] = "no_preprocessing"
+                b_cfg, b_score, b_results, _b = evaluate_candidates_autogluon(
+                    dataset=test_dataset_df, target_column="target",
+                    candidate_configs=[base_cfg],
+                    time_limit_per_model=int(args.time_limit),
+                    autogluon_profile=str(args.autogluon_profile), verbose=args.verbose,
+                )
+                if b_cfg is None or not np.isfinite(b_score):
+                    raise RuntimeError(f"Baseline AutoGluon eval produced no valid result for {dataset_id}")
+                recommendation = {
+                    "dataset_id": dataset_id,
+                    "pipeline_config": b_cfg,
+                    "final_evaluation": {"method": "autogluon", "score": float(b_score)},
+                    "baseline_only": args.baseline_only,
+                }
+                _tag2 = str(dataset_id) if dataset_id is not None else ("single" if n_runs == 1 else f"run{run_idx}")
+                run_out = output_dir if n_runs == 1 else os.path.join(output_dir, f"dataset_{_tag2}")
+                os.makedirs(run_out, exist_ok=True)
+                with open(os.path.join(run_out, "recommendation.json"), "w", encoding="utf-8") as f:
+                    json.dump(recommendation, f, indent=2, default=str)
+                print(f"  [baseline-only:{args.baseline_only}] {dataset_id} -> autogluon test={b_score:.4f}")
+                run_summaries.append({"dataset_id": dataset_id, "final_score": float(b_score),
+                                      "autogluon_score": float(b_score), "status": "ok",
+                                      "elapsed_seconds": time.perf_counter() - run_start})
+                continue
 
             def _mf_func(_df, _dataset=dataset):
                 return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
