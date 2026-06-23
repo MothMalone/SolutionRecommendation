@@ -410,6 +410,70 @@ def build_pairwise_interaction_priors(
     return priors
 
 
+def compute_global_operator_prior(
+    performance_matrix: pd.DataFrame,
+    pipeline_configs: Sequence[Mapping[str, Any]],
+    options: Mapping[str, Sequence[str]],
+    score_direction: str = "higher_is_better",
+    baseline_name: str = "baseline",
+) -> Dict[str, np.ndarray]:
+    """Global, dataset-INDEPENDENT prior on operator quality, learned from the reference matrix.
+
+    For each (step, operator) it measures the marginal lift of pipelines using that operator over
+    the no-preprocessing baseline, averaged across ALL reference datasets, then min-max normalizes
+    per step to [0, 1]. This encodes facts like "svd/lof/pca usually hurt AutoGluon, zscore/
+    mutual_info usually help" robustly (averaged over ~900 datasets), independent of the noisy
+    per-dataset neighbor retrieval. It is leak-free: the reference matrix has the 24 eval IDs held
+    out before this is called.
+    """
+    cfg_map = {str(c["name"]): c for c in pipeline_configs if "name" in c}
+    P = performance_matrix.T.apply(pd.to_numeric, errors="coerce")  # datasets x pipelines
+    if str(score_direction).strip().lower() == "lower_is_better":
+        P = -P
+    base = P[baseline_name] if baseline_name in P.columns else P.mean(axis=1)
+
+    prior: Dict[str, np.ndarray] = {}
+    for step, operators in options.items():
+        vals = np.full(len(operators), np.nan, dtype=float)
+        for idx, operator in enumerate(operators):
+            target = base_operator_name(operator)
+            pipes = [p for p in P.columns if p in cfg_map and base_operator_name(cfg_map[p].get(step, "none")) == target]
+            if pipes:
+                vals[idx] = float((P[pipes].mean(axis=1) - base).mean())  # mean marginal lift vs baseline
+        finite = vals[np.isfinite(vals)]
+        if finite.size == 0:
+            prior[step] = np.ones(len(operators), dtype=float)
+            continue
+        vals[~np.isfinite(vals)] = float(np.min(finite))
+        lo, hi = float(np.min(vals)), float(np.max(vals))
+        prior[step] = np.ones(len(operators)) if hi - lo <= EPS else (vals - lo) / (hi - lo + EPS)
+    return prior
+
+
+def blend_eta_with_prior(
+    eta: Mapping[str, np.ndarray],
+    prior: Mapping[str, np.ndarray],
+    weight: float,
+    eta_floor: float = 0.05,
+) -> Dict[str, np.ndarray]:
+    """Convex blend of the neighbor heuristic eta with the global operator prior, then re-floor.
+
+    weight in [0,1]: 0 = pure neighbor transfer (original), 1 = pure global prior. The blend
+    stabilizes the weak/noisy neighbor signal with the robust global "which operators help
+    AutoGluon" signal, and suppresses operators that hurt AutoGluon on average.
+    """
+    w = float(min(max(weight, 0.0), 1.0))
+    out: Dict[str, np.ndarray] = {}
+    for step, e in eta.items():
+        e = np.asarray(e, dtype=float)
+        p = np.asarray(prior.get(step, np.ones_like(e)), dtype=float)
+        if p.shape != e.shape:
+            out[step] = e
+            continue
+        out[step] = (1.0 - w) * e + w * p
+    return normalize_eta_with_floor(out, eta_floor=eta_floor)
+
+
 def normalize_eta_with_floor(raw_eta: Mapping[str, np.ndarray], eta_floor: float = 0.05) -> Dict[str, np.ndarray]:
     floor = float(eta_floor)
     if not np.isfinite(floor):

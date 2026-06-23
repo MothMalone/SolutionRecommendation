@@ -230,11 +230,16 @@ def evaluate_candidates_autogluon(
     autogluon_profile: str = "best_quality",
     verbose: bool = False,
     select_on_val: bool = False,
+    select_default_name: Optional[str] = None,
+    select_margin: float = 0.0,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     # When select_on_val is True, every candidate is trained on the train split and scored on the
     # VALIDATION split for SELECTION; the winner's TEST score is reported. This is the leak-free way
-    # to choose among candidates (e.g. ACO pipeline vs no-preprocessing) without selecting on test,
-    # and it is the mechanism that protects against over-preprocessing.
+    # to choose among candidates (e.g. ACO pipeline vs no-preprocessing) without selecting on test.
+    # select_default_name marks a SAFE default candidate (e.g. "no_preprocessing"); a non-default
+    # candidate is only chosen when it beats the default on validation by >= select_margin. This
+    # biases toward the safe baseline so a search pipeline that only marginally wins on val (noise)
+    # cannot lose on test — the anti-over-preprocessing guard.
     try:
         import numpy as _np
         ver = _np.__version__.split(".")
@@ -383,16 +388,34 @@ def evaluate_candidates_autogluon(
 
     unsorted_res = results.copy()
     if select_on_val and any(v is not None for v in val_scores.values()):
-        # Pick the candidate with the best VALIDATION score (leak-free selection); report its TEST
-        # score. Missing val scores fall back to the test score so a candidate is always chosen.
+        # Leak-free selection on the validation split; report the chosen candidate's TEST score.
+        def _vof(cfg):
+            v = val_scores.get(cfg.get("name"))
+            return v if v is not None else -np.inf
+
         def _sel_key(item):
             cfg, test_score = item
-            v = val_scores.get(cfg.get("name"))
-            return (v if v is not None else -np.inf, test_score)
+            return (_vof(cfg), test_score)
+
         results_sorted = sorted(results, key=_sel_key, reverse=True)
-        best_cfg, best_score = results_sorted[0]
+        default_item = None
+        if select_default_name is not None:
+            default_item = next((it for it in results if it[0].get("name") == select_default_name), None)
+
+        if default_item is not None and val_scores.get(select_default_name) is not None:
+            default_val = float(val_scores[select_default_name])
+            best_non_default = next((it for it in results_sorted if it[0].get("name") != select_default_name), None)
+            if best_non_default is not None and (_vof(best_non_default[0]) - default_val) >= float(select_margin):
+                best_cfg, best_score = best_non_default
+                reason = f"search beats default by >= margin {float(select_margin):.4f}"
+            else:
+                best_cfg, best_score = default_item
+                reason = f"default '{select_default_name}' kept (no clear search win, margin {float(select_margin):.4f})"
+        else:
+            best_cfg, best_score = results_sorted[0]
+            reason = "best val (no default)"
         if verbose:
-            print(f"    [hybrid-select] chose {best_cfg.get('name')} by val; reporting its test={best_score:.4f}")
+            print(f"    [hybrid-select] {reason}: chose {best_cfg.get('name')}; reporting test={best_score:.4f}")
         return best_cfg, best_score, results_sorted, unsorted_res
     results.sort(key=lambda x: x[1], reverse=True)
     best_cfg, best_score = results[0]

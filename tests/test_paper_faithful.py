@@ -1,8 +1,13 @@
 """Paper-faithful component tests: Eq 7 flat average, MMAS bounds, ACO diagnostics."""
 import numpy as np
+import pandas as pd
 import pytest
 
-from automl_aco.search.heuristics import aggregate_operator_heuristics_flat
+from automl_aco.search.heuristics import (
+    aggregate_operator_heuristics_flat,
+    compute_global_operator_prior,
+    blend_eta_with_prior,
+)
 from automl_aco.search.aco import (
     _normalized_entropy,
     _resolve_mmas_bounds,
@@ -51,6 +56,36 @@ def test_flat_average_unweighted_differs_from_quality_weighting():
 
 
 # ---- MMAS bounds (Eq 9/10 + Min-Max) ----
+
+def test_global_operator_prior_suppresses_harmful_operators():
+    # Reference matrix where, vs baseline, pipeline with svd scores lower and with zscore higher.
+    perf = pd.DataFrame(
+        {
+            "d1": {"baseline": 0.80, "use_svd": 0.70, "use_zscore": 0.88},
+            "d2": {"baseline": 0.60, "use_svd": 0.50, "use_zscore": 0.66},
+        }
+    )
+    configs = [
+        {"name": "baseline", "dimensionality_reduction": "none", "outlier_removal": "none"},
+        {"name": "use_svd", "dimensionality_reduction": "svd", "outlier_removal": "none"},
+        {"name": "use_zscore", "dimensionality_reduction": "none", "outlier_removal": "zscore"},
+    ]
+    options = {"dimensionality_reduction": ["none", "svd"], "outlier_removal": ["none", "zscore"]}
+    prior = compute_global_operator_prior(perf, configs, options)
+    # svd hurts -> floor (0); none for dimred is best -> 1
+    assert prior["dimensionality_reduction"][1] < prior["dimensionality_reduction"][0]
+    # zscore helps -> higher than none
+    assert prior["outlier_removal"][1] > prior["outlier_removal"][0]
+
+
+def test_blend_eta_with_prior_interpolates_and_floors():
+    eta = {"s": np.array([1.0, 1.0, 1.0])}        # neighbor signal: flat
+    prior = {"s": np.array([1.0, 0.5, 0.0])}      # global: 3rd op is harmful
+    blended = blend_eta_with_prior(eta, prior, weight=0.5, eta_floor=0.05)
+    # weight 0.5 -> harmful operator pulled down below the others
+    assert blended["s"][2] < blended["s"][0]
+    assert blended["s"].min() >= 0.05 - 1e-9
+
 
 def test_resolve_mmas_bounds_auto():
     tmin, tmax = _resolve_mmas_bounds(0.2, None, None, 0.05)

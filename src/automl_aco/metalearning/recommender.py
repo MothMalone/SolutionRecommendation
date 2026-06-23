@@ -19,7 +19,13 @@ from ..metalearning.dqn_policy import (
     WarmStartOrderPolicy,
     build_action_offsets,
 )
-from ..search.heuristics import compute_aco_heuristic, compute_aco_interaction_priors, select_top_k_neighbors
+from ..search.heuristics import (
+    compute_aco_heuristic,
+    compute_aco_interaction_priors,
+    select_top_k_neighbors,
+    compute_global_operator_prior,
+    blend_eta_with_prior,
+)
 from ..search.aco import search_pipelines_aco
 from ..search.optimizers import search_pipelines_with_optimizer
 from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
@@ -375,33 +381,64 @@ class MetaPipelineRecommender:
         tau_min: Optional[float] = None,
         tau_max: Optional[float] = None,
         tau_min_ratio: float = 0.05,
+        no_warm_start: bool = False,
+        global_prior_weight: float = 0.0,
     ):
-        eta = self._compute_aco_heuristic(
-            new_metafeatures,
-            options,
-            dataset_weighting=dataset_weighting,
-            top_k=max(1, int(heuristic_top_k)),
-            use_top_pipelines_from_metric=True,
-            recommend_kwargs={
-                "new_dataset": new_dataset,
-                "target_column": target_column,
-                "options": options,
-                "k": 5,
-                "eval_k": 3,
-                "use_aco": False,
-                "time_limit_per_model": time_limit_per_model,
-                "use_autogluon": False,
-                "metafeatures_func": metafeatures_func,
-            },
-            top_l=max(1, int(heuristic_top_l)),
-            similarity_temperature=float(heuristic_similarity_temperature),
-            eta_floor=float(heuristic_eta_floor),
-            heuristic_transfer_method=str(heuristic_transfer_method),
-            score_direction=str(score_direction),
-            query_dataset_id=query_dataset_id,
-        )
-        if self.verbose:
-            print("Phase 3 handoff: received transferred eta_norm for ACO sampling.")
+        if no_warm_start:
+            # RQ2 heuristic-transfer ablation: replace the transferred heuristic with a UNIFORM
+            # distribution (no prior bias). Pr(o|s) then depends on pheromone only (eta^beta is
+            # constant), i.e. ACO searches from scratch without the warm-start.
+            eta = {step: np.ones(len(vals), dtype=float) for step, vals in options.items()}
+            if self.verbose:
+                print("Phase 3 handoff: NO warm-start (uniform eta) [RQ2 ablation].")
+        else:
+            eta = self._compute_aco_heuristic(
+                new_metafeatures,
+                options,
+                dataset_weighting=dataset_weighting,
+                top_k=max(1, int(heuristic_top_k)),
+                use_top_pipelines_from_metric=True,
+                recommend_kwargs={
+                    "new_dataset": new_dataset,
+                    "target_column": target_column,
+                    "options": options,
+                    "k": 5,
+                    "eval_k": 3,
+                    "use_aco": False,
+                    "time_limit_per_model": time_limit_per_model,
+                    "use_autogluon": False,
+                    "metafeatures_func": metafeatures_func,
+                },
+                top_l=max(1, int(heuristic_top_l)),
+                similarity_temperature=float(heuristic_similarity_temperature),
+                eta_floor=float(heuristic_eta_floor),
+                heuristic_transfer_method=str(heuristic_transfer_method),
+                score_direction=str(score_direction),
+                query_dataset_id=query_dataset_id,
+            )
+            if self.verbose:
+                print("Phase 3 handoff: received transferred eta_norm for ACO sampling.")
+
+            if float(global_prior_weight) > 0.0:
+                # Blend in the global, dataset-independent operator-quality prior learned from the
+                # reference matrix (suppresses operators that hurt AutoGluon on average; stabilizes
+                # the weak neighbor signal). Leak-free: performance_matrix has eval IDs held out.
+                try:
+                    prior = compute_global_operator_prior(
+                        performance_matrix=self.performance_matrix,
+                        pipeline_configs=self.pipeline_configs,
+                        options=options,
+                        score_direction=str(score_direction),
+                    )
+                    eta = blend_eta_with_prior(
+                        eta, prior, weight=float(global_prior_weight),
+                        eta_floor=float(heuristic_eta_floor),
+                    )
+                    if self.verbose:
+                        print(f"Phase 3 handoff: blended global operator prior (weight={float(global_prior_weight):.2f}).")
+                except Exception as exc:
+                    if self.verbose:
+                        print(f"Global operator prior skipped: {exc}")
 
         interaction_priors = None
         if float(interaction_prior_strength) > 0.0:
@@ -888,6 +925,8 @@ class MetaPipelineRecommender:
         time_limit_per_model=300,
         autogluon_profile: str = "best_quality",
         select_on_val: bool = False,
+        select_default_name: Optional[str] = None,
+        select_margin: float = 0.0,
     ):
         return evaluate_candidates_autogluon(
             dataset=dataset,
@@ -897,6 +936,8 @@ class MetaPipelineRecommender:
             autogluon_profile=autogluon_profile,
             verbose=self.verbose,
             select_on_val=select_on_val,
+            select_default_name=select_default_name,
+            select_margin=select_margin,
         )
 
     def _evaluate_candidates_with_simple_models(
@@ -1689,6 +1730,7 @@ class MetaPipelineRecommender:
             retrieval_local_protected_candidates: List[Dict[str, Any]] = []
             protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
             hybrid_select = bool(aco_params.get("hybrid_select", False))
+            hybrid_select_margin = float(aco_params.get("hybrid_select_margin", 0.0))
             retrieval_incumbent_candidates: List[Dict[str, Any]] = []
             retrieval_incumbent_names: List[str] = []
             retrieval_incumbent_neighbors: List[Tuple[Any, float]] = []
@@ -1825,6 +1867,8 @@ class MetaPipelineRecommender:
                             tau_min=aco_params.get("tau_min"),
                             tau_max=aco_params.get("tau_max"),
                             tau_min_ratio=float(aco_params.get("tau_min_ratio", 0.05)),
+                            no_warm_start=bool(aco_params.get("no_warm_start", False)),
+                            global_prior_weight=float(aco_params.get("global_prior_weight", 0.0)),
                             dataset_weighting=str(aco_params.get("dataset_weighting", "similarity")),
                             heuristic_top_k=int(aco_params.get("heuristic_top_k", k)),
                             heuristic_top_l=int(aco_params.get("heuristic_top_l", 3)),
@@ -2112,6 +2156,8 @@ class MetaPipelineRecommender:
                             time_limit_per_model=time_limit_per_model,
                             autogluon_profile=autogluon_profile,
                             select_on_val=hybrid_select,
+                            select_default_name="no_preprocessing" if hybrid_select else None,
+                            select_margin=hybrid_select_margin,
                         )
                         if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
                             best_pipeline = ag_best_cfg

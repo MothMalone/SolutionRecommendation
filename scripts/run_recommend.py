@@ -262,12 +262,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-warm-start",
+        action="store_true",
+        help="RQ2 heuristic-transfer ablation: uniform eta (no warm-start); ACO searches from scratch.",
+    )
+    parser.add_argument(
+        "--global-prior-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Blend weight [0,1] for the global operator-quality prior learned from the reference "
+            "matrix (suppresses operators that hurt AutoGluon on average, e.g. svd/lof/pca/knn). "
+            "0 = neighbor transfer only; 0.3-0.5 stabilizes the weak neighbor signal. Leak-free."
+        ),
+    )
+    parser.add_argument(
         "--hybrid-select",
         action="store_true",
         help=(
             "Overprocessing guard: add the no-preprocessing baseline as a final candidate and pick "
             "the winner by AutoGluon on the held-out VALIDATION split (leak-free), reporting its TEST "
             "score. Fixes cases where no-search beats search. Recommended for the strong config."
+        ),
+    )
+    parser.add_argument(
+        "--hybrid-select-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "Validation margin for --hybrid-select: only override the no-preprocessing baseline when "
+            "the search pipeline beats it on validation by >= this much; otherwise keep the baseline. "
+            "A small positive value (e.g. 0.01) makes ACORec rarely lose to no-preprocessing."
         ),
     )
     parser.add_argument(
@@ -790,6 +815,15 @@ def main() -> None:
             args.aco_mmas_bounds = True  # paper claims MMAS; bounds are its defining mechanism
         if not args.metric_path:
             args.train_metric_inline = True
+
+    # Avoid the silent cosine fallback: if the user tuned any Siamese-training flag, they intend to
+    # USE the learned metric, so enable inline training (unless a saved metric or explicit opt-out).
+    _metric_train_flags = ("--metric-loss", "--metric-weight-decay", "--metric-objective",
+                           "--metric-similarity-target", "--metric-epochs", "--metric-hidden-dim",
+                           "--metric-embed-dim", "--metric-lr")
+    if (not args.metric_path and not args.no_train_metric_inline
+            and any(_cli_flag_was_passed(f) for f in _metric_train_flags)):
+        args.train_metric_inline = True
 
     if args.no_train_metric_inline:
         args.train_metric_inline = False
@@ -1594,6 +1628,9 @@ def main() -> None:
                     "interaction_prior_floor": float(args.interaction_prior_floor),
                     "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
                     "hybrid_select": bool(args.hybrid_select),
+                    "hybrid_select_margin": float(args.hybrid_select_margin),
+                    "no_warm_start": bool(args.no_warm_start),
+                    "global_prior_weight": float(args.global_prior_weight),
                     "retrieval_incumbent_topk": int(args.retrieval_incumbent_topk or args.eval_k),
                     "early_stop_rounds": int(args.aco_early_stop_rounds),
                     "min_improvement": float(args.aco_min_improvement),
