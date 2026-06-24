@@ -286,6 +286,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--cv-select-folds",
+        type=int,
+        default=0,
+        help=(
+            "Select the final pipeline by k-fold cross-validation (low-variance signal) instead of a "
+            "single validation split, then report the chosen pipeline's held-out test score. Cures the "
+            "winner's curse. Requires --hybrid-select. Cost ~(k+1) AutoGluon fits/candidate; use with "
+            "--final-autogluon-topk 1 to keep it affordable. 0 = off; 3 is a good default."
+        ),
+    )
+    parser.add_argument(
         "--hybrid-select-margin",
         type=float,
         default=0.0,
@@ -1629,6 +1640,7 @@ def main() -> None:
                     "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
                     "hybrid_select": bool(args.hybrid_select),
                     "hybrid_select_margin": float(args.hybrid_select_margin),
+                    "cv_select_folds": int(args.cv_select_folds),
                     "no_warm_start": bool(args.no_warm_start),
                     "global_prior_weight": float(args.global_prior_weight),
                     "retrieval_incumbent_topk": int(args.retrieval_incumbent_topk or args.eval_k),

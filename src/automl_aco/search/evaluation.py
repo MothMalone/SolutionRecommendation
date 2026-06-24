@@ -692,3 +692,132 @@ def evaluate_candidates_simple(
     results.sort(key=lambda x: x[1], reverse=True)
     best_cfg, best_score = results[0]
     return best_cfg, best_score, results, unsorted_res
+
+
+def evaluate_candidates_autogluon_cv(
+    dataset: Any,
+    target_column: str,
+    candidate_configs: List[Dict[str, Any]],
+    n_folds: int = 3,
+    time_limit_per_model: int = 300,
+    autogluon_profile: str = "best_quality",
+    select_default_name: Optional[str] = None,
+    select_margin: float = 0.0,
+    seed: int = 42,
+    verbose: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
+    """Select the pipeline by k-fold cross-validation (low-variance signal), report its TEST score.
+
+    The test split (20%) is held out and used ONLY to report the chosen pipeline's score. Selection
+    uses k-fold CV over the remaining 80%, which is a far less noisy estimate of each candidate's true
+    AutoGluon quality than a single validation split — so a pipeline that merely got lucky on one split
+    cannot win, and a genuinely-better pipeline (winning across folds) does. This is the principled cure
+    for the winner's curse; cost is (k+1) AutoGluon fits per candidate, kept affordable by topk=1.
+    """
+    try:
+        import numpy as _np
+        if int(_np.__version__.split(".")[0]) >= 2:
+            raise RuntimeError("AutoGluon requires NumPy < 2.0; please install numpy<2")
+        from autogluon.tabular import TabularPredictor  # type: ignore
+        from autogluon.features.generators import IdentityFeatureGenerator  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("AutoGluon not available in environment") from exc
+    from sklearn.model_selection import StratifiedKFold, KFold
+
+    df = _normalize_dataset(dataset, target_column)
+    y_all = df[target_column]
+    problem_type, eval_metric = _detect_problem_type(y_all)
+    X = df.drop(columns=[target_column]).copy()
+    y = df[target_column].copy()
+    X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=seed)
+    # 80% selection pool (train+val); test held out for reporting only.
+    X_fit = pd.concat([X_train, X_val], ignore_index=True)
+    y_fit = pd.concat([y_train, y_val], ignore_index=True)
+    y_test = y_test.reset_index(drop=True)
+
+    metric_fn = r2_score if problem_type == "regression" else accuracy_score
+    k = max(2, int(n_folds))
+    if problem_type == "regression":
+        splitter = KFold(n_splits=k, shuffle=True, random_state=seed)
+        folds = list(splitter.split(X_fit))
+    else:
+        # guard against folds that drop a class on tiny data
+        min_class = int(pd.Series(y_fit).value_counts().min())
+        k = max(2, min(k, min_class))
+        splitter = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
+        folds = list(splitter.split(X_fit, y_fit))
+
+    def _ag_score(train_X, train_y, eval_X, eval_y):
+        tr = train_X.copy(); tr[target_column] = pd.Series(train_y).reset_index(drop=True)
+        preds, _sel, issue = _fit_predict_with_autogluon(
+            TabularPredictor=TabularPredictor, IdentityFeatureGenerator=IdentityFeatureGenerator,
+            train_df=tr, test_df=eval_X, target_column=target_column, problem_type=problem_type,
+            eval_metric=eval_metric, time_limit_per_model=time_limit_per_model,
+            verbosity=0, autogluon_profile=autogluon_profile,
+        )
+        if issue == "no_models_fitted" or preds is None:
+            return None
+        return float(metric_fn(pd.Series(eval_y).reset_index(drop=True), preds))
+
+    cv_scores: Dict[str, float] = {}
+    test_scores: Dict[str, float] = {}
+    results: List[Tuple[Dict[str, Any], float]] = []
+    for cfg in candidate_configs:
+        if "name" not in cfg or cfg.get("name") is None:
+            cfg["name"] = str(cfg)
+        name = cfg["name"]
+        try:
+            fold_scores: List[float] = []
+            for tr_idx, va_idx in folds:
+                pre = _make_preprocessor(cfg)
+                res = pre.fit_transform(X_fit.iloc[tr_idx].reset_index(drop=True), y_fit.iloc[tr_idx].reset_index(drop=True))
+                Xtr_p, ytr_p = res if isinstance(res, tuple) else (res, y_fit.iloc[tr_idx].reset_index(drop=True))
+                Xva_p = pre.transform(X_fit.iloc[va_idx].reset_index(drop=True))
+                if Xtr_p.shape[0] == 0 or Xva_p.shape[0] == 0:
+                    continue
+                s = _ag_score(Xtr_p, ytr_p, Xva_p, y_fit.iloc[va_idx])
+                if s is not None:
+                    fold_scores.append(s)
+            if not fold_scores:
+                continue
+            cv_scores[name] = float(np.mean(fold_scores))
+            # test score: fit on full 80%, predict held-out test
+            pre = _make_preprocessor(cfg)
+            res = pre.fit_transform(X_fit, y_fit)
+            Xfit_p, yfit_p = res if isinstance(res, tuple) else (res, y_fit)
+            Xtest_p = pre.transform(X_test)
+            ts = _ag_score(Xfit_p, yfit_p, Xtest_p, y_test)
+            if ts is None:
+                continue
+            test_scores[name] = ts
+            results.append((cfg, ts))
+            if verbose:
+                print(f"    [cv-select] {name}: cv={cv_scores[name]:.4f} test={ts:.4f}")
+        except Exception as exc:
+            if verbose:
+                print(f"    [cv-select] error on {name}: {exc}")
+            continue
+
+    if not results:
+        return None, np.nan, [], []
+
+    # choose by CV score, with a safe default + margin (same policy as hybrid-select)
+    def _cv(cfg):
+        v = cv_scores.get(cfg.get("name"))
+        return v if v is not None else -np.inf
+    ranked = sorted(results, key=lambda it: (_cv(it[0]), it[1]), reverse=True)
+    default_item = None
+    if select_default_name is not None:
+        default_item = next((it for it in results if it[0].get("name") == select_default_name), None)
+    if default_item is not None and cv_scores.get(select_default_name) is not None:
+        dval = float(cv_scores[select_default_name])
+        best_nd = next((it for it in ranked if it[0].get("name") != select_default_name), None)
+        if best_nd is not None and (_cv(best_nd[0]) - dval) >= float(select_margin):
+            best_cfg, best_score = best_nd
+        else:
+            best_cfg, best_score = default_item
+    else:
+        best_cfg, best_score = ranked[0]
+    if verbose:
+        print(f"    [cv-select] chose {best_cfg.get('name')} by {k}-fold CV; reporting test={best_score:.4f}")
+    return best_cfg, best_score, ranked, results

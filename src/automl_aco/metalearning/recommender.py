@@ -28,7 +28,7 @@ from ..search.heuristics import (
 )
 from ..search.aco import search_pipelines_aco
 from ..search.optimizers import search_pipelines_with_optimizer
-from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon
+from ..search.evaluation import evaluate_candidates_simple, evaluate_candidates_autogluon, evaluate_candidates_autogluon_cv
 from ..search.ordering import OrderSearchConfig, all_topological_orders, heuristic_score_order, propose_orders
 from ..utils.operator_spec import base_operator_name
 
@@ -927,7 +927,22 @@ class MetaPipelineRecommender:
         select_on_val: bool = False,
         select_default_name: Optional[str] = None,
         select_margin: float = 0.0,
+        cv_select_folds: int = 0,
+        seed: int = 42,
     ):
+        if int(cv_select_folds) and int(cv_select_folds) > 1:
+            return evaluate_candidates_autogluon_cv(
+                dataset=dataset,
+                target_column=target_column,
+                candidate_configs=candidate_configs,
+                n_folds=int(cv_select_folds),
+                time_limit_per_model=time_limit_per_model,
+                autogluon_profile=autogluon_profile,
+                select_default_name=select_default_name,
+                select_margin=select_margin,
+                seed=int(seed),
+                verbose=self.verbose,
+            )
         return evaluate_candidates_autogluon(
             dataset=dataset,
             target_column=target_column,
@@ -1731,6 +1746,7 @@ class MetaPipelineRecommender:
             protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
             hybrid_select = bool(aco_params.get("hybrid_select", False))
             hybrid_select_margin = float(aco_params.get("hybrid_select_margin", 0.0))
+            cv_select_folds = int(aco_params.get("cv_select_folds", 0))
             retrieval_incumbent_candidates: List[Dict[str, Any]] = []
             retrieval_incumbent_names: List[str] = []
             retrieval_incumbent_neighbors: List[Tuple[Any, float]] = []
@@ -2158,6 +2174,8 @@ class MetaPipelineRecommender:
                             select_on_val=hybrid_select,
                             select_default_name="no_preprocessing" if hybrid_select else None,
                             select_margin=hybrid_select_margin,
+                            cv_select_folds=cv_select_folds,
+                            seed=int(aco_params.get("seed", 42)),
                         )
                         if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
                             best_pipeline = ag_best_cfg
