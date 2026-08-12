@@ -74,15 +74,29 @@ convergence never fires the dataset is killed and retried with an explicit budge
 flags it. Set `ag_time_limit` to the same AutoGluon `--time-limit` your own runs used, or the
 comparison is not compute-matched.
 
-Kaggle (internet on, so stage 1 can reach OpenML):
+Kaggle. The repo arrives as a read-only dataset, so copy it to `/kaggle/working` first, and install
+AutoGluon the way the ACORec runs do — `--target` plus `PYTHONPATH`:
 
 ```python
-!cd /kaggle/working/SolutionRecommendation && bash scripts/setup_autodp_env.sh
+!mkdir -p /kaggle/working/repo && cp -r /kaggle/input/datasets/<user>/<slug>/. /kaggle/working/repo/
+%cd /kaggle/working/repo
+!bash scripts/setup_autodp_env.sh
+!pip install -q --target=/kaggle/working/acorec_deps "numpy<2" "pandas<3" autogluon.tabular==1.5.0 openml
 
-# MAIN_PY=python -> Kaggle's own env, which already has AutoGluon
-!cd /kaggle/working/SolutionRecommendation && \
-  MAIN_PY=python bash scripts/run_autodatapre_all.sh outputs/autodp 1800 300
+!PYTHONPATH=/kaggle/working/acorec_deps MAIN_PY=python \
+  bash scripts/run_autodatapre_all.sh outputs/autodp 600 300
 ```
+
+`PYTHONPATH` is applied **per stage**, never exported globally: main-env stages get
+`src:$PYTHONPATH`, while the AutoDP stage gets `src` alone. That separation is load-bearing —
+`PYTHONPATH` outranks a venv's own site-packages, so exporting `acorec_deps` globally would pull
+numpy>=1.26 and pandas 2.x into `.venv-autodp` and break AutoDP.
+
+Without internet, stage 1 falls back to any `<id>.csv` it can find: it walks `/kaggle/input`,
+`data/openml` and `test_data_local` automatically (`--openml-local-folder` / `--local-root` to add
+your own), and prints the file and label column it picked per dataset. Note that a third-party CSV
+mirror is not guaranteed to match the OpenML API's rows or column order — if your own scores came
+from the API, enable Internet so both sides use the same source.
 
 The batch is **resumable** — any dataset with an `autodp_eval.json` is skipped — so if a Kaggle
 session times out, rerun the same command and it continues. Per-dataset logs land in

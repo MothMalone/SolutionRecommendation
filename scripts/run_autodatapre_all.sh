@@ -32,6 +32,7 @@ TL="${3:-300}"
 MODES="${4:-native fair}"
 IDS="${5:-248 1066 1164 1047 862 2 40663 1054 1387 876 18 1520 1548 184 378 381 382 993 1485 14 27 29 31}"
 
+AG_PROFILE="${AG_PROFILE:-best_quality}"   # match whatever your own runs used
 MAIN_PY="${MAIN_PY:-.venv/bin/python}"
 ADP_PY="${ADP_PY:-.venv-autodp/bin/python}"
 DATA_DIR="${DATA_DIR:-data/eval_datasets}"
@@ -39,18 +40,31 @@ DATA_DIR="${DATA_DIR:-data/eval_datasets}"
 command -v "$MAIN_PY" >/dev/null 2>&1 || { echo "FATAL: no main python at '$MAIN_PY'. On Kaggle: MAIN_PY=python bash $0 ..."; exit 1; }
 command -v "$ADP_PY"  >/dev/null 2>&1 || { echo "FATAL: no AutoDP python at '$ADP_PY' -- run: bash scripts/setup_autodp_env.sh"; exit 1; }
 
+# PYTHONPATH is set PER STAGE, never exported globally. On Kaggle the main env typically gets
+# AutoGluon via `pip install --target=/kaggle/working/acorec_deps` + PYTHONPATH, and PYTHONPATH
+# takes precedence over a venv's own site-packages -- so exporting that path would drag numpy>=1.26
+# and pandas 2.x into .venv-autodp and break AutoDP, which needs numpy<1.24 / pandas<2.0.
+USER_PYTHONPATH="${PYTHONPATH:-}"
+MAIN_PYTHONPATH="src${USER_PYTHONPATH:+:$USER_PYTHONPATH}"   # our package + whatever you provide
+ADP_PYTHONPATH="src"                                          # our package only; deps come from the venv
+unset PYTHONPATH
+
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+export MPLBACKEND=Agg
+
 # Preflight: stage 3 needs AutoGluon in the MAIN env. Without this the batch happily burns hours
 # preparing datasets it can never score, failing identically on every one of them.
-if ! "$MAIN_PY" -c "import autogluon.tabular" >/dev/null 2>&1; then
+if ! PYTHONPATH="$MAIN_PYTHONPATH" "$MAIN_PY" -c "import autogluon.tabular" >/dev/null 2>&1; then
   echo "FATAL: '$MAIN_PY' cannot import autogluon.tabular, so stage 3 would fail on every dataset."
-  echo "       Install it in the main environment first, e.g.:  pip install autogluon.tabular"
-  "$MAIN_PY" -c "import autogluon.tabular" 2>&1 | tail -3
+  echo "       PYTHONPATH for main-env stages is: ${MAIN_PYTHONPATH}"
+  echo "       If you install AutoGluon with --target, export that dir first, e.g.:"
+  echo "         pip install --target=/kaggle/working/acorec_deps 'numpy<2' 'pandas<3' autogluon.tabular==1.5.0"
+  echo "         PYTHONPATH=/kaggle/working/acorec_deps MAIN_PY=python bash $0 $*"
+  PYTHONPATH="$MAIN_PYTHONPATH" "$MAIN_PY" -c "import autogluon.tabular" 2>&1 | tail -3
   exit 1
 fi
 
 mkdir -p "$OUT"
-export PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
-export MPLBACKEND=Agg
 
 echo "=== stage 1: exporting datasets ==="
 # Without internet the OpenML API is unreachable and the loader returns nothing. Point
@@ -61,8 +75,8 @@ if [ -n "${OPENML_LOCAL_FOLDER:-}" ]; then
   echo "  (local OpenML fallback: $OPENML_LOCAL_FOLDER)"
   EXPORT_ARGS="--openml-local-folder $OPENML_LOCAL_FOLDER"
 fi
-"$MAIN_PY" scripts/export_eval_datasets.py --ids "$IDS" --out-dir "$DATA_DIR" --verbose \
-  $EXPORT_ARGS 2>&1 | tee -a "$OUT/export.log"
+PYTHONPATH="$MAIN_PYTHONPATH" "$MAIN_PY" scripts/export_eval_datasets.py \
+  --ids "$IDS" --out-dir "$DATA_DIR" --verbose $EXPORT_ARGS 2>&1 | tee -a "$OUT/export.log"
 
 for MODE in $MODES; do
   for ID in $IDS; do
@@ -78,7 +92,7 @@ for MODE in $MODES; do
 
     if [ ! -f "$DDIR/autodp_meta.json" ]; then
       echo "[prep] $ID ($MODE)  ($(date +%H:%M:%S))"
-      "$ADP_PY" scripts/run_autodatapre.py \
+      PYTHONPATH="$ADP_PYTHONPATH" "$ADP_PY" scripts/run_autodatapre.py \
         --dataset-csv "$CSV" --dataset-id "$ID" --mode "$MODE" \
         --cap-seconds "$CAP" --seed 42 --out-dir "$OUT" >> "$LOG" 2>&1
       if [ $? -ne 0 ]; then
@@ -87,9 +101,9 @@ for MODE in $MODES; do
     fi
 
     echo "[eval] $ID ($MODE)  ($(date +%H:%M:%S))"
-    "$MAIN_PY" scripts/eval_autodatapre.py \
+    PYTHONPATH="$MAIN_PYTHONPATH" "$MAIN_PY" scripts/eval_autodatapre.py \
       --dataset-csv "$CSV" --prepared-dir "$DDIR" \
-      --time-limit "$TL" --autogluon-profile best_quality --seed 42 >> "$LOG" 2>&1
+      --time-limit "$TL" --autogluon-profile "$AG_PROFILE" --seed 42 >> "$LOG" 2>&1
     if [ $? -ne 0 ]; then
       echo "[FAIL] $ID ($MODE): AutoGluon stage failed, see $LOG"; continue
     fi
@@ -98,5 +112,5 @@ for MODE in $MODES; do
 done
 
 echo "=== stage 4: report ==="
-"$MAIN_PY" scripts/report_autodatapre.py --input-dir "$OUT" || true
+PYTHONPATH="$MAIN_PYTHONPATH" "$MAIN_PY" scripts/report_autodatapre.py --input-dir "$OUT" || true
 echo "=== ALL DONE -> $OUT/AUTODP_REPORT.md ==="
