@@ -39,6 +39,15 @@ DATA_DIR="${DATA_DIR:-data/eval_datasets}"
 command -v "$MAIN_PY" >/dev/null 2>&1 || { echo "FATAL: no main python at '$MAIN_PY'. On Kaggle: MAIN_PY=python bash $0 ..."; exit 1; }
 command -v "$ADP_PY"  >/dev/null 2>&1 || { echo "FATAL: no AutoDP python at '$ADP_PY' -- run: bash scripts/setup_autodp_env.sh"; exit 1; }
 
+# Preflight: stage 3 needs AutoGluon in the MAIN env. Without this the batch happily burns hours
+# preparing datasets it can never score, failing identically on every one of them.
+if ! "$MAIN_PY" -c "import autogluon.tabular" >/dev/null 2>&1; then
+  echo "FATAL: '$MAIN_PY' cannot import autogluon.tabular, so stage 3 would fail on every dataset."
+  echo "       Install it in the main environment first, e.g.:  pip install autogluon.tabular"
+  "$MAIN_PY" -c "import autogluon.tabular" 2>&1 | tail -3
+  exit 1
+fi
+
 mkdir -p "$OUT"
 export PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 export MPLBACKEND=Agg

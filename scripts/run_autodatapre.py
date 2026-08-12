@@ -276,14 +276,19 @@ def main() -> None:
         return
 
     ctx = mp.get_context("spawn")  # torch + sklearn are not fork-safe on macOS
-    for attempt, runtime in enumerate([args.runtime, args.cap_seconds]):
+    # The retry budget is HALF the cap, not the cap itself: AutoDP still has to apply the winning
+    # pipeline and merge the frames after its search loop ends, and on a large dataset that tail
+    # can exceed whatever slack is left, which just burns the cap a second time. Worst case per
+    # dataset is therefore ~1.5x cap_seconds rather than ~2.25x.
+    retry_runtime = args.cap_seconds / 2.0
+    for attempt, runtime in enumerate([args.runtime, retry_runtime]):
         if attempt == 1:
             print(f"[warn] {did} ({args.mode}) exceeded the {args.cap_seconds:.0f}s cap; "
-                  f"retrying with an explicit runTime={args.cap_seconds:.0f}s budget", flush=True)
+                  f"retrying with an explicit runTime={retry_runtime:.0f}s budget", flush=True)
         proc = ctx.Process(target=_worker, args=(args.dataset_csv, args.target, args.mode, runtime,
                                                  args.seed, out_dir))
         proc.start()
-        proc.join(timeout=args.cap_seconds * 1.25 if attempt else args.cap_seconds)
+        proc.join(timeout=args.cap_seconds)
         if proc.is_alive():
             proc.terminate()
             proc.join(30)
