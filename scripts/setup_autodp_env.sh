@@ -13,9 +13,14 @@
 #
 # Usage:  bash scripts/setup_autodp_env.sh
 set -euo pipefail
-cd "$(dirname "$0")/.."
 
-VENV=".venv-autodp"
+# Do NOT cd into the repo: when it is mounted as a read-only Kaggle dataset the venv cannot be
+# created there. Set ADP_VENV to a writable location, e.g. ADP_VENV=/kaggle/working/adpenv.
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+VENV="${ADP_VENV:-$REPO/.venv-autodp}"
+REQS="$REPO/requirements-autodp.txt"
+echo "[setup] repo=$REPO"
+echo "[setup] venv=$VENV"
 
 if [ -x "$VENV/bin/python" ]; then
   echo "[setup] $VENV already exists; verifying ..."
@@ -63,7 +68,7 @@ echo "[setup] installing autodatapre without its unbuildable hard pins ..."
 
 echo "[setup] installing the pinned runtime ..."
 # Strip trailing comments before xargs, or pip receives the '#' tokens as package names.
-sed -E 's/[[:space:]]*#.*$//' requirements-autodp.txt | \
+sed -E 's/[[:space:]]*#.*$//' "$REQS" | \
   grep -vE '^[[:space:]]*$' | grep -vE '^(autodatapre|torch)' | \
   xargs "$PY" -m pip install -q --no-warn-conflicts
 
