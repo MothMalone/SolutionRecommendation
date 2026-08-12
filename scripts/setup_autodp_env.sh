@@ -34,7 +34,8 @@ make_venv() {
   fi
   if command -v uv >/dev/null 2>&1 || pip install -q uv; then
     echo "[setup] using uv (fetches a managed CPython 3.10 if needed)"
-    uv venv --python 3.10 "$VENV" && return 0
+    # --seed: uv venvs ship without pip, and the rest of this script drives pip directly.
+    uv venv --seed --python 3.10 "$VENV" && return 0
   fi
   if command -v python3.10 >/dev/null 2>&1; then
     echo "[setup] using system python3.10"
@@ -51,14 +52,24 @@ make_venv
 
 PY="$VENV/bin/python"
 "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+if ! "$PY" -m pip --version >/dev/null 2>&1; then
+  echo "[setup] no pip in the venv, bootstrapping it"
+  curl -sS https://bootstrap.pypa.io/get-pip.py | "$PY" - >/dev/null
+fi
 "$PY" -m pip install -q --upgrade pip wheel
 
 echo "[setup] installing autodatapre without its unbuildable hard pins ..."
 "$PY" -m pip install -q --no-deps autodatapre==0.1.12
 
 echo "[setup] installing the pinned runtime ..."
-grep -vE '^\s*(#|$)' requirements-autodp.txt | grep -v '^autodatapre' | \
+grep -vE '^\s*(#|$)' requirements-autodp.txt | grep -vE '^(autodatapre|torch)' | \
   xargs "$PY" -m pip install -q
+
+# AutoDP uses torch only for tensor math and its attention module, so take the CPU build: the
+# default wheel drags in ~900MB of CUDA libraries that never get used.
+echo "[setup] installing CPU torch ..."
+"$PY" -m pip install -q torch==1.13.1 --index-url https://download.pytorch.org/whl/cpu || \
+  "$PY" -m pip install -q torch==1.13.1
 
 # py-stringmatching / py-stringsimjoin build from source on python >= 3.10 and their setup.py
 # imports pip, which is absent inside pip's isolated build env -- hence --no-build-isolation.
