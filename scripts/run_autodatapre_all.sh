@@ -44,7 +44,16 @@ export PYTHONPATH=src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 
 export MPLBACKEND=Agg
 
 echo "=== stage 1: exporting datasets ==="
-"$MAIN_PY" scripts/export_eval_datasets.py --ids "$IDS" --out-dir "$DATA_DIR" 2>&1 | tee -a "$OUT/export.log"
+# Without internet the OpenML API is unreachable and the loader returns nothing. Point
+# OPENML_LOCAL_FOLDER at a directory of <id>.csv files to use the loader's local fallback, e.g. on
+# Kaggle: OPENML_LOCAL_FOLDER=/kaggle/input/datasets/mathurinache/openml
+EXPORT_ARGS=""
+if [ -n "${OPENML_LOCAL_FOLDER:-}" ]; then
+  echo "  (local OpenML fallback: $OPENML_LOCAL_FOLDER)"
+  EXPORT_ARGS="--openml-local-folder $OPENML_LOCAL_FOLDER"
+fi
+"$MAIN_PY" scripts/export_eval_datasets.py --ids "$IDS" --out-dir "$DATA_DIR" --verbose \
+  $EXPORT_ARGS 2>&1 | tee -a "$OUT/export.log"
 
 for MODE in $MODES; do
   for ID in $IDS; do
