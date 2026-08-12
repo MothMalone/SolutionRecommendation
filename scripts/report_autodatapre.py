@@ -79,12 +79,25 @@ def main() -> None:
             continue
         per_mode.setdefault(res.get("mode", "native"), {})[str(res.get("dataset_id"))] = res
 
-    if not per_mode and not ours:
+    # Datasets AutoDP never finished. Shown as "timeout" rather than dropped, so a hard row is not
+    # quietly missing from the mean.
+    failures: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for p in sorted(glob.glob(os.path.join(args.input_dir, "*", "dataset_*", "autodp_failed.json"))):
+        try:
+            with open(p) as f:
+                res = json.load(f)
+        except Exception:
+            continue
+        failures.setdefault(res.get("mode", "native"), {})[str(res.get("dataset_id"))] = res
+
+    if not per_mode and not ours and not failures:
         raise SystemExit(f"no results found under {args.input_dir}")
 
-    modes = [m for m in ("native", "fair") if m in per_mode] + \
-            [m for m in per_mode if m not in ("native", "fair")]
-    ids = sorted({d for m in per_mode.values() for d in m} | {d for o in ours.values() for d in o},
+    all_modes = set(per_mode) | set(failures)
+    modes = [m for m in ("native", "fair") if m in all_modes] + \
+            sorted(m for m in all_modes if m not in ("native", "fair"))
+    ids = sorted({d for m in per_mode.values() for d in m} | {d for o in ours.values() for d in o}
+                 | {d for m in failures.values() for d in m},
                  key=lambda s: (len(s), s))
 
     time_key = "autodp_search_seconds" if args.runtime_column == "search" else "total_seconds"
@@ -122,7 +135,7 @@ def main() -> None:
     wins: Dict[str, List[int]] = {}
 
     for did in ids:
-        any_res = next((per_mode[m][did] for m in modes if did in per_mode[m]), None)
+        any_res = next((per_mode[m][did] for m in modes if did in per_mode.get(m, {})), None)
         task = str((any_res or {}).get("problem_type", "—")).replace("multiclass", "multi").replace("binary", "bin")
         row = [did, task]
         adp_scores: Dict[str, Optional[float]] = {}
@@ -130,6 +143,10 @@ def main() -> None:
             r = per_mode.get(m, {}).get(did)
             v = r.get(args.autodp_score) if r else None
             adp_scores[m] = v
+            if r is None and did in failures.get(m, {}):
+                row.append("timeout")
+                row.append(f"&gt;{_fmt_secs(failures[m][did].get('cap_seconds'))}")
+                continue
             flag = " ⚠️" if (r and r.get("autodp_status") != "ok") else ""
             row.append(_fmt(v) + flag)
             secs = r.get(time_key) if r else None
@@ -170,6 +187,15 @@ def main() -> None:
             lines.append(f"- `{key}`: **{w}W** / {t}T / {l}L")
 
     notes: List[str] = []
+    timed_out = [f"{d} ({m}, cap {r.get('cap_seconds')}s)" for m in modes
+                 for d, r in failures.get(m, {}).items()]
+    if timed_out:
+        notes.append("**AutoDP never finished** on these, so they carry no score and are excluded "
+                     "from its mean and from the head-to-head above: " + ", ".join(timed_out)
+                     + ". AutoDP checks its time budget only between search iterations, so one slow "
+                       "operator (`AD` dedup is O(n²) string comparisons, `LOF`, `MICE`) can overrun "
+                       "any budget on a large frame. Rerun a single dataset with a larger "
+                       "`--cap-seconds` to chase a real number.")
     degraded = [f"{d} ({m})" for m in modes for d, r in per_mode.get(m, {}).items()
                 if r.get("autodp_status") != "ok"]
     if degraded:

@@ -124,7 +124,14 @@ def _search(df_search: pd.DataFrame, target: str, task: str, runtime, mctsdata, 
     else:
         fn = MCTS.REG_With_TimeBudget if runtime else MCTS.REG_Without_TimeBudget
         args = (df_search, dataset, runtime, target) if runtime else (df_search, dataset, target)
+    t0 = time.time()
     times, scores, pipeline = fn(*args)
+    # Stage markers: when the wall-clock cap kills this process, the last line in the log says
+    # whether it died in the MCTS search or in the apply step (some operators -- AD dedup is O(n^2)
+    # string comparisons, LOF, MICE -- can run for hours on a 5000-row frame, and AutoDP only checks
+    # its time budget BETWEEN search iterations, never inside one).
+    print(f"[stage] search finished in {time.time() - t0:.0f}s, pipeline={list(pipeline)}; "
+          f"applying it now", flush=True)
     return dataset, list(pipeline), list(times), list(scores)
 
 
@@ -297,7 +304,20 @@ def main() -> None:
                 proc.join()
             if attempt == 0 and args.runtime is None:
                 continue  # convergence mode never terminated -> fall back to the capped budget
-            print(f"[FAIL] {did} ({args.mode}): killed at the wall-clock cap")
+            # Record the timeout so a rerun does not spend the same hours again, and so the report
+            # can show the dataset as "AutoDP did not finish" rather than silently omitting it.
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(out_dir, "autodp_failed.json"), "w") as f:
+                json.dump({
+                    "dataset_id": did, "mode": args.mode, "status": "timeout",
+                    "cap_seconds": args.cap_seconds, "retry_runtime": retry_runtime,
+                    "detail": "killed at the wall-clock cap in both the convergence attempt and the "
+                              "explicit-budget retry; AutoDP checks its budget only between search "
+                              "iterations, so a single slow operator (AD dedup is O(n^2), LOF, MICE) "
+                              "can overrun any budget on a large frame",
+                }, f, indent=2)
+            print(f"[FAIL] {did} ({args.mode}): killed at the wall-clock cap; recorded as a timeout. "
+                  f"Rerun this dataset alone with a larger --cap-seconds to chase a real number.")
             sys.exit(2)
         if proc.exitcode != 0:
             print(f"[FAIL] {did} ({args.mode}): worker exited {proc.exitcode}")

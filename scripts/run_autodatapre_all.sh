@@ -89,6 +89,9 @@ for MODE in $MODES; do
     if [ -f "$DDIR/autodp_eval.json" ]; then
       echo "[skip] $ID ($MODE): already scored"; continue
     fi
+    if [ -f "$DDIR/autodp_failed.json" ] && [ "${RETRY_FAILED:-0}" != "1" ]; then
+      echo "[skip] $ID ($MODE): timed out on an earlier run (RETRY_FAILED=1 to try again)"; continue
+    fi
 
     if [ ! -f "$DDIR/autodp_meta.json" ]; then
       echo "[prep] $ID ($MODE)  ($(date +%H:%M:%S))"
