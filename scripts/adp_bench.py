@@ -121,6 +121,54 @@ def _run_autodp(adp_python: str, csv_path: str, did: str, mode: str, scratch: st
 # ------------------------------------------------------------------------------------------ run
 
 
+def import_dir(args) -> int:
+    """Adopt results from an earlier run_autodatapre_all.sh tree into the JSONL file.
+
+    Lets a batch that already spent hours under outputs/autodp/<mode>/dataset_<id>/ carry over
+    instead of being recomputed. Existing (dataset, mode) pairs in the output file win.
+    """
+    done = _read_done(args.out)
+    added = 0
+    for p in sorted(glob.glob(os.path.join(args.import_dir, "*", "dataset_*", "autodp_eval.json"))):
+        with open(p) as f:
+            r = json.load(f)
+        key = (str(r.get("dataset_id")), r.get("mode"))
+        if key in done:
+            continue
+        _append(args.out, {
+            "dataset_id": key[0], "mode": key[1], "status": r.get("autodp_status"),
+            "score": r.get("score_full"), "score_kept": r.get("score_kept"),
+            "metric": r.get("eval_metric"), "problem_type": r.get("problem_type"),
+            "pipeline": r.get("autodp_pipeline"),
+            "autodp_seconds": r.get("autodp_search_seconds"),
+            "autogluon_seconds": r.get("autogluon_eval_seconds"),
+            "total_seconds": r.get("total_seconds"),
+            "test_coverage": r.get("test_coverage"),
+            "n_features_scored": r.get("n_features_scored"),
+            "autodp_converged": r.get("autodp_converged"),
+            "autodp_hit_cap": r.get("autodp_hit_cap"),
+            "imported_from": p,
+        })
+        done.add(key)
+        added += 1
+    for p in sorted(glob.glob(os.path.join(args.import_dir, "*", "dataset_*", "autodp_failed.json"))):
+        with open(p) as f:
+            r = json.load(f)
+        key = (str(r.get("dataset_id")), r.get("mode"))
+        if key in done:
+            continue
+        _append(args.out, {
+            "dataset_id": key[0], "mode": key[1], "status": "timeout", "score": None,
+            "pipeline": None, "autodp_seconds": None, "autogluon_seconds": None,
+            "total_seconds": None, "detail": r.get("detail"),
+            "cap_seconds": r.get("cap_seconds"), "imported_from": p,
+        })
+        done.add(key)
+        added += 1
+    print(f"[import] adopted {added} result(s) from {args.import_dir} into {args.out}")
+    return added
+
+
 def run(args) -> None:
     from eval_autodatapre import score_prepared  # imported late: needs AutoGluon in this env
 
@@ -259,15 +307,17 @@ def summarize(args) -> None:
             if r is None:
                 row += ["—", "—", "—"]
                 continue
+            secs = r.get("total_seconds")
+            secs_txt = "—" if secs is None else f"{float(secs):.0f}s"
             if r.get("score") is None:
-                row += [r.get("status", "fail"), "—", f"{r.get('total_seconds', 0):.0f}s"]
+                row += [r.get("status", "fail"), "—", secs_txt]
                 continue
             pipe = r.get("pipeline") or []
             ops = ", ".join(pipe[1:]) if len(pipe) > 1 else "(none)"
-            row += [f"{r['score']:.4f}", ops, f"{r.get('total_seconds', 0):.0f}s"]
+            row += [f"{r['score']:.4f}", ops, secs_txt]
             sums[m] = sums.get(m, 0.0) + r["score"]
             counts[m] = counts.get(m, 0) + 1
-            tsums[m] = tsums.get(m, 0.0) + float(r.get("total_seconds") or 0)
+            tsums[m] = tsums.get(m, 0.0) + float(secs or 0)
         lines.append("| " + " | ".join(row) + " |")
 
     mean_row = ["**mean**", ""]
@@ -316,6 +366,9 @@ def main() -> None:
     ap.add_argument("--openml-local-folder", default=None,
                     help="folder of <id>.csv to fall back on when OpenML is unreachable")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--import-dir", default=None,
+                    help="adopt results from an earlier run_autodatapre_all.sh output dir "
+                         "(outputs/autodp) into --out, then continue with whatever is missing")
     ap.add_argument("--summarize", nargs="*", default=None, metavar="JSONL",
                     help="render a table from result files instead of running anything")
     ap.add_argument("--out-md", default=None, help="with --summarize: also write the table here")
@@ -324,6 +377,10 @@ def main() -> None:
     if args.summarize:
         summarize(args)
         return
+    if args.import_dir:
+        import_dir(args)
+        if not args.ids and not args.shard:
+            return  # import-only
     if not os.path.exists(args.adp_python):
         raise SystemExit(f"no AutoDP interpreter at {args.adp_python}\n"
                          f"  build it first:  bash scripts/setup_autodp_env.sh\n"
