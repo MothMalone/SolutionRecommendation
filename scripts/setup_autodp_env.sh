@@ -59,24 +59,26 @@ fi
 "$PY" -m pip install -q --upgrade pip wheel
 
 echo "[setup] installing autodatapre without its unbuildable hard pins ..."
-"$PY" -m pip install -q --no-deps autodatapre==0.1.12
+"$PY" -m pip install -q --no-warn-conflicts --no-deps autodatapre==0.1.12
 
 echo "[setup] installing the pinned runtime ..."
-grep -vE '^\s*(#|$)' requirements-autodp.txt | grep -vE '^(autodatapre|torch)' | \
-  xargs "$PY" -m pip install -q
+# Strip trailing comments before xargs, or pip receives the '#' tokens as package names.
+sed -E 's/[[:space:]]*#.*$//' requirements-autodp.txt | \
+  grep -vE '^[[:space:]]*$' | grep -vE '^(autodatapre|torch)' | \
+  xargs "$PY" -m pip install -q --no-warn-conflicts
 
 # AutoDP uses torch only for tensor math and its attention module, so take the CPU build: the
 # default wheel drags in ~900MB of CUDA libraries that never get used.
 echo "[setup] installing CPU torch ..."
-"$PY" -m pip install -q torch==1.13.1 --index-url https://download.pytorch.org/whl/cpu || \
-  "$PY" -m pip install -q torch==1.13.1
+"$PY" -m pip install -q --no-warn-conflicts torch==1.13.1 --index-url https://download.pytorch.org/whl/cpu || \
+  "$PY" -m pip install -q --no-warn-conflicts torch==1.13.1
 
 # py-stringmatching / py-stringsimjoin build from source on python >= 3.10 and their setup.py
 # imports pip, which is absent inside pip's isolated build env -- hence --no-build-isolation.
 echo "[setup] building the string-similarity deps from source ..."
 "$PY" -m pip install -q "setuptools<70" cython
-"$PY" -m pip install -q --no-build-isolation "py-stringmatching==0.4.3"
-"$PY" -m pip install -q --no-build-isolation "py-stringsimjoin==0.1.0"
+"$PY" -m pip install -q --no-warn-conflicts --no-build-isolation "py-stringmatching==0.4.3"
+"$PY" -m pip install -q --no-warn-conflicts --no-build-isolation "py-stringsimjoin==0.1.0"
 
 echo "[setup] verifying ..."
 MPLBACKEND=Agg "$PY" - <<'EOF'
