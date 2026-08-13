@@ -1,0 +1,20 @@
+248	imputation=median, scaling=robust, encoding=onehot, feature_selection=mutual_info, outlier_removal=isolation_forest, dimensionality_reduction=pca
+1066	imputation=mean, scaling=robust, encoding=onehot, feature_selection=variance_threshold, outlier_removal=iqr, dimensionality_reduction=pca
+1164	imputation=mean, scaling=robust, encoding=onehot, feature_selection=k_best, outlier_removal=zscore, dimensionality_reduction=pca
+1047	scaling=standard, encoding=onehot, outlier_removal=zscore
+862	imputation=most_frequent, scaling=robust, encoding=onehot
+40663	encoding=onehot, feature_selection=k_best, outlier_removal=zscore, dimensionality_reduction=pca
+1054	imputation=median, scaling=maxabs, encoding=onehot, feature_selection=variance_threshold
+1387	imputation=median, scaling=maxabs, encoding=onehot, feature_selection=mutual_info, outlier_removal=iqr, dimensionality_reduction=pca
+876	imputation=knn, scaling=minmax, encoding=onehot, feature_selection=variance_threshold, outlier_removal=iqr
+18	scaling=standard, encoding=onehot, feature_selection=mutual_info, outlier_removal=iqr
+1520	imputation=most_frequent, scaling=robust, encoding=onehot, feature_selection=mutual_info, outlier_removal=zscore
+1548	imputation=median, scaling=robust, encoding=onehot, dimensionality_reduction=pca
+184	imputation=most_frequent, scaling=maxabs, encoding=onehot, feature_selection=variance_threshold
+378	imputation=constant, scaling=standard, encoding=onehot, feature_selection=variance_threshold, outlier_removal=isolation_forest, dimensionality_reduction=pca
+381	imputation=constant, encoding=onehot, dimensionality_reduction=pca
+1485	imputation=knn, scaling=standard, encoding=onehot, feature_selection=variance_threshold, dimensionality_reduction=pca
+14	scaling=robust, encoding=onehot, feature_selection=mutual_info
+27	imputation=mean, scaling=minmax, encoding=onehot, feature_selection=k_best, outlier_removal=zscore, dimensionality_reduction=svd
+29	imputation=constant, scaling=maxabs, encoding=onehot, feature_selection=variance_threshold, outlier_removal=iqr, dimensionality_reduction=svd
+31	imputation=most_frequent, scaling=minmax, encoding=onehot, feature_selection=mutual_info, outlier_removal=lof, dimensionality_reduction=svd

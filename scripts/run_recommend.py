@@ -253,12 +253,50 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--baseline-only",
-        choices=["off", "no_preprocessing", "autogluon_native"],
+        choices=["off", "no_preprocessing", "autogluon_native", "no_search_retrieval", "light_preprocessing"],
         default="off",
         help=(
             "Skip ACORec entirely and just AutoGluon-evaluate a baseline on the same 0.6/0.2/0.2 "
             "split/seed, for apples-to-apples comparison. 'no_preprocessing' = all-none pipeline "
-            "(onehot encoding only); 'autogluon_native' = raw data straight to AutoGluon."
+            "(onehot encoding only); 'autogluon_native' = raw data straight to AutoGluon; "
+            "'no_search_retrieval' = the transfer-only pipeline (best pipeline of the nearest "
+            "reference dataset, under the learned metric) — reports both it AND no_preprocessing."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-fit-include-val",
+        action="store_true",
+        help=(
+            "For --baseline-only, fit the final model on train+val (80%) instead of train (60%), "
+            "matching the CV evaluator's final-fit so scores are directly comparable to CV-path runs."
+        ),
+    )
+    parser.add_argument(
+        "--noprep-penalty",
+        type=float,
+        default=0.0,
+        help=(
+            "Bias the CV gate AWAY from the trivial no-preprocessing candidate by this epsilon "
+            "(selection only; reported score is the chosen pipeline's true test score). A real "
+            "pipeline within epsilon of no-prep is chosen instead. 0 = off."
+        ),
+    )
+    parser.add_argument(
+        "--hybrid-floor",
+        choices=["none", "light"],
+        default="none",
+        help=(
+            "The conservative floor candidate in the hybrid/CV gate. 'none' = bare no-preprocessing "
+            "(all-none + onehot). 'light' = normalization-only (scale + onehot, no imputation/structural) "
+            "— a REAL pipeline that ties no-prep on AutoGluon, so the method never recommends 'no preprocessing'."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-steps",
+        default="",
+        help=(
+            "Comma-separated pipeline steps to remove from the operator space (e.g. "
+            "'feature_selection,dimensionality_reduction' for the DiffPrep/their-space comparison)."
         ),
     )
     parser.add_argument(
@@ -675,6 +713,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Allow fallback to simple-model final evaluation if AutoGluon is unavailable.",
     )
     parser.set_defaults(require_autogluon=True)
+    parser.add_argument(
+        "--no-autogluon",
+        dest="no_autogluon",
+        action="store_true",
+        help=(
+            "Skip the final AutoGluon stage entirely and report the pipeline ACO PROPOSES from its "
+            "proxy ranking. Diagnostic only: with --hybrid-select the final AutoGluon CV gate is "
+            "what CHOOSES among the ACO winner, the transfer-only pipeline and the no-preprocessing "
+            "floor, so the reported pipeline here is ACO's proposal, not the method's final "
+            "recommendation, and final_evaluation.method will read 'proxy'. Use it to inspect which "
+            "operators the search favours without paying for AutoGluon."
+        ),
+    )
     parser.add_argument(
         "--operator-param-search",
         action="store_true",
@@ -1345,6 +1396,12 @@ def main() -> None:
         # Copy lists so per-run constraints do not mutate global defaults.
         base_options = NOTEBOOK_LEGACY_PIPELINE_OPTIONS if args.notebook_legacy_options else DEFAULT_PIPELINE_OPTIONS
         options = {step: list(vals) for step, vals in base_options.items()}
+        # Operator-space restriction (e.g. DiffPrep "their space" drops feature engineering ops).
+        if getattr(args, "exclude_steps", ""):
+            for _st in [s.strip() for s in str(args.exclude_steps).split(",") if s.strip()]:
+                if _st == "encoding":
+                    continue  # encoding is required for AutoGluon input; never drop it
+                options.pop(_st, None)
         profile_note = None
 
         if pipeline_override:
@@ -1575,6 +1632,112 @@ def main() -> None:
 
             if args.baseline_only != "off":
                 from automl_aco.search.evaluation import evaluate_candidates_autogluon
+                fit_inc_val = bool(args.baseline_fit_include_val)
+                if args.baseline_only == "light_preprocessing":
+                    # Validate the "light floor": best normalization (scale + onehot, NO imputation,
+                    # NO structural) vs the bare no-prep pipeline, same 80%-fit. If light ties no-prep,
+                    # the light floor costs ~nothing while never being "no preprocessing".
+                    scalers = [s for s in run_options.get("scaling", []) if str(s).lower() != "none"] or ["standard"]
+                    light_cands = []
+                    for s in scalers:
+                        c = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                        c["scaling"] = s
+                        c["encoding"] = "onehot"
+                        c["name"] = f"light_{s}"
+                        light_cands.append(c)
+                    no_prep = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    no_prep["encoding"] = "onehot"
+                    no_prep["name"] = "no_preprocessing"
+                    _bc, _bs, b_results, _b = evaluate_candidates_autogluon(
+                        dataset=test_dataset_df, target_column="target",
+                        candidate_configs=[*light_cands, no_prep],
+                        time_limit_per_model=int(args.time_limit),
+                        autogluon_profile=str(args.autogluon_profile), verbose=args.verbose,
+                        fit_include_val=fit_inc_val,
+                    )
+                    scores = {cfg.get("name"): float(sc) for cfg, sc in b_results}
+                    np_score = scores.get("no_preprocessing")
+                    light_scores = {k: v for k, v in scores.items() if k.startswith("light_")}
+                    if not light_scores:
+                        raise RuntimeError(f"light_preprocessing eval produced no result for {dataset_id}")
+                    best_light_name = max(light_scores, key=light_scores.get)
+                    best_light = light_scores[best_light_name]
+                    recommendation = {
+                        "dataset_id": dataset_id, "baseline_only": args.baseline_only,
+                        "fit_include_val": fit_inc_val,
+                        "best_light_name": best_light_name, "best_light_score": best_light,
+                        "light_scores": light_scores, "no_preprocessing_score": np_score,
+                        "final_evaluation": {"method": "autogluon", "score": float(best_light)},
+                    }
+                    _tag2 = str(dataset_id) if dataset_id is not None else ("single" if n_runs == 1 else f"run{run_idx}")
+                    run_out = output_dir if n_runs == 1 else os.path.join(output_dir, f"dataset_{_tag2}")
+                    os.makedirs(run_out, exist_ok=True)
+                    with open(os.path.join(run_out, "recommendation.json"), "w", encoding="utf-8") as f:
+                        json.dump(recommendation, f, indent=2, default=str)
+                    _d = (best_light - np_score) if np_score is not None else float("nan")
+                    print(f"  [baseline-only:light_preprocessing] {dataset_id} -> best_light={best_light:.4f}"
+                          f" ({best_light_name}) no_prep={np_score if np_score is None else round(np_score,4)}"
+                          f" delta={_d:+.4f}")
+                    run_summaries.append({"dataset_id": dataset_id, "final_score": float(best_light),
+                                          "autogluon_score": float(best_light), "status": "ok",
+                                          "elapsed_seconds": time.perf_counter() - run_start})
+                    continue
+                if args.baseline_only == "no_search_retrieval":
+                    # Transfer-only pipeline: best pipeline of the nearest reference dataset (learned
+                    # metric, query excluded). Reported alongside no_preprocessing for a clean swap
+                    # decision; both fit on the same split so the comparison is apples-to-apples.
+                    def _bl_mf(_df, _dataset=dataset):
+                        return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+                    ns_cfg, ns_row, ns_neighbors = recommender.retrieval_no_search_pipeline(
+                        new_dataset=test_dataset_df,
+                        metafeatures_func=_bl_mf,
+                        options=run_options,
+                        neighbor_k=1,
+                        top_l=1,
+                        score_direction=str(args.score_direction),
+                        query_dataset_id=dataset_id,
+                    )
+                    if ns_cfg is None:
+                        raise RuntimeError(f"No retrieval neighbor available for {dataset_id}")
+                    no_prep = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    no_prep["encoding"] = "onehot"
+                    no_prep["name"] = "no_preprocessing"
+                    _b_cfg, _b_best, b_results, _b = evaluate_candidates_autogluon(
+                        dataset=test_dataset_df, target_column="target",
+                        candidate_configs=[ns_cfg, no_prep],
+                        time_limit_per_model=int(args.time_limit),
+                        autogluon_profile=str(args.autogluon_profile), verbose=args.verbose,
+                        fit_include_val=fit_inc_val,
+                    )
+                    scores = {cfg.get("name"): float(sc) for cfg, sc in b_results}
+                    ns_score = scores.get("no_search_retrieval")
+                    np_score = scores.get("no_preprocessing")
+                    if ns_score is None:
+                        raise RuntimeError(f"no_search_retrieval eval produced no result for {dataset_id}")
+                    recommendation = {
+                        "dataset_id": dataset_id,
+                        "pipeline_config": ns_cfg,
+                        "final_evaluation": {"method": "autogluon", "score": float(ns_score)},
+                        "baseline_only": args.baseline_only,
+                        "fit_include_val": fit_inc_val,
+                        "no_search_retrieval_score": ns_score,
+                        "no_preprocessing_score": np_score,
+                        "neighbor": ns_row,
+                        "neighbors": [[str(d), float(s)] for d, s in (ns_neighbors or [])][:3],
+                    }
+                    _tag2 = str(dataset_id) if dataset_id is not None else ("single" if n_runs == 1 else f"run{run_idx}")
+                    run_out = output_dir if n_runs == 1 else os.path.join(output_dir, f"dataset_{_tag2}")
+                    os.makedirs(run_out, exist_ok=True)
+                    with open(os.path.join(run_out, "recommendation.json"), "w", encoding="utf-8") as f:
+                        json.dump(recommendation, f, indent=2, default=str)
+                    _delta = (ns_score - np_score) if (np_score is not None) else float("nan")
+                    print(f"  [baseline-only:no_search_retrieval] {dataset_id} -> "
+                          f"no_search={ns_score:.4f} no_prep={np_score if np_score is None else round(np_score,4)} "
+                          f"delta={_delta:+.4f} pipeline={ns_cfg.get('name')}")
+                    run_summaries.append({"dataset_id": dataset_id, "final_score": float(ns_score),
+                                          "autogluon_score": float(ns_score), "status": "ok",
+                                          "elapsed_seconds": time.perf_counter() - run_start})
+                    continue
                 if args.baseline_only == "autogluon_native":
                     # Raw data straight to AutoGluon (identity pipeline: AG's own preprocessing only).
                     base_cfg = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
@@ -1589,6 +1752,7 @@ def main() -> None:
                     candidate_configs=[base_cfg],
                     time_limit_per_model=int(args.time_limit),
                     autogluon_profile=str(args.autogluon_profile), verbose=args.verbose,
+                    fit_include_val=fit_inc_val,
                 )
                 if b_cfg is None or not np.isfinite(b_score):
                     raise RuntimeError(f"Baseline AutoGluon eval produced no valid result for {dataset_id}")
@@ -1597,6 +1761,7 @@ def main() -> None:
                     "pipeline_config": b_cfg,
                     "final_evaluation": {"method": "autogluon", "score": float(b_score)},
                     "baseline_only": args.baseline_only,
+                    "fit_include_val": fit_inc_val,
                 }
                 _tag2 = str(dataset_id) if dataset_id is not None else ("single" if n_runs == 1 else f"run{run_idx}")
                 run_out = output_dir if n_runs == 1 else os.path.join(output_dir, f"dataset_{_tag2}")
@@ -1618,7 +1783,7 @@ def main() -> None:
                 options=run_options,
                 k=args.k,
                 eval_k=args.eval_k,
-                use_autogluon=True,
+                use_autogluon=not bool(getattr(args, "no_autogluon", False)),
                 use_aco=search_enabled,
                 aco_params={
                     "n_ants": args.n_ants,
@@ -1639,6 +1804,8 @@ def main() -> None:
                     "interaction_prior_floor": float(args.interaction_prior_floor),
                     "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
                     "hybrid_select": bool(args.hybrid_select),
+                    "hybrid_floor": str(args.hybrid_floor),
+                    "noprep_penalty": float(getattr(args, "noprep_penalty", 0.0)),
                     "hybrid_select_margin": float(args.hybrid_select_margin),
                     "cv_select_folds": int(args.cv_select_folds),
                     "no_warm_start": bool(args.no_warm_start),
@@ -1729,6 +1896,7 @@ def main() -> None:
             os.makedirs(run_output_dir, exist_ok=True)
 
         rec_path = os.path.join(run_output_dir, "recommendation.json")
+        recommendation["dataset_id"] = dataset_id
         recommendation["search_options"] = run_options
         recommendation["leakage_holdout"] = holdout_report
         recommendation["search_hyperparams"] = {
