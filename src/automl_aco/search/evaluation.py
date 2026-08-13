@@ -186,6 +186,13 @@ def _fit_predict_with_autogluon(
         )
         if profile == "best_quality":
             fit_kwargs["presets"] = "best_quality"
+            # best_quality enables dynamic_stacking (DyStack), which runs a full internal sub-fit to
+            # detect stacked overfitting. Under a tight time_limit it consumes the whole budget on the
+            # sub-fit and then crashes ("Not enough time left ... Time remaining: -Xs"), or silently
+            # yields no models — which the caller records as a failed/"no result" candidate. The
+            # bagged-holdout already mitigates stacked overfitting, so disabling DyStack keeps the
+            # best_quality model set while making the fit bounded and reliable. (AG's own remedy.)
+            fit_kwargs["dynamic_stacking"] = False
         elif profile == "medium_quality":
             fit_kwargs["presets"] = "medium_quality_faster_train"
         elif profile == "local_rf_xt":
@@ -232,7 +239,12 @@ def evaluate_candidates_autogluon(
     select_on_val: bool = False,
     select_default_name: Optional[str] = None,
     select_margin: float = 0.0,
+    fit_include_val: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
+    # When fit_include_val is True, the final model is fit on train+val (80%) instead of train (60%),
+    # predicting the same 20% test split. This matches the CV evaluator's final-fit protocol, so a
+    # single-pipeline test score from here is directly comparable to a CV-selected pipeline's score.
+    # (It is incompatible with select_on_val, which needs a held-out val split for selection.)
     # When select_on_val is True, every candidate is trained on the train split and scored on the
     # VALIDATION split for SELECTION; the winner's TEST score is reported. This is the leak-free way
     # to choose among candidates (e.g. ACO pipeline vs no-preprocessing) without selecting on test.
@@ -270,6 +282,11 @@ def evaluate_candidates_autogluon(
             y = df[target_column].copy()
 
             X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y)
+
+            if fit_include_val and not select_on_val:
+                # Fold validation into the training set for an 80%-fit final model (CV-comparable).
+                X_train = pd.concat([X_train, X_val], ignore_index=True)
+                y_train = pd.concat([y_train, y_val], ignore_index=True)
 
             pre = _make_preprocessor(cfg)
             result = pre.fit_transform(X_train, y_train)
@@ -704,15 +721,20 @@ def evaluate_candidates_autogluon_cv(
     select_default_name: Optional[str] = None,
     select_margin: float = 0.0,
     seed: int = 42,
+    noprep_penalty: float = 0.0,
     verbose: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     """Select the pipeline by k-fold cross-validation (low-variance signal), report its TEST score.
 
+    noprep_penalty (epsilon >= 0): bias selection AWAY from the trivial no-preprocessing candidate.
+    The trivial candidate's CV score is reduced by epsilon for selection ONLY, so a real pipeline
+    within epsilon of no-prep is chosen instead — surfacing genuine pipelines without picking one
+    that loses by more than epsilon. The REPORTED score is always the chosen pipeline's true test
+    score. epsilon=0 -> pure CV-best (may pick no-prep); large epsilon -> effectively never no-prep.
+
     The test split (20%) is held out and used ONLY to report the chosen pipeline's score. Selection
-    uses k-fold CV over the remaining 80%, which is a far less noisy estimate of each candidate's true
-    AutoGluon quality than a single validation split — so a pipeline that merely got lucky on one split
-    cannot win, and a genuinely-better pipeline (winning across folds) does. This is the principled cure
-    for the winner's curse; cost is (k+1) AutoGluon fits per candidate, kept affordable by topk=1.
+    uses k-fold CV over the remaining 80%, a far less noisy estimate of each candidate's true AutoGluon
+    quality than a single validation split, curing the winner's curse; cost is (k+1) fits per candidate.
     """
     try:
         import numpy as _np
@@ -749,12 +771,24 @@ def evaluate_candidates_autogluon_cv(
 
     def _ag_score(train_X, train_y, eval_X, eval_y):
         tr = train_X.copy(); tr[target_column] = pd.Series(train_y).reset_index(drop=True)
-        preds, _sel, issue = _fit_predict_with_autogluon(
+        kw = dict(
             TabularPredictor=TabularPredictor, IdentityFeatureGenerator=IdentityFeatureGenerator,
             train_df=tr, test_df=eval_X, target_column=target_column, problem_type=problem_type,
             eval_metric=eval_metric, time_limit_per_model=time_limit_per_model,
             verbosity=0, autogluon_profile=autogluon_profile,
         )
+        try:
+            preds, _sel, issue = _fit_predict_with_autogluon(**kw)
+        except Exception as exc:
+            # Same XGBoost/AutoGluon version incompatibility the single-split evaluator already
+            # retries around ("'XGBClassifier' object has no attribute 'n_classes_'"). Without this
+            # the per-candidate handler below swallows EVERY candidate, the CV gate returns nothing,
+            # and the run silently reports the proxy score with method="autogluon_failed".
+            if not _should_retry_without_xgb(exc):
+                raise
+            if verbose:
+                print("    [cv-select] XGBoost incompatibility, retrying fold without XGB models")
+            preds, _sel, issue = _fit_predict_with_autogluon(excluded_model_types=["XGB"], **kw)
         if issue == "no_models_fitted" or preds is None:
             return None
         return float(metric_fn(pd.Series(eval_y).reset_index(drop=True), preds))
@@ -805,6 +839,28 @@ def evaluate_candidates_autogluon_cv(
     def _cv(cfg):
         v = cv_scores.get(cfg.get("name"))
         return v if v is not None else -np.inf
+
+    def _is_trivial(cfg):
+        # The no-preprocessing pipeline: explicitly named, or all non-encoding steps == "none".
+        if str(cfg.get("name")) == "no_preprocessing":
+            return True
+        return all(
+            str(v).lower() == "none"
+            for k, v in cfg.items()
+            if k not in ("name", "step_order", "encoding")
+        )
+
+    if float(noprep_penalty) > 0.0:
+        # Prefer real pipelines: penalize the trivial candidate by epsilon for SELECTION only.
+        def _eff(cfg):
+            return _cv(cfg) - (float(noprep_penalty) if _is_trivial(cfg) else 0.0)
+        ranked = sorted(results, key=lambda it: (_eff(it[0]), it[1]), reverse=True)
+        best_cfg, best_score = ranked[0]
+        if verbose:
+            print(f"    [cv-select] noprep_penalty={noprep_penalty}: chose {best_cfg.get('name')} "
+                  f"(eff_cv={_eff(best_cfg):.4f}, true_cv={_cv(best_cfg):.4f}); reporting test={best_score:.4f}")
+        return best_cfg, best_score, ranked, results
+
     ranked = sorted(results, key=lambda it: (_cv(it[0]), it[1]), reverse=True)
     default_item = None
     if select_default_name is not None:
