@@ -1,0 +1,23 @@
+248	TIMEOUT/FAIL
+1066	['NB']	search=2.43s	converged=True
+1164	['RF', 'ZSB', 'OE']	search=104.31s	converged=False
+1047	[]	search=0.82s	converged=True
+862	['RF']	search=1.57s	converged=True
+2	[]	search=90.24s	converged=False
+40663	[]	search=1.1s	converged=True
+1054	['NB']	search=1.56s	converged=True
+1387	[]	search=90.47s	converged=False
+876	[]	search=90.23s	converged=False
+18	['LDA']	search=1.42s	converged=True
+1520	[]	search=2.4s	converged=True
+1548	[]	search=4.39s	converged=True
+184	[]	search=1.1s	converged=True
+378	[]	search=4.33s	converged=True
+381	[]	search=5.06s	converged=True
+382	[]	search=4.55s	converged=True
+993	[]	search=3.94s	converged=True
+1485	[]	search=14.49s	converged=True
+14	['RF', 'ZSB']	search=10.77s	converged=True
+27	[]	search=1.15s	converged=True
+29	TIMEOUT/FAIL
+31	[]	search=1.31s	converged=True
