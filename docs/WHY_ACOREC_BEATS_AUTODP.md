@@ -1,3 +1,23 @@
+> # ⚠️ INVALIDATED — DO NOT CITE
+>
+> Every quantitative claim below was computed from an AutoDP environment missing
+> `category_encoders`, an **undeclared runtime dependency** of `autodatapre==0.1.12`
+> (imported lazily inside `Search_Space/encoding.py` for its `BE`/`FE`/`CBE` encoders).
+> Without it those encoders raise, every MCTS candidate scores `pre_profit = 0.0`,
+> `gap > 0` is never satisfied, `best_node` never leaves the root, and the search returns an
+> empty pipeline while reporting itself converged. Three layers of bare `except:` hide it.
+>
+> With the dependency installed, AutoDP selects real preprocessing on **8 of 18** completed
+> searches (not 2), overwhelmingly via the previously-broken encoders — see
+> `docs/autodp_pipeline_census_local.tsv`.
+>
+> Consequently: the "AutoDP returns raw data on 16-19 of 21" finding is an artifact; the
+> `Mingap`-below-the-noise-floor mechanism is wrong; the three-group decomposition is void
+> (its groups were defined by the empty-pipeline test); and the AutoDP score column itself
+> must be re-run, since it was produced under the same broken environment.
+>
+> Rewrite this document only after re-running AutoDP with `category_encoders` present.
+
 # Why ACORec outperforms AutoDP, and how the two pipelines differ
 
 Evidence base: the paired AutoGluon evaluation over 20 datasets (AutoDP 0.7675 / ACORec 0.7875,
