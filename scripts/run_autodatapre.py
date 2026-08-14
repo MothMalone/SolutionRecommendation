@@ -89,12 +89,20 @@ def _strip_helpers(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=drop) if drop else df
 
 
+_ADAPTER = None  # set to scripts/autodp_our_space when --operator-space ours
+
+
 def _apply_pipeline(dataset: dict, order, mctsdata) -> None:
     """Apply AutoDP's winning operator chain in place.
 
     Mirrors ``MCTS_DATA.getAcc`` minus the final classifier refit (which reads the dict but never
     mutates it). ``order[0]`` is the classifier/regressor choice, so operators start at index 1.
     """
+    if _ADAPTER is not None:
+        # Our operator codes live in mctsdata.listN too, so the dispatch below would route them to
+        # AutoDP's own operator classes, which do not understand them.
+        _ADAPTER._apply_pipeline(dataset, order)
+        return
     for op in order[1:]:
         if op in mctsdata.list1:
             mctsdata.choose_imputer(dataset, op)
@@ -205,7 +213,8 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS)
     return pd.concat([p_train, p_test], axis=0, ignore_index=True), pipeline, times, scores, status
 
 
-def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: str) -> None:
+def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: str,
+            operator_space: str = "theirs") -> None:
     """Body of one dataset run. Executed in a child process so a wall-clock cap can kill it."""
     random.seed(seed)
     np.random.seed(seed)
@@ -214,6 +223,17 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
         torch.manual_seed(seed)
     except Exception:
         pass
+
+    if operator_space == "ours":
+        # Arm "their method, our operators": patches AutoDP in memory so its MCTS searches ACORec's
+        # operator space, executed by ACORec's own implementations. Their search, their meta-learner
+        # and their scoring signal are untouched. See scripts/autodp_our_space.py for the three
+        # patch points and the disclosure about pca/svd being unrepresentable in their value model.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import autodp_our_space
+        autodp_our_space.install(verbose=True)
+        global _ADAPTER
+        _ADAPTER = autodp_our_space
 
     from autodatapre.Pipeline_Generation import MCTS_DATA as mctsdata
     from autodatapre.Pipeline_Generation import MCTS
@@ -234,6 +254,7 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
     meta = {
         "dataset_csv": os.path.abspath(csv_path),
         "mode": mode,
+        "operator_space": operator_space,
         "task_type": task,
         "status": status,
         "autodp_version": "0.1.12",
@@ -271,12 +292,15 @@ def main() -> None:
                          "explicit runTime equal to the cap, so a non-converging dataset still "
                          "yields a prepared frame instead of nothing.")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--operator-space", choices=["theirs", "ours"], default="theirs",
+                    help="theirs = AutoDP's own operators (unmodified). ours = its MCTS searches ACORec's operator space via scripts/autodp_our_space.py, for the same-operator-space arm.")
     ap.add_argument("--out-dir", default="outputs/autodp")
     ap.add_argument("--overwrite", action="store_true")
     args = ap.parse_args()
 
     did = args.dataset_id or os.path.splitext(os.path.basename(args.dataset_csv))[0]
-    out_dir = os.path.join(args.out_dir, args.mode, f"dataset_{did}")
+    space_tag = args.mode if args.operator_space == "theirs" else f"{args.mode}_ourops"
+    out_dir = os.path.join(args.out_dir, space_tag, f"dataset_{did}")
     done = os.path.join(out_dir, "autodp_meta.json")
     if os.path.exists(done) and not args.overwrite:
         print(f"[skip] {did} ({args.mode}) already done -> {done}")
@@ -293,7 +317,7 @@ def main() -> None:
             print(f"[warn] {did} ({args.mode}) exceeded the {args.cap_seconds:.0f}s cap; "
                   f"retrying with an explicit runTime={retry_runtime:.0f}s budget", flush=True)
         proc = ctx.Process(target=_worker, args=(args.dataset_csv, args.target, args.mode, runtime,
-                                                 args.seed, out_dir))
+                                                 args.seed, out_dir, args.operator_space))
         proc.start()
         proc.join(timeout=args.cap_seconds)
         if proc.is_alive():
