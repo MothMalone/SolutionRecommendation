@@ -1,0 +1,623 @@
+{
+  "pipeline_config": {
+    "imputation": "constant",
+    "scaling": "maxabs",
+    "encoding": "onehot",
+    "feature_selection": "variance_threshold",
+    "outlier_removal": "isolation_forest",
+    "dimensionality_reduction": "none",
+    "name": "no_search_retrieval",
+    "step_order": [
+      "imputation",
+      "scaling",
+      "encoding",
+      "feature_selection",
+      "outlier_removal",
+      "dimensionality_reduction"
+    ]
+  },
+  "recommended_performance": 0.65,
+  "final_evaluation": {
+    "method": "autogluon",
+    "score": 0.6
+  },
+  "final_performance": 0.6,
+  "confidence": "low",
+  "aco_results": [
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "maxabs",
+        "encoding": "onehot",
+        "feature_selection": "k_best",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'maxabs', 'encoding': 'onehot', 'feature_selection': 'k_best', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6166666666666667
+    ],
+    [
+      {
+        "imputation": "median",
+        "scaling": "maxabs",
+        "encoding": "onehot",
+        "feature_selection": "k_best",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'median', 'scaling': 'maxabs', 'encoding': 'onehot', 'feature_selection': 'k_best', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6166666666666667
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.65
+    ],
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.65
+    ],
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6
+    ],
+    [
+      {
+        "imputation": "constant",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "isolation_forest",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'constant', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'isolation_forest', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6166666666666666
+    ],
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.65
+    ],
+    [
+      {
+        "imputation": "median",
+        "scaling": "maxabs",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'median', 'scaling': 'maxabs', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6166666666666666
+    ],
+    [
+      {
+        "imputation": "constant",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "isolation_forest",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'constant', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'isolation_forest', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6000000000000001
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "maxabs",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'maxabs', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6166666666666666
+    ],
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "variance_threshold",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.65
+    ],
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "minmax",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.6333333333333334
+    ]
+  ],
+  "ag_candidate_scores": {
+    "no_search_retrieval": 0.6,
+    "{'imputation': 'knn', 'scaling': 'minmax', 'encoding': 'onehot', 'feature_selection': 'variance_threshold', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}": 0.7,
+    "no_preprocessing": 0.7
+  },
+  "aco_history": [
+    {
+      "iteration": 1,
+      "best_score": 0.65,
+      "global_best_score": 0.65,
+      "iteration_best_score": 0.65,
+      "iteration_mean_score": 0.6333333333333333,
+      "iteration_min_score": 0.6166666666666667,
+      "sampled_unique_count": 4,
+      "valid_count": 4,
+      "cache_size": 4,
+      "global_improved": true,
+      "global_improvement": 0.0,
+      "no_improve_rounds": 0,
+      "status": "ok",
+      "step_entropy": {
+        "imputation": 0.7336999522812839,
+        "scaling": 0.6276708008672601,
+        "encoding": 0.0,
+        "feature_selection": 0.5590787853738063,
+        "outlier_removal": 0.48380665025647573,
+        "dimensionality_reduction": 0.010695900973561904
+      },
+      "mean_entropy": 0.4024920149587314,
+      "pheromone_min": 0.8,
+      "pheromone_max": 2.80299940000018,
+      "pheromone_saturation": 0.0,
+      "order_index": 1,
+      "step_order": [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    },
+    {
+      "iteration": 2,
+      "best_score": 0.65,
+      "global_best_score": 0.65,
+      "iteration_best_score": 0.65,
+      "iteration_mean_score": 0.6208333333333333,
+      "iteration_min_score": 0.6,
+      "sampled_unique_count": 4,
+      "valid_count": 4,
+      "cache_size": 7,
+      "global_improved": false,
+      "global_improvement": 0.0,
+      "no_improve_rounds": 0,
+      "status": "ok",
+      "step_entropy": {
+        "imputation": 0.6688153894635335,
+        "scaling": 0.47552322671789615,
+        "encoding": 0.0,
+        "feature_selection": 0.4124458859786992,
+        "outlier_removal": 0.35646970766421754,
+        "dimensionality_reduction": 0.006090694570608539
+      },
+      "mean_entropy": 0.3198908173991592,
+      "pheromone_min": 0.6400000000000001,
+      "pheromone_max": 4.245398920000325,
+      "pheromone_saturation": 0.0,
+      "order_index": 1,
+      "step_order": [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    },
+    {
+      "iteration": 3,
+      "best_score": 0.65,
+      "global_best_score": 0.65,
+      "iteration_best_score": 0.65,
+      "iteration_mean_score": 0.625,
+      "iteration_min_score": 0.6000000000000001,
+      "sampled_unique_count": 4,
+      "valid_count": 4,
+      "cache_size": 10,
+      "global_improved": false,
+      "global_improvement": 0.0,
+      "no_improve_rounds": 1,
+      "status": "ok",
+      "step_entropy": {
+        "imputation": 0.6153849902522464,
+        "scaling": 0.3846133823820708,
+        "encoding": 0.0,
+        "feature_selection": 0.3293664615382568,
+        "outlier_removal": 0.28449310429303165,
+        "dimensionality_reduction": 0.004318279692457349
+      },
+      "mean_entropy": 0.26969603635967715,
+      "pheromone_min": 0.5120000000000001,
+      "pheromone_max": 5.0,
+      "pheromone_saturation": 0.20833333333333334,
+      "order_index": 1,
+      "step_order": [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    }
+  ],
+  "optimizer": "aco",
+  "retrieval_incumbent_protection": {
+    "enabled": false,
+    "candidate_names": [],
+    "candidate_count": 0,
+    "neighbors": []
+  },
+  "ordering_search": {
+    "enabled": false,
+    "strategy": "fixed",
+    "num_orders_requested": 10,
+    "num_orders_evaluated": 1,
+    "orders": [
+      [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    ],
+    "quick_autogluon_per_iteration": false,
+    "quick_autogluon_time_limit": null,
+    "selection_metric": "proxy"
+  },
+  "ordering_iteration_results": [],
+  "per_feature_search": {
+    "enabled": false,
+    "steps": [],
+    "heuristic_source": "n/a",
+    "log": []
+  },
+  "retrieval_local_search": {
+    "enabled": false,
+    "incumbent_protection": false,
+    "protected_candidates": [],
+    "neighbor_k": 1,
+    "top_l": 1,
+    "radius": 1,
+    "random_candidates": 0
+  },
+  "proxy_settings": {
+    "split_seeds": [
+      42,
+      52,
+      62
+    ],
+    "active_step_penalty": 0.0,
+    "row_drop_penalty": 0.0,
+    "imputation_low_missing_penalty": 0.0,
+    "low_missing_threshold": 0.0,
+    "outlier_removal_penalty": 0.0,
+    "dimred_small_feature_penalty": 0.0,
+    "dimred_small_feature_threshold": 0,
+    "verbose_components": true,
+    "classification_model": "logreg",
+    "regression_model": "ensemble",
+    "logreg_max_iter": 3000
+  },
+  "final_autogluon_topk": 1,
+  "aco_hyperparams": {
+    "alpha": 1.0,
+    "beta": 2.0,
+    "evaporation": 0.2,
+    "dataset_weighting": "similarity",
+    "heuristic_top_k": 5,
+    "heuristic_top_l": 3,
+    "heuristic_similarity_temperature": 1.0,
+    "heuristic_eta_floor": 0.05,
+    "heuristic_transfer_method": "weighted_topk_topl",
+    "score_direction": "higher_is_better",
+    "require_autogluon": true,
+    "early_stop_rounds": 0,
+    "min_improvement": 0.0,
+    "per_feature_independent_search": false,
+    "legacy_notebook_aco": false,
+    "retrieval_local_neighbor_k": 1,
+    "retrieval_local_top_l": 1,
+    "retrieval_local_radius": 1,
+    "retrieval_local_random_candidates": 0
+  },
+  "dataset_id": 876,
+  "search_options": {
+    "imputation": [
+      "none",
+      "mean",
+      "median",
+      "most_frequent",
+      "constant",
+      "knn"
+    ],
+    "scaling": [
+      "none",
+      "standard",
+      "minmax",
+      "robust",
+      "maxabs"
+    ],
+    "encoding": [
+      "onehot"
+    ],
+    "feature_selection": [
+      "none",
+      "variance_threshold",
+      "k_best",
+      "mutual_info"
+    ],
+    "outlier_removal": [
+      "none",
+      "iqr",
+      "zscore",
+      "lof",
+      "isolation_forest"
+    ],
+    "dimensionality_reduction": [
+      "none",
+      "pca",
+      "svd"
+    ]
+  },
+  "leakage_holdout": {
+    "eval_ids_total": 23,
+    "perf_cols_dropped": [
+      "1047",
+      "1054",
+      "1066",
+      "1164",
+      "1387",
+      "14",
+      "1520",
+      "1548",
+      "18",
+      "184",
+      "2",
+      "248",
+      "27",
+      "29",
+      "31",
+      "378",
+      "381",
+      "382",
+      "40663",
+      "862",
+      "876",
+      "993"
+    ],
+    "meta_rows_dropped": [
+      "1047",
+      "1054",
+      "1066",
+      "1164",
+      "1387",
+      "14",
+      "1485",
+      "1520",
+      "1548",
+      "18",
+      "184",
+      "2",
+      "248",
+      "27",
+      "29",
+      "31",
+      "378",
+      "381",
+      "382",
+      "40663",
+      "862",
+      "876",
+      "993"
+    ],
+    "perf_cols_before": 901,
+    "perf_cols_after": 879,
+    "meta_rows_before": 2560,
+    "meta_rows_after": 2537
+  },
+  "search_hyperparams": {
+    "k": 5,
+    "heuristic_top_k": 5,
+    "heuristic_top_l": 3,
+    "dataset_weighting": "similarity",
+    "heuristic_transfer_method": "weighted_topk_topl",
+    "heuristic_similarity_temperature": 1.0,
+    "heuristic_eta_floor": 0.05,
+    "score_direction": "higher_is_better",
+    "require_autogluon": true,
+    "autogluon_profile": "best_quality",
+    "optimizer": "aco",
+    "n_ants": 4,
+    "n_iterations": 3,
+    "alpha": 1.0,
+    "beta": 2.0,
+    "evaporation": 0.2,
+    "top_k_pheromone": 3,
+    "weight_method": "linear",
+    "markov_order": 2,
+    "lambda_smooth": 0.0,
+    "interaction_prior_strength": 0.0,
+    "interaction_prior_floor": 0.2,
+    "protect_retrieval_incumbent": false,
+    "retrieval_incumbent_topk": 3,
+    "aco_early_stop_rounds": 0,
+    "aco_min_improvement": 0.0,
+    "per_feature_independent_search": false,
+    "per_feature_steps": "imputation,scaling,encoding",
+    "per_feature_early_stop_rounds": 2,
+    "per_feature_min_improvement": 0.001,
+    "per_feature_feature_patience": 0,
+    "per_feature_feature_min_improvement": 0.0,
+    "per_feature_max_features": 0,
+    "legacy_notebook_aco": false,
+    "retrieval_local_neighbor_k": 1,
+    "retrieval_local_top_l": 1,
+    "retrieval_local_radius": 1,
+    "retrieval_local_random_candidates": 0,
+    "proxy_clf_model": "logreg",
+    "proxy_reg_model": "ensemble",
+    "proxy_split_seeds": [
+      42,
+      52,
+      62
+    ],
+    "proxy_profile": "default",
+    "operator_param_search": false,
+    "operator_param_grid": "light",
+    "no_search": false,
+    "notebook_legacy_mode": false,
+    "notebook_legacy_options": false,
+    "train_metric_inline": true,
+    "metric_path": null,
+    "metric_hidden_dim": 64,
+    "metric_embed_dim": 64,
+    "metric_epochs": 100,
+    "metric_lr": 0.001,
+    "metric_objective": "embedding_cosine",
+    "metric_similarity_target": "rank_cosine",
+    "save_trained_metric": null,
+    "skip_aco_plot": false
+  }
+}

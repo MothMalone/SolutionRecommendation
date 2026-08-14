@@ -1,0 +1,615 @@
+{
+  "pipeline_config": {
+    "imputation": "none",
+    "scaling": "none",
+    "encoding": "onehot",
+    "feature_selection": "none",
+    "outlier_removal": "none",
+    "dimensionality_reduction": "none",
+    "name": "no_preprocessing"
+  },
+  "recommended_performance": 0.5833333333333334,
+  "final_evaluation": {
+    "method": "autogluon",
+    "score": 0.625
+  },
+  "final_performance": 0.625,
+  "confidence": "low",
+  "aco_results": [
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5625
+    ],
+    [
+      {
+        "imputation": "median",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'median', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5625
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "standard",
+        "encoding": "onehot",
+        "feature_selection": "none",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'standard', 'encoding': 'onehot', 'feature_selection': 'none', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5104166666666666
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "standard",
+        "encoding": "onehot",
+        "feature_selection": "none",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'standard', 'encoding': 'onehot', 'feature_selection': 'none', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5104166666666666
+    ],
+    [
+      {
+        "imputation": "most_frequent",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'most_frequent', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5833333333333334
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5833333333333334
+    ],
+    [
+      {
+        "imputation": "median",
+        "scaling": "standard",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'median', 'scaling': 'standard', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.4270833333333333
+    ],
+    [
+      {
+        "imputation": "median",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'median', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5625
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5833333333333334
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "iqr",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'iqr', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5625
+    ],
+    [
+      {
+        "imputation": "knn",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'knn', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5833333333333334
+    ],
+    [
+      {
+        "imputation": "median",
+        "scaling": "robust",
+        "encoding": "onehot",
+        "feature_selection": "mutual_info",
+        "outlier_removal": "zscore",
+        "dimensionality_reduction": "none",
+        "step_order": [
+          "imputation",
+          "scaling",
+          "encoding",
+          "feature_selection",
+          "outlier_removal",
+          "dimensionality_reduction"
+        ],
+        "name": "{'imputation': 'median', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}"
+      },
+      0.5833333333333334
+    ]
+  ],
+  "ag_candidate_scores": {
+    "no_preprocessing": 0.625,
+    "no_search_retrieval": 0.59375,
+    "{'imputation': 'most_frequent', 'scaling': 'robust', 'encoding': 'onehot', 'feature_selection': 'mutual_info', 'outlier_removal': 'zscore', 'dimensionality_reduction': 'none', 'step_order': ['imputation', 'scaling', 'encoding', 'feature_selection', 'outlier_removal', 'dimensionality_reduction']}": 0.59375
+  },
+  "aco_history": [
+    {
+      "iteration": 1,
+      "best_score": 0.5625,
+      "global_best_score": 0.5625,
+      "iteration_best_score": 0.5625,
+      "iteration_mean_score": 0.5364583333333333,
+      "iteration_min_score": 0.5104166666666666,
+      "sampled_unique_count": 4,
+      "valid_count": 4,
+      "cache_size": 3,
+      "global_improved": true,
+      "global_improvement": 0.0,
+      "no_improve_rounds": 0,
+      "status": "ok",
+      "step_entropy": {
+        "imputation": 0.5772452276978061,
+        "scaling": 0.2545315376129133,
+        "encoding": 0.0,
+        "feature_selection": 0.5508331424299887,
+        "outlier_removal": 0.444202213572155,
+        "dimensionality_reduction": 0.010695900706435906
+      },
+      "mean_entropy": 0.3062513370032165,
+      "pheromone_min": 0.8,
+      "pheromone_max": 2.8029996160000734,
+      "pheromone_saturation": 0.0,
+      "order_index": 1,
+      "step_order": [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    },
+    {
+      "iteration": 2,
+      "best_score": 0.5833333333333334,
+      "global_best_score": 0.5833333333333334,
+      "iteration_best_score": 0.5833333333333334,
+      "iteration_mean_score": 0.5390625,
+      "iteration_min_score": 0.4270833333333333,
+      "sampled_unique_count": 4,
+      "valid_count": 4,
+      "cache_size": 6,
+      "global_improved": true,
+      "global_improvement": 0.02083333333333337,
+      "no_improve_rounds": 0,
+      "status": "ok",
+      "step_entropy": {
+        "imputation": 0.5230584589869255,
+        "scaling": 0.17247299605272792,
+        "encoding": 0.0,
+        "feature_selection": 0.3975349582875939,
+        "outlier_removal": 0.3340341062182268,
+        "dimensionality_reduction": 0.006090695071209083
+      },
+      "mean_entropy": 0.2388652024361139,
+      "pheromone_min": 0.6400000000000001,
+      "pheromone_max": 4.24539873280052,
+      "pheromone_saturation": 0.0,
+      "order_index": 1,
+      "step_order": [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    },
+    {
+      "iteration": 3,
+      "best_score": 0.5833333333333334,
+      "global_best_score": 0.5833333333333334,
+      "iteration_best_score": 0.5833333333333334,
+      "iteration_mean_score": 0.578125,
+      "iteration_min_score": 0.5625,
+      "sampled_unique_count": 4,
+      "valid_count": 4,
+      "cache_size": 8,
+      "global_improved": false,
+      "global_improvement": 0.0,
+      "no_improve_rounds": 0,
+      "status": "ok",
+      "step_entropy": {
+        "imputation": 0.5230403705283926,
+        "scaling": 0.17237289135713776,
+        "encoding": 0.0,
+        "feature_selection": 0.3973329448829964,
+        "outlier_removal": 0.3338359037825638,
+        "dimensionality_reduction": 0.0060859284499027826
+      },
+      "mean_entropy": 0.23877800650016556,
+      "pheromone_min": 0.5120000000000001,
+      "pheromone_max": 3.3993189862404156,
+      "pheromone_saturation": 0.0,
+      "order_index": 1,
+      "step_order": [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    }
+  ],
+  "optimizer": "aco",
+  "retrieval_incumbent_protection": {
+    "enabled": false,
+    "candidate_names": [],
+    "candidate_count": 0,
+    "neighbors": []
+  },
+  "ordering_search": {
+    "enabled": false,
+    "strategy": "fixed",
+    "num_orders_requested": 10,
+    "num_orders_evaluated": 1,
+    "orders": [
+      [
+        "imputation",
+        "scaling",
+        "encoding",
+        "feature_selection",
+        "outlier_removal",
+        "dimensionality_reduction"
+      ]
+    ],
+    "quick_autogluon_per_iteration": false,
+    "quick_autogluon_time_limit": null,
+    "selection_metric": "proxy"
+  },
+  "ordering_iteration_results": [],
+  "per_feature_search": {
+    "enabled": false,
+    "steps": [],
+    "heuristic_source": "n/a",
+    "log": []
+  },
+  "retrieval_local_search": {
+    "enabled": false,
+    "incumbent_protection": false,
+    "protected_candidates": [],
+    "neighbor_k": 1,
+    "top_l": 1,
+    "radius": 1,
+    "random_candidates": 0
+  },
+  "proxy_settings": {
+    "split_seeds": [
+      42,
+      52,
+      62
+    ],
+    "active_step_penalty": 0.0,
+    "row_drop_penalty": 0.0,
+    "imputation_low_missing_penalty": 0.0,
+    "low_missing_threshold": 0.0,
+    "outlier_removal_penalty": 0.0,
+    "dimred_small_feature_penalty": 0.0,
+    "dimred_small_feature_threshold": 0,
+    "verbose_components": true,
+    "classification_model": "logreg",
+    "regression_model": "ensemble",
+    "logreg_max_iter": 3000
+  },
+  "final_autogluon_topk": 1,
+  "aco_hyperparams": {
+    "alpha": 1.0,
+    "beta": 2.0,
+    "evaporation": 0.2,
+    "dataset_weighting": "similarity",
+    "heuristic_top_k": 5,
+    "heuristic_top_l": 3,
+    "heuristic_similarity_temperature": 1.0,
+    "heuristic_eta_floor": 0.05,
+    "heuristic_transfer_method": "weighted_topk_topl",
+    "score_direction": "higher_is_better",
+    "require_autogluon": true,
+    "early_stop_rounds": 0,
+    "min_improvement": 0.0,
+    "per_feature_independent_search": false,
+    "legacy_notebook_aco": false,
+    "retrieval_local_neighbor_k": 1,
+    "retrieval_local_top_l": 1,
+    "retrieval_local_radius": 1,
+    "retrieval_local_random_candidates": 0
+  },
+  "dataset_id": 1520,
+  "search_options": {
+    "imputation": [
+      "none",
+      "mean",
+      "median",
+      "most_frequent",
+      "constant",
+      "knn"
+    ],
+    "scaling": [
+      "none",
+      "standard",
+      "minmax",
+      "robust",
+      "maxabs"
+    ],
+    "encoding": [
+      "onehot"
+    ],
+    "feature_selection": [
+      "none",
+      "variance_threshold",
+      "k_best",
+      "mutual_info"
+    ],
+    "outlier_removal": [
+      "none",
+      "iqr",
+      "zscore",
+      "lof",
+      "isolation_forest"
+    ],
+    "dimensionality_reduction": [
+      "none",
+      "pca",
+      "svd"
+    ]
+  },
+  "leakage_holdout": {
+    "eval_ids_total": 23,
+    "perf_cols_dropped": [
+      "1047",
+      "1054",
+      "1066",
+      "1164",
+      "1387",
+      "14",
+      "1520",
+      "1548",
+      "18",
+      "184",
+      "2",
+      "248",
+      "27",
+      "29",
+      "31",
+      "378",
+      "381",
+      "382",
+      "40663",
+      "862",
+      "876",
+      "993"
+    ],
+    "meta_rows_dropped": [
+      "1047",
+      "1054",
+      "1066",
+      "1164",
+      "1387",
+      "14",
+      "1485",
+      "1520",
+      "1548",
+      "18",
+      "184",
+      "2",
+      "248",
+      "27",
+      "29",
+      "31",
+      "378",
+      "381",
+      "382",
+      "40663",
+      "862",
+      "876",
+      "993"
+    ],
+    "perf_cols_before": 901,
+    "perf_cols_after": 879,
+    "meta_rows_before": 2560,
+    "meta_rows_after": 2537
+  },
+  "search_hyperparams": {
+    "k": 5,
+    "heuristic_top_k": 5,
+    "heuristic_top_l": 3,
+    "dataset_weighting": "similarity",
+    "heuristic_transfer_method": "weighted_topk_topl",
+    "heuristic_similarity_temperature": 1.0,
+    "heuristic_eta_floor": 0.05,
+    "score_direction": "higher_is_better",
+    "require_autogluon": true,
+    "autogluon_profile": "best_quality",
+    "optimizer": "aco",
+    "n_ants": 4,
+    "n_iterations": 3,
+    "alpha": 1.0,
+    "beta": 2.0,
+    "evaporation": 0.2,
+    "top_k_pheromone": 3,
+    "weight_method": "linear",
+    "markov_order": 2,
+    "lambda_smooth": 0.0,
+    "interaction_prior_strength": 0.0,
+    "interaction_prior_floor": 0.2,
+    "protect_retrieval_incumbent": false,
+    "retrieval_incumbent_topk": 3,
+    "aco_early_stop_rounds": 0,
+    "aco_min_improvement": 0.0,
+    "per_feature_independent_search": false,
+    "per_feature_steps": "imputation,scaling,encoding",
+    "per_feature_early_stop_rounds": 2,
+    "per_feature_min_improvement": 0.001,
+    "per_feature_feature_patience": 0,
+    "per_feature_feature_min_improvement": 0.0,
+    "per_feature_max_features": 0,
+    "legacy_notebook_aco": false,
+    "retrieval_local_neighbor_k": 1,
+    "retrieval_local_top_l": 1,
+    "retrieval_local_radius": 1,
+    "retrieval_local_random_candidates": 0,
+    "proxy_clf_model": "logreg",
+    "proxy_reg_model": "ensemble",
+    "proxy_split_seeds": [
+      42,
+      52,
+      62
+    ],
+    "proxy_profile": "default",
+    "operator_param_search": false,
+    "operator_param_grid": "light",
+    "no_search": false,
+    "notebook_legacy_mode": false,
+    "notebook_legacy_options": false,
+    "train_metric_inline": true,
+    "metric_path": null,
+    "metric_hidden_dim": 64,
+    "metric_embed_dim": 64,
+    "metric_epochs": 100,
+    "metric_lr": 0.001,
+    "metric_objective": "embedding_cosine",
+    "metric_similarity_target": "rank_cosine",
+    "save_trained_metric": null,
+    "skip_aco_plot": false
+  }
+}
