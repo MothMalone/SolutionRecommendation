@@ -25,6 +25,14 @@ ipywidgets==8.1.1
 ipython
 pickleshare
 
+# UNDECLARED DEPENDENCY OF autodatapre. Search_Space/encoding.py imports category_encoders for its
+# BE / FE / CBE encoders, but the package's own metadata never lists it. Without it those encoders
+# raise, every MCTS candidate scores pre_profit=0.0, `gap > 0` is never true, best_node never leaves
+# the root, and the search silently returns an EMPTY pipeline -- i.e. the raw dataset -- on almost
+# every dataset. That failure is indistinguishable from honest convergence unless you instrument the
+# search. Installing it is required to evaluate AutoDP fairly.
+category_encoders
+
 # These two have no wheels for python >= 3.10 and their setup.py imports pip, which fails under
 # pip's build isolation. setup_autodp_env.sh installs them with --no-build-isolation after
 # cython + setuptools<70 are present.
