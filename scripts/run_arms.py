@@ -39,8 +39,10 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -167,6 +169,7 @@ def read_acorec_result(workdir: Path) -> dict:
         selected = "no_preprocessing"
     else:
         selected = "aco"
+    cfg.pop("name", None)  # a repr of the config itself; pure noise in the results file
     return {
         "status": "ok",
         "score": final.get("score"),
@@ -176,7 +179,9 @@ def read_acorec_result(workdir: Path) -> dict:
         "selected_candidate": selected,
         "step_order": cfg.pop("step_order", None),
         "pipeline": cfg,
-        "ag_candidate_scores": ag or None,
+        # Per-candidate gate scores are verbose (config-repr keys) and incomplete; keep them out of
+        # the results file. Rerun with --keep-scratch if you need them for a specific dataset.
+        "n_gate_candidates": len(ag) or None,
     }
 
 
@@ -205,7 +210,11 @@ def main() -> int:
                          "prepared the SAME way, so both see the same information. leakfree = "
                          "fit-on-train for both.")
     ap.add_argument("--extra", default="", help="extra args passed through to the inner script")
-    ap.add_argument("--scratch", default="", help="scratch dir (default: alongside --out)")
+    ap.add_argument("--scratch", default="",
+                    help="scratch dir. Default: a temp dir OUTSIDE --out's folder, deleted as it "
+                         "goes, so /kaggle/working ends up holding only the results file.")
+    ap.add_argument("--keep-scratch", action="store_true",
+                    help="keep per-dataset working dirs (recommendation.json etc) for debugging")
     args = ap.parse_args()
 
     if args.summarize:
@@ -238,7 +247,9 @@ def main() -> int:
     spec = ARMS[args.arm]
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    scratch = Path(args.scratch) if args.scratch else out_path.parent / f"_scratch_{args.arm}"
+    # Deliberately NOT under out_path.parent: on Kaggle that is /kaggle/working, and the whole
+    # point is that the only thing left there is the results file.
+    scratch = Path(args.scratch) if args.scratch else Path(tempfile.mkdtemp(prefix=f"arms_{args.arm}_"))
     scratch.mkdir(parents=True, exist_ok=True)
 
     base = [d.strip() for d in args.datasets.split(",") if d.strip()] or datasets_for(args.arm)
@@ -283,10 +294,15 @@ def main() -> int:
 
         row["total_seconds"] = round(time.time() - t0, 1)
         _append(out_path, row)
+        if not args.keep_scratch:
+            for junk in scratch.glob(f"*{ds}*"):
+                shutil.rmtree(junk, ignore_errors=True) if junk.is_dir() else junk.unlink(missing_ok=True)
         print(f"     status={row.get('status')} score={row.get('score')} "
               f"time={row['total_seconds']}s")
 
-    print(f"\n[arms] wrote {out_path}")
+    if not args.keep_scratch and not args.scratch:
+        shutil.rmtree(scratch, ignore_errors=True)
+    print(f"\n[arms] wrote {out_path}  (only file produced; scratch removed)")
     return 0
 
 
