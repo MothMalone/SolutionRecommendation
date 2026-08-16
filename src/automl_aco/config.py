@@ -101,6 +101,88 @@ DEFAULT_ORDERING_CONSTRAINTS: List[tuple[str, str]] = [
 ]
 
 
+# =============================================================================================
+# AutoDP's operator space, reimplemented leak-free (see preprocessing/autodp_ops.py for the
+# complete deviation table). Used by the cross-comparison arms so that "same operator space" is a
+# real claim rather than a family-level approximation.
+#
+# Codes are UPPERCASE; ACORec's are lowercase. A config is therefore self-describing and the two
+# spaces cannot be mixed up by accident.
+#
+# Differences in COVERAGE, which must be disclosed wherever these arms are reported:
+#   * 22 of their 24 operators. EM and AD are dropped -- see autodp_ops.DROPPED for the reasons.
+#   * duplicate_removal is a step ACORec does not otherwise have; it exists only in this space.
+#   * dimensionality_reduction is absent here, because their space has no such family.
+# =============================================================================================
+AUTODP_OPERATORS: "OrderedDict[str, List[str]]" = OrderedDict(
+    [
+        ("imputation", ["none", "MEAN", "MEDIAN", "MF", "KNN", "MICE", "RAND", "DROP"]),
+        ("encoding", ["OE", "BE", "FE", "CBE"]),
+        ("scaling", ["none", "ZS", "MM", "DS"]),
+        ("feature_selection", ["none", "MR", "WR", "LC", "TB"]),
+        ("outlier_removal", ["none", "ZSB", "IQR", "LOF"]),
+        ("duplicate_removal", ["none", "ED"]),
+    ]
+)
+
+AUTODP_PIPELINE_OPTIONS: "OrderedDict[str, List[str]]" = OrderedDict(
+    [
+        ("imputation", AUTODP_OPERATORS["imputation"]),
+        ("scaling", AUTODP_OPERATORS["scaling"]),
+        ("encoding", AUTODP_OPERATORS["encoding"]),
+        ("duplicate_removal", AUTODP_OPERATORS["duplicate_removal"]),
+        ("outlier_removal", AUTODP_OPERATORS["outlier_removal"]),
+        ("feature_selection", AUTODP_OPERATORS["feature_selection"]),
+    ]
+)
+
+AUTODP_PREPROCESSOR_ORDER: List[str] = [
+    "imputation",
+    "scaling",
+    "encoding",
+    "duplicate_removal",
+    "outlier_removal",
+    "feature_selection",
+]
+
+AUTODP_ORDERING_CONSTRAINTS: List[tuple[str, str]] = [
+    ("imputation", "encoding"),
+    ("imputation", "scaling"),
+    ("imputation", "outlier_removal"),
+    ("imputation", "feature_selection"),
+    ("imputation", "duplicate_removal"),
+    ("encoding", "feature_selection"),
+    ("outlier_removal", "feature_selection"),
+    ("duplicate_removal", "outlier_removal"),
+    ("duplicate_removal", "feature_selection"),
+]
+
+def constraints_for(step_names: Iterable[str]) -> List[tuple[str, str]]:
+    """Precedence constraints appropriate to whichever operator space these steps came from.
+
+    Selected by shape rather than by a flag, so every call site picks the right set without having
+    to thread the space name through: ``duplicate_removal`` exists only in AutoDP's space.
+    """
+    steps = set(step_names)
+    base = AUTODP_ORDERING_CONSTRAINTS if "duplicate_removal" in steps else DEFAULT_ORDERING_CONSTRAINTS
+    return [(a, b) for a, b in base if a in steps and b in steps]
+
+
+#: Registry so callers can select a space by name without importing each constant.
+OPERATOR_SPACES: Dict[str, Dict[str, Any]] = {
+    "ours": {
+        "options": DEFAULT_PIPELINE_OPTIONS,
+        "order": DEFAULT_PREPROCESSOR_ORDER,
+        "constraints": DEFAULT_ORDERING_CONSTRAINTS,
+    },
+    "theirs": {
+        "options": AUTODP_PIPELINE_OPTIONS,
+        "order": AUTODP_PREPROCESSOR_ORDER,
+        "constraints": AUTODP_ORDERING_CONSTRAINTS,
+    },
+}
+
+
 @dataclass
 class PipelineConfig:
     """Typed pipeline configuration container."""

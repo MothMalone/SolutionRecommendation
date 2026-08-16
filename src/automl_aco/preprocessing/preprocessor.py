@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover - optional dependency
 
 from ..config import DEFAULT_PREPROCESSOR_ORDER
 from ..utils.operator_spec import parse_operator_spec
+from . import autodp_ops as adp
 
 
 class Preprocessor:
@@ -39,6 +40,7 @@ class Preprocessor:
         self.cat_imputer_map = None
         self.encoder = None
         self.encoder_map = None
+        self.encoder_output_columns_ = None
         self.selector = None
         self.scaler = None
         self.scaler_map = None
@@ -52,6 +54,7 @@ class Preprocessor:
 
         self.outlier_cleaner_num = None
         self.outlier_cleaner_cat = None
+        self.row_drop_log_ = []
 
     @staticmethod
     def _resolve_feature_operator(spec: object, column: str, default: str = "none") -> str:
@@ -80,13 +83,17 @@ class Preprocessor:
 
         for step in self.step_order:
             if step == "imputation":
+                # AutoDP's DROP deletes rows instead of filling, so it needs y in scope.
+                X_num, X_cat, y = self._fit_row_drop_imputation(X_num, X_cat, y)
                 X_num, X_cat = self._fit_imputation(X_num, X_cat)
+            elif step == "duplicate_removal":
+                X_num, X_cat, y = self._fit_duplicate_removal(X_num, X_cat, y)
             elif step == "outlier_removal":
                 X_num, X_cat, y = self._fit_outlier_removal(X_num, X_cat, y)
             elif step == "outlier_cleaning":
                 X_num, X_cat = self._fit_outlier_cleaning(X_num, X_cat)
             elif step == "encoding":
-                X_cat = self._fit_encoding(X_cat)
+                X_cat = self._fit_encoding(X_cat, y)
             elif step == "feature_selection":
                 X_num, X_cat = self._fit_feature_selection(X_num, X_cat, y)
             elif step == "scaling":
@@ -123,6 +130,8 @@ class Preprocessor:
         for step in self.step_order:
             if step == "imputation":
                 X_num, X_cat = self._transform_imputation(X_num, X_cat)
+            elif step == "duplicate_removal":
+                pass  # row-dropping: train only, exactly as outlier_removal below
             elif step == "outlier_removal":
                 pass
             elif step == "outlier_cleaning":
@@ -170,6 +179,52 @@ class Preprocessor:
 
         return pd.DataFrame(arr, index=index, columns=recovered_cols)
 
+    def _apply_keep_mask(self, mask, X_num, X_cat, y):
+        """Drop rows on the TRAINING block only, keeping X and y aligned.
+
+        Records what actually happened in ``self.row_drop_log_``. A row-dropping operator that ends
+        up dropping nothing -- because the mask was empty and had to be ignored, or because it
+        selected every row -- is otherwise indistinguishable from one that acted, which is exactly
+        the ambiguity that produced the empty-pipeline artifact in the AutoDP census.
+        """
+        if not hasattr(self, "row_drop_log_") or self.row_drop_log_ is None:
+            self.row_drop_log_ = []
+        n_before = 0 if mask is None else int(len(mask))
+        if mask is None or bool(mask.all()):
+            self.row_drop_log_.append({"dropped": 0, "kept": n_before, "ignored": False})
+            return X_num, X_cat, y
+        if not bool(mask.any()):
+            # Would delete every row. Ignored rather than handing back an empty frame -- but this
+            # means the operator did NOTHING, and that has to be visible downstream.
+            self.row_drop_log_.append({"dropped": 0, "kept": n_before, "ignored": True})
+            return X_num, X_cat, y
+        self.row_drop_log_.append(
+            {"dropped": n_before - int(mask.sum()), "kept": int(mask.sum()), "ignored": False}
+        )
+        if X_num is not None:
+            X_num = X_num.loc[mask].reset_index(drop=True)
+        if X_cat is not None:
+            X_cat = X_cat.loc[mask].reset_index(drop=True)
+        if y is not None:
+            y = y.loc[mask.values].reset_index(drop=True)
+        return X_num, X_cat, y
+
+    def _fit_row_drop_imputation(self, X_num, X_cat, y):
+        """AutoDP's ``DROP``: delete rows containing any missing value (train split only)."""
+        method, _ = parse_operator_spec(self.config.get("imputation", "none"))
+        if method != "DROP":
+            return X_num, X_cat, y
+        mask = adp.missing_row_mask(X_num, X_cat)
+        return self._apply_keep_mask(mask, X_num, X_cat, y)
+
+    def _fit_duplicate_removal(self, X_num, X_cat, y):
+        """AutoDP's ``ED``: exact duplicate removal (train split only)."""
+        method, _ = parse_operator_spec(self.config.get("duplicate_removal", "none"))
+        if method == "none":
+            return X_num, X_cat, y
+        mask = adp.duplicate_keep_mask(X_num, X_cat, method)
+        return self._apply_keep_mask(mask, X_num, X_cat, y)
+
     def _fit_imputation(self, X_num, X_cat):
         method_raw = self.config["imputation"]
         self.num_imputer = None
@@ -215,6 +270,22 @@ class Preprocessor:
             return X_num, X_cat
 
         method, params = parse_operator_spec(method_raw)
+
+        if adp.is_autodp_op(method):
+            # DROP has already removed incomplete TRAIN rows in _fit_row_drop_imputation; the
+            # imputers it returns exist only to fill the test split at transform time.
+            self.num_imputer, self.cat_imputer = adp.build_imputers(method, X_num, X_cat)
+            if X_num is not None and self.num_imputer is not None:
+                X_num = self._imputer_output_to_df(
+                    self.num_imputer.fit_transform(X_num),
+                    index=X_num.index, original_columns=X_num.columns, imputer=self.num_imputer,
+                )
+            if X_cat is not None and self.cat_imputer is not None:
+                X_cat = self._imputer_output_to_df(
+                    self.cat_imputer.fit_transform(X_cat),
+                    index=X_cat.index, original_columns=X_cat.columns, imputer=self.cat_imputer,
+                )
+            return X_num, X_cat
 
         if X_num is not None and method != "none":
             if method == "knn":
@@ -291,6 +362,15 @@ class Preprocessor:
         method, params = parse_operator_spec(method_raw)
         if X_num is None or method == "none":
             return X_num, X_cat, y
+
+        if adp.is_autodp_op(method):
+            X_num = X_num.reset_index(drop=True)
+            if X_cat is not None:
+                X_cat = X_cat.reset_index(drop=True)
+            if y is not None:
+                y = y.reset_index(drop=True)
+            mask = adp.outlier_keep_mask(X_num, method)
+            return self._apply_keep_mask(mask, X_num, X_cat, y)
 
         if X_num is not None:
             X_num = X_num.reset_index(drop=True)
@@ -444,7 +524,7 @@ class Preprocessor:
     # -----------------------------
     # 3. Encoding
     # -----------------------------
-    def _fit_encoding(self, X_cat):
+    def _fit_encoding(self, X_cat, y=None):
         method_raw = self.config["encoding"]
         self.encoder = None
         self.encoder_map = None
@@ -511,6 +591,22 @@ class Preprocessor:
         method, _params = parse_operator_spec(method_raw)
         if X_cat is None or method == "none":
             return X_cat
+
+        if adp.is_autodp_op(method):
+            self.encoder = adp.build_encoder(method)
+            if method in adp.SUPERVISED_ENCODERS:
+                if y is None:
+                    raise ValueError(f"AutoDP encoder {method} is supervised and requires y at fit")
+                # Fitted on the TRAINING target only. Their released code concatenates
+                # train+test targets here; that is the leak this arm exists to remove.
+                out = self.encoder.fit_transform(X_cat, pd.Series(y).reset_index(drop=True))
+            else:
+                out = self.encoder.fit_transform(X_cat)
+            out = out if isinstance(out, pd.DataFrame) else pd.DataFrame(out, index=X_cat.index)
+            out.index = X_cat.index
+            self.encoder_output_columns_ = [str(c) for c in out.columns]
+            out.columns = self.encoder_output_columns_
+            return out
 
         if method == "onehot":
             try:
@@ -580,6 +676,15 @@ class Preprocessor:
         if X_cat is None or self.encoder is None:
             return X_cat
 
+        method, _ = parse_operator_spec(self.config.get("encoding", "none"))
+        if adp.is_autodp_op(method):
+            out = self.encoder.transform(X_cat)
+            out = out if isinstance(out, pd.DataFrame) else pd.DataFrame(out, index=X_cat.index)
+            out.index = X_cat.index
+            out.columns = [str(c) for c in out.columns]
+            # Pin the fitted column set so train/test can never disagree.
+            return out.reindex(columns=self.encoder_output_columns_, fill_value=0)
+
         arr = self.encoder.transform(X_cat)
 
         if hasattr(self.encoder, "get_feature_names_out"):
@@ -620,7 +725,9 @@ class Preprocessor:
             X_all = X_cat.copy()
             self.cat_columns_ = X_cat.columns
 
-        if fs == "variance_threshold":
+        if adp.is_autodp_op(fs):
+            self.selector = adp.build_selector(fs, X_all, y)
+        elif fs == "variance_threshold":
             try:
                 threshold = float(params.get("t", params.get("threshold", 0.01)))
             except Exception:
@@ -730,7 +837,7 @@ class Preprocessor:
         if X is None or method == "none":
             return X
 
-        self.scaler = {
+        self.scaler = adp.build_scaler(method) if adp.is_autodp_op(method) else {
             "standard": StandardScaler(),
             "minmax": MinMaxScaler(),
             "robust": RobustScaler(),

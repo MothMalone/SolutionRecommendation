@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import traceback
 import re
 import sys
 import time
@@ -20,6 +21,8 @@ import pandas as pd
 import numpy as np
 
 from automl_aco.config import (
+    AUTODP_PIPELINE_OPTIONS,
+    AUTODP_PREPROCESSOR_ORDER,
     DEFAULT_PIPELINE_OPTIONS,
     KAGGLE_METAFEATURES_PATH,
     KAGGLE_PIPELINES_PATH,
@@ -249,6 +252,42 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "During search, always include the retrieval/no-search incumbent candidates in final evaluation. "
             "This makes search a safe refinement step instead of replacing the retrieval baseline."
+        ),
+    )
+    parser.add_argument(
+        "--operator-space",
+        choices=["ours", "theirs"],
+        default="ours",
+        help=(
+            "Which operator space ACORec searches. 'ours' = the 19-operator ACORec space. "
+            "'theirs' = AutoDP's 22 operators reimplemented under our fit/transform discipline "
+            "(see src/automl_aco/preprocessing/autodp_ops.py for the full deviation table). "
+            "'theirs' adds a duplicate_removal step and has no dimensionality_reduction, because "
+            "that is the shape of their space. NOTE: the reference performance matrix is written "
+            "in OUR operator codes, so the no_search_retrieval transfer arm is disabled under "
+            "'theirs' unless --transfer-arm-anyway is given."
+        ),
+    )
+    parser.add_argument(
+        "--prepare-mode",
+        choices=["leakfree", "native"],
+        default="leakfree",
+        help=(
+            "How the chosen pipeline is FITTED for the final score. 'leakfree' = fit on train, "
+            "transform test (ACORec's normal discipline). 'native' = fit on the FULL dataset, "
+            "train and test together, mirroring AutoDP's published protocol, whose operators fit "
+            "on concat(train, test). Use 'native' ONLY for the like-for-like AutoDP comparison: "
+            "under it neither method's score measures generalisation, but both get the same "
+            "information, which is what makes that comparison fair."
+        ),
+    )
+    parser.add_argument(
+        "--transfer-arm-anyway",
+        action="store_true",
+        help=(
+            "Keep the no_search_retrieval transfer arm under --operator-space theirs. Off by "
+            "default because the retrieved pipelines are coerced from our operator vocabulary "
+            "into theirs, which silently produces degenerate seeds rather than an error."
         ),
     )
     parser.add_argument(
@@ -1296,7 +1335,7 @@ def main() -> None:
         if not cfg:
             return "None"
         parts = []
-        for step in DEFAULT_PIPELINE_OPTIONS.keys():
+        for step in _active_options().keys():
             if step in cfg:
                 parts.append(f"{step}={cfg[step]}")
         if isinstance(cfg.get("step_order"), list):
@@ -1392,10 +1431,43 @@ def main() -> None:
             return load_dummy_dataset(dataset_id, verbose=args.verbose)
         raise ValueError(f"Unknown dataset source: {dataset_source}")
 
+    def _active_options():
+        """The operator space this run is searching, before per-run restriction."""
+        if str(getattr(args, "operator_space", "ours")) == "theirs":
+            return AUTODP_PIPELINE_OPTIONS
+        if getattr(args, "notebook_legacy_options", False):
+            return NOTEBOOK_LEGACY_PIPELINE_OPTIONS
+        return DEFAULT_PIPELINE_OPTIONS
+
+    def _active_step_order():
+        return (list(AUTODP_PREPROCESSOR_ORDER)
+                if str(getattr(args, "operator_space", "ours")) == "theirs" else None)
+
     def _build_run_options(dataset_id: Any):
         # Copy lists so per-run constraints do not mutate global defaults.
-        base_options = NOTEBOOK_LEGACY_PIPELINE_OPTIONS if args.notebook_legacy_options else DEFAULT_PIPELINE_OPTIONS
+        if str(getattr(args, "operator_space", "ours")) == "theirs":
+            # AutoDP's operator space, reimplemented leak-free. See
+            # src/automl_aco/preprocessing/autodp_ops.py for the full deviation table.
+            base_options = AUTODP_PIPELINE_OPTIONS
+        elif args.notebook_legacy_options:
+            base_options = NOTEBOOK_LEGACY_PIPELINE_OPTIONS
+        else:
+            base_options = DEFAULT_PIPELINE_OPTIONS
         options = {step: list(vals) for step, vals in base_options.items()}
+
+        # Under the native (transductive) protocol the pipeline is fitted on the full frame and
+        # applied via transform(), which never deletes rows -- so a row-dropping operator would be
+        # a silent no-op. Remove them from the search rather than let them be selected and do
+        # nothing. This SHRINKS the native search space (see docs/ARMS.md) and must be disclosed.
+        if str(getattr(args, "prepare_mode", "leakfree")) == "native":
+            from automl_aco.search.evaluation import _ROW_DROPPING_OPERATORS
+            dropped = []
+            for step, vals in list(options.items()):
+                keep = [v for v in vals if str(v) not in _ROW_DROPPING_OPERATORS]
+                dropped += [v for v in vals if str(v) in _ROW_DROPPING_OPERATORS]
+                options[step] = keep or ["none"]
+            if dropped and getattr(args, "verbose", False):
+                print(f"  [prepare-mode native] excluded row-dropping operators: {sorted(set(dropped))}")
         # Operator-space restriction (e.g. DiffPrep "their space" drops feature engineering ops).
         if getattr(args, "exclude_steps", ""):
             for _st in [s.strip() for s in str(args.exclude_steps).split(",") if s.strip()]:
@@ -1640,12 +1712,12 @@ def main() -> None:
                     scalers = [s for s in run_options.get("scaling", []) if str(s).lower() != "none"] or ["standard"]
                     light_cands = []
                     for s in scalers:
-                        c = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                        c = {step: "none" for step in _active_options()}
                         c["scaling"] = s
                         c["encoding"] = "onehot"
                         c["name"] = f"light_{s}"
                         light_cands.append(c)
-                    no_prep = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    no_prep = {step: "none" for step in _active_options()}
                     no_prep["encoding"] = "onehot"
                     no_prep["name"] = "no_preprocessing"
                     _bc, _bs, b_results, _b = evaluate_candidates_autogluon(
@@ -1699,7 +1771,7 @@ def main() -> None:
                     )
                     if ns_cfg is None:
                         raise RuntimeError(f"No retrieval neighbor available for {dataset_id}")
-                    no_prep = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    no_prep = {step: "none" for step in _active_options()}
                     no_prep["encoding"] = "onehot"
                     no_prep["name"] = "no_preprocessing"
                     _b_cfg, _b_best, b_results, _b = evaluate_candidates_autogluon(
@@ -1740,11 +1812,11 @@ def main() -> None:
                     continue
                 if args.baseline_only == "autogluon_native":
                     # Raw data straight to AutoGluon (identity pipeline: AG's own preprocessing only).
-                    base_cfg = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    base_cfg = {step: "none" for step in _active_options()}
                     base_cfg["encoding"] = "none"
                     base_cfg["name"] = "autogluon_native"
                 else:
-                    base_cfg = {step: "none" for step in DEFAULT_PIPELINE_OPTIONS}
+                    base_cfg = {step: "none" for step in _active_options()}
                     base_cfg["encoding"] = "onehot"
                     base_cfg["name"] = "no_preprocessing"
                 b_cfg, b_score, b_results, _b = evaluate_candidates_autogluon(
@@ -1804,6 +1876,15 @@ def main() -> None:
                     "interaction_prior_floor": float(args.interaction_prior_floor),
                     "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
                     "hybrid_select": bool(args.hybrid_select),
+                    "prepare_mode": str(getattr(args, "prepare_mode", "leakfree")),
+                    # The reference performance matrix is written in OUR operator codes. Under
+                    # --operator-space theirs the retrieved pipelines would be coerced into their
+                    # vocabulary by _coerce_pipeline_to_options, producing degenerate seeds
+                    # silently rather than an error, so the transfer arm is dropped by default.
+                    "hybrid_include_no_search": (
+                        True if str(getattr(args, "operator_space", "ours")) != "theirs"
+                        else bool(getattr(args, "transfer_arm_anyway", False))
+                    ),
                     "hybrid_floor": str(args.hybrid_floor),
                     "noprep_penalty": float(getattr(args, "noprep_penalty", 0.0)),
                     "hybrid_select_margin": float(args.hybrid_select_margin),
@@ -1872,6 +1953,8 @@ def main() -> None:
         except Exception as exc:
             elapsed = time.perf_counter() - run_start
             print(f"  Dataset {dataset_id} failed: {exc}")
+            if os.environ.get("ACOREC_TRACEBACK"):
+                traceback.print_exc()
             run_summaries.append(
                 {
                     "dataset_id": dataset_id,

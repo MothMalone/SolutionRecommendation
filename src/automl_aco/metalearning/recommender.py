@@ -10,7 +10,7 @@ from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.impute import SimpleImputer
 from sklearn.metrics.pairwise import cosine_similarity
 
-from ..config import DEFAULT_ORDERING_CONSTRAINTS, DEFAULT_PIPELINE_OPTIONS
+from ..config import DEFAULT_ORDERING_CONSTRAINTS, DEFAULT_PIPELINE_OPTIONS, constraints_for
 from ..utils.logging import get_logger
 from ..metalearning.metric import train_siamese_regression_metric, save_metric as save_metric_file, load_metric as load_metric_file
 from ..metalearning.dqn_policy import (
@@ -929,6 +929,8 @@ class MetaPipelineRecommender:
         select_margin: float = 0.0,
         cv_select_folds: int = 0,
         seed: int = 42,
+        noprep_penalty: float = 0.0,
+        prepare_mode: str = "leakfree",
     ):
         if int(cv_select_folds) and int(cv_select_folds) > 1:
             return evaluate_candidates_autogluon_cv(
@@ -941,6 +943,8 @@ class MetaPipelineRecommender:
                 select_default_name=select_default_name,
                 select_margin=select_margin,
                 seed=int(seed),
+                noprep_penalty=float(noprep_penalty),
+                prepare_mode=str(prepare_mode),
                 verbose=self.verbose,
             )
         return evaluate_candidates_autogluon(
@@ -953,6 +957,7 @@ class MetaPipelineRecommender:
             select_on_val=select_on_val,
             select_default_name=select_default_name,
             select_margin=select_margin,
+            prepare_mode=str(prepare_mode),
         )
 
     def _evaluate_candidates_with_simple_models(
@@ -1192,6 +1197,41 @@ class MetaPipelineRecommender:
         seeds = self._dedupe_candidate_configs(seeds, options, step_order=step_order)
         return seeds, seed_rows, top_neighbors
 
+    def retrieval_no_search_pipeline(
+        self,
+        *,
+        new_dataset: Any,
+        metafeatures_func,
+        options: Optional[Mapping[str, Sequence[str]]] = None,
+        neighbor_k: int = 1,
+        top_l: int = 1,
+        score_direction: str = "higher_is_better",
+        query_dataset_id: Optional[Any] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], List[Tuple[Any, float]]]:
+        """The 'no-search' transfer-only pipeline: the top-L best pipeline of the top-K most-similar
+        reference dataset(s), under the SAME learned metric the search uses. neighbor_k=top_l=1 gives
+        the single best pipeline of the single nearest neighbor. Leak-free (query ID excluded)."""
+        options = options or self.pipeline_options
+        base_order = list(options.keys())
+        new_mf = metafeatures_func(new_dataset)
+        new_mf_df = pd.DataFrame([new_mf]).reindex(columns=self.metafeatures_df.columns, fill_value=0)
+        new_mf_imputed = self.imputer.transform(new_mf_df)
+        new_mf_scaled = self.scaler.transform(new_mf_imputed).ravel()
+        seeds, rows, neighbors = self._retrieved_seed_configs(
+            new_metafeatures=new_mf_scaled,
+            options=options,
+            neighbor_k=max(1, int(neighbor_k)),
+            top_l=max(1, int(top_l)),
+            score_direction=str(score_direction),
+            query_dataset_id=query_dataset_id,
+            step_order=base_order,
+        )
+        if not seeds:
+            return None, None, neighbors
+        cfg = dict(seeds[0])
+        cfg["name"] = "no_search_retrieval"
+        return cfg, (rows[0] if rows else None), neighbors
+
     def _local_mutation_candidates(
         self,
         *,
@@ -1429,11 +1469,7 @@ class MetaPipelineRecommender:
         )
 
         base_order = list(options.keys())
-        constraints = [
-            (a, b)
-            for a, b in DEFAULT_ORDERING_CONSTRAINTS
-            if a in base_order and b in base_order
-        ]
+        constraints = constraints_for(base_order)
 
         order_policy_mode = str(params.get("dqn_order_policy", "ctxpipe")).lower().strip()
         max_logic_orders = int(params.get("dqn_num_logic_orders", 6))
@@ -1744,6 +1780,7 @@ class MetaPipelineRecommender:
                 raise ValueError("per_feature_independent_search requires optimizer='aco'")
             retrieval_local_protected_candidates: List[Dict[str, Any]] = []
             protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
+            ag_candidate_scores: Dict[str, float] = {}
             hybrid_select = bool(aco_params.get("hybrid_select", False))
             hybrid_select_margin = float(aco_params.get("hybrid_select_margin", 0.0))
             cv_select_folds = int(aco_params.get("cv_select_folds", 0))
@@ -1828,7 +1865,8 @@ class MetaPipelineRecommender:
             else:
                 per_feature_pipeline_log = []
             if search_ordering:
-                constraints = order_constraints if order_constraints is not None else DEFAULT_ORDERING_CONSTRAINTS
+                constraints = (order_constraints if order_constraints is not None
+                               else constraints_for(options.keys()))
                 constraints = [(a, b) for a, b in constraints if a in base_order and b in base_order]
                 order_cfg = OrderSearchConfig(
                     steps=tuple(base_order),
@@ -2002,6 +2040,7 @@ class MetaPipelineRecommender:
                                 [order_best_cfg],
                                 time_limit_per_model=quick_order_eval_time_limit,
                                 autogluon_profile=autogluon_profile,
+                                prepare_mode=str(aco_params.get("prepare_mode", "leakfree")),
                             )
                             if ag_cfg is not None and ag_results and np.isfinite(ag_score):
                                 order_best_cfg = dict(ag_cfg)
@@ -2156,14 +2195,74 @@ class MetaPipelineRecommender:
                                 step_order=base_order,
                             )
                         if hybrid_select:
-                            # Add the no-preprocessing baseline as an explicit no-search candidate;
-                            # the val-based selection then picks it when search would over-process.
-                            no_prep = {step: "none" for step in options}
-                            if "encoding" in no_prep:
-                                no_prep["encoding"] = "onehot"  # encoding is required for AutoGluon input
-                            no_prep["name"] = "no_preprocessing"
+                            extra_candidates: List[Dict[str, Any]] = []
+                            # No-search (transfer-only) arm: the best pipeline of the most-similar
+                            # reference dataset(s), under the learned metric. This is what the method
+                            # would recommend WITHOUT ACO search, so the CV gate now chooses among
+                            # search vs transfer-only vs raw (the do-no-harm floor) — not just
+                            # search vs raw.
+                            if bool(aco_params.get("hybrid_include_no_search", True)):
+                                try:
+                                    ns_seeds, _ns_rows, _ns_neighbors = self._retrieved_seed_configs(
+                                        new_metafeatures=new_mf_scaled,
+                                        options=options,
+                                        neighbor_k=max(1, int(aco_params.get("hybrid_no_search_neighbor_k", 1))),
+                                        top_l=max(1, int(aco_params.get("hybrid_no_search_top_l", 1))),
+                                        score_direction=str(aco_params.get("score_direction", "higher_is_better")),
+                                        query_dataset_id=aco_params.get("query_dataset_id"),
+                                        step_order=base_order,
+                                    )
+                                    for _i, _cfg in enumerate(ns_seeds, start=1):
+                                        _c = dict(_cfg)
+                                        _c["name"] = (
+                                            "no_search_retrieval" if len(ns_seeds) == 1
+                                            else f"no_search_retrieval_{_i}"
+                                        )
+                                        extra_candidates.append(_c)
+                                except Exception as _ns_exc:
+                                    logger.info("no-search retrieval candidate unavailable: %s", _ns_exc)
+                            # Floor candidate(s) — the conservative fallback the gate keeps when search
+                            # doesn't beat it. Two modes:
+                            #   "none"  -> the bare no-preprocessing pipeline (all-none + onehot).
+                            #   "light" -> a normalization-only pipeline (scale + onehot, NO imputation,
+                            #              NO structural ops). On AutoGluon this ties no-prep (scaling is
+                            #              absorbed) but is a REAL preprocessing pipeline, so the method
+                            #              never recommends "no preprocessing". One candidate per available
+                            #              scaler; CV picks the best-scoring -> highest light score.
+                            # The floor needs SOME encoding so AutoGluon receives numeric input.
+                            # "onehot" only exists in ACORec's space; under AutoDP's space the
+                            # minimal equivalent is its first encoder (OE, plain ordinal).
+                            _enc_opts = [str(e) for e in options.get("encoding", [])]
+                            _floor_enc = ("onehot" if "onehot" in _enc_opts
+                                          else (_enc_opts[0] if _enc_opts else None))
+                            hybrid_floor = str(aco_params.get("hybrid_floor", "none")).lower().strip()
+                            floor_default_name = "no_preprocessing"
+                            if hybrid_floor == "light":
+                                avail = [s for s in options.get("scaling", []) if str(s).lower() != "none"]
+                                # Curated short list keeps the CV gate affordable (each candidate costs
+                                # k+1 AG fits). standard=general, robust=outlier-tolerant; both tie no-prep.
+                                pref = str(aco_params.get("hybrid_floor_scalers", "standard,robust"))
+                                wanted = [s.strip() for s in pref.split(",") if s.strip()]
+                                scalers = [s for s in wanted if s in avail] or avail[:1] or ["standard"]
+                                first_light = None
+                                for s in scalers:
+                                    light = {step: "none" for step in options}
+                                    light["scaling"] = s
+                                    if "encoding" in light and _floor_enc:
+                                        light["encoding"] = _floor_enc
+                                    light["name"] = f"light_{s}"
+                                    extra_candidates.append(light)
+                                    if first_light is None:
+                                        first_light = light["name"]
+                                floor_default_name = first_light or "light_standard"
+                            else:
+                                no_prep = {step: "none" for step in options}
+                                if "encoding" in no_prep and _floor_enc:
+                                    no_prep["encoding"] = _floor_enc  # required for AutoGluon input
+                                no_prep["name"] = "no_preprocessing"
+                                extra_candidates.append(no_prep)
                             ag_candidates = self._dedupe_candidate_configs(
-                                [*ag_candidates, no_prep], options, step_order=base_order,
+                                [*ag_candidates, *extra_candidates], options, step_order=base_order,
                             )
                         ag_best_cfg, ag_score, ag_results, _ag_unsorted = self._evaluate_candidates_with_autogluon(
                             new_dataset,
@@ -2172,14 +2271,24 @@ class MetaPipelineRecommender:
                             time_limit_per_model=time_limit_per_model,
                             autogluon_profile=autogluon_profile,
                             select_on_val=hybrid_select,
-                            select_default_name="no_preprocessing" if hybrid_select else None,
+                            select_default_name=floor_default_name if hybrid_select else None,
                             select_margin=hybrid_select_margin,
                             cv_select_folds=cv_select_folds,
                             seed=int(aco_params.get("seed", 42)),
+                            noprep_penalty=float(aco_params.get("noprep_penalty", 0.0)),
+                            prepare_mode=str(aco_params.get("prepare_mode", "leakfree")),
                         )
                         if ag_best_cfg is not None and ag_results and np.isfinite(ag_score):
                             best_pipeline = ag_best_cfg
                             final_eval = {"method": "autogluon", "score": float(ag_score)}
+                            # Per-candidate AG test scores -> makes the no-search-vs-search and
+                            # floor ablations a free re-aggregation of one headline run.
+                            try:
+                                ag_candidate_scores = {
+                                    str(cfg.get("name")): float(sc) for cfg, sc in (ag_results or [])
+                                }
+                            except Exception:
+                                ag_candidate_scores = {}
                         else:
                             final_eval = {
                                 "method": "autogluon_failed",
@@ -2243,6 +2352,7 @@ class MetaPipelineRecommender:
                 "final_performance": float(final_eval.get("score", best_score)),
                 "confidence": "high" if best_score > 0.8 else "low",
                 "aco_results": aco_unsorted_res,
+                "ag_candidate_scores": ag_candidate_scores,
                 "aco_history": all_history,
                 "optimizer": optimizer_name,
                 "retrieval_incumbent_protection": {
@@ -2357,6 +2467,7 @@ class MetaPipelineRecommender:
                     top_candidate_configs,
                     time_limit_per_model=time_limit_per_model,
                     autogluon_profile=autogluon_profile,
+                    prepare_mode=str(aco_params.get("prepare_mode", "leakfree")),
                 )
             except Exception as exc:
                 logger.warning("AutoGluon evaluation failed, falling back to simple models: %s", exc)

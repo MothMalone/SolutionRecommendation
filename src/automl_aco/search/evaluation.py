@@ -143,6 +143,57 @@ def _make_preprocessor(cfg: Dict[str, Any]) -> Preprocessor:
     return Preprocessor(pre_cfg)
 
 
+#: Operators that delete rows. Under prepare_mode="native" the pipeline is fitted on the full frame
+#: and only ``transform`` output is used, and ``transform`` never deletes rows -- so these cannot be
+#: applied under that protocol and are excluded from the search there.
+_ROW_DROPPING_OPERATORS = {
+    # ACORec's space
+    "iqr", "zscore", "lof", "isolation_forest",
+    # AutoDP's space (reimplemented)
+    "ZSB", "IQR", "LOF", "ED", "DROP",
+}
+
+
+def _fit_pipeline(pre, X_train, y_train, *, X_full=None, y_full=None, prepare_mode="leakfree"):
+    """Fit a preprocessing pipeline and return the prepared training block.
+
+    ``leakfree`` (default) -- fit on the training rows only. ACORec's normal discipline.
+
+    ``native`` -- fit on the FULL dataset, training and test rows together, then apply. This is
+    deliberately transductive and it exists for exactly one purpose: AutoDP's published protocol
+    prepares the whole table (its operators fit on ``concat(train, test)``, and ``CBE`` on
+    ``concat(target, target_test)``), so comparing our leak-free preparation against their
+    transductive one would hand them an advantage that has nothing to do with the operators. Under
+    ``native`` both methods get the same information, which is what makes the comparison fair.
+
+    Anything scored under ``native`` is NOT a measurement of generalisation, for either method. Use
+    it only for the like-for-like AutoDP arm, and label the column accordingly.
+    """
+    if str(prepare_mode) == "native" and X_full is not None:
+        # Guard: transform() deliberately does not drop rows, so a row-dropping operator would
+        # silently do NOTHING here -- the fitted frame is discarded and only transform() output is
+        # returned. Row-dropping operators are filtered out of the searched space under native
+        # (run_recommend._build_run_options); this makes the invariant impossible to violate
+        # quietly if that filter is ever bypassed.
+        offenders = [
+            f"{step}={pre.config.get(step)}"
+            for step in ("imputation", "outlier_removal", "duplicate_removal")
+            if str(pre.config.get(step, "none")) in _ROW_DROPPING_OPERATORS
+        ]
+        if offenders:
+            raise ValueError(
+                "prepare_mode='native' cannot apply row-dropping operators "
+                f"({', '.join(offenders)}): transform() never deletes rows, so the operator would "
+                "be a silent no-op. Exclude these operators from the search under native."
+            )
+        pre.fit_transform(X_full, y_full)
+        return pre.transform(X_train), y_train.reset_index(drop=True)
+    res = pre.fit_transform(X_train, y_train)
+    if isinstance(res, tuple):
+        return res
+    return res, y_train.reset_index(drop=True)
+
+
 def _should_retry_without_xgb(exc: Exception) -> bool:
     msg = str(exc).lower()
     return "xgbclassifier" in msg and "n_classes_" in msg
@@ -235,6 +286,7 @@ def evaluate_candidates_autogluon(
     candidate_configs: List[Dict[str, Any]],
     time_limit_per_model: int = 300,
     autogluon_profile: str = "best_quality",
+    prepare_mode: str = "leakfree",
     verbose: bool = False,
     select_on_val: bool = False,
     select_default_name: Optional[str] = None,
@@ -289,12 +341,9 @@ def evaluate_candidates_autogluon(
                 y_train = pd.concat([y_train, y_val], ignore_index=True)
 
             pre = _make_preprocessor(cfg)
-            result = pre.fit_transform(X_train, y_train)
-            if isinstance(result, tuple):
-                X_train_proc, y_train_proc = result
-            else:
-                X_train_proc = result
-                y_train_proc = y_train.reset_index(drop=True)
+            X_train_proc, y_train_proc = _fit_pipeline(
+                pre, X_train, y_train, X_full=X, y_full=y, prepare_mode=prepare_mode,
+            )
 
             X_test_proc = pre.transform(X_test)
             y_test_proc = y_test.reset_index(drop=True)
@@ -722,6 +771,7 @@ def evaluate_candidates_autogluon_cv(
     select_margin: float = 0.0,
     seed: int = 42,
     noprep_penalty: float = 0.0,
+    prepare_mode: str = "leakfree",
     verbose: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float, List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     """Select the pipeline by k-fold cross-validation (low-variance signal), report its TEST score.
@@ -804,8 +854,12 @@ def evaluate_candidates_autogluon_cv(
             fold_scores: List[float] = []
             for tr_idx, va_idx in folds:
                 pre = _make_preprocessor(cfg)
-                res = pre.fit_transform(X_fit.iloc[tr_idx].reset_index(drop=True), y_fit.iloc[tr_idx].reset_index(drop=True))
-                Xtr_p, ytr_p = res if isinstance(res, tuple) else (res, y_fit.iloc[tr_idx].reset_index(drop=True))
+                Xtr_p, ytr_p = _fit_pipeline(
+                    pre,
+                    X_fit.iloc[tr_idx].reset_index(drop=True),
+                    y_fit.iloc[tr_idx].reset_index(drop=True),
+                    X_full=X, y_full=y, prepare_mode=prepare_mode,
+                )
                 Xva_p = pre.transform(X_fit.iloc[va_idx].reset_index(drop=True))
                 if Xtr_p.shape[0] == 0 or Xva_p.shape[0] == 0:
                     continue
@@ -817,8 +871,9 @@ def evaluate_candidates_autogluon_cv(
             cv_scores[name] = float(np.mean(fold_scores))
             # test score: fit on full 80%, predict held-out test
             pre = _make_preprocessor(cfg)
-            res = pre.fit_transform(X_fit, y_fit)
-            Xfit_p, yfit_p = res if isinstance(res, tuple) else (res, y_fit)
+            Xfit_p, yfit_p = _fit_pipeline(
+                pre, X_fit, y_fit, X_full=X, y_full=y, prepare_mode=prepare_mode,
+            )
             Xtest_p = pre.transform(X_test)
             ts = _ag_score(Xfit_p, yfit_p, Xtest_p, y_test)
             if ts is None:
