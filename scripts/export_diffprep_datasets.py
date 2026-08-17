@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import shutil
 import subprocess
@@ -199,7 +200,39 @@ def main() -> int:
     print(f"evaluation datasets present in out-dir: {30 - len(missing)}/30")
     if missing:
         print(f"MISSING: {', '.join(missing)}")
+
+    # Fingerprint of the whole data directory.
+    #
+    # Sharded runs across separate notebooks each rebuild this folder, and row ORDER is the split
+    # contract -- every stage re-derives the seed-42 0.6/0.2/0.2 split positionally from it. If two
+    # notebooks ever build a dataset differently, their results silently stop being comparable and
+    # nothing surfaces it. Print one digest per build and check that every shard agrees; that is
+    # the same guarantee a shared mounted dataset would give, without the Kaggle plumbing.
+    print(write_fingerprint(args.out_dir))
     return 1 if failed or missing else 0
+
+
+def write_fingerprint(out_dir: Path) -> str:
+    """Digest every <id>.csv (name + content) into one short, comparable string."""
+    per_file = []
+    for path in sorted(out_dir.glob("*.csv"), key=lambda p: p.name):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        n_rows = sum(1 for _ in open(path, "rb")) - 1
+        per_file.append({"file": path.name, "n_rows": n_rows, "sha256": h.hexdigest()})
+
+    combined = hashlib.sha256(
+        "\n".join(f"{r['file']}:{r['sha256']}" for r in per_file).encode()
+    ).hexdigest()
+    (out_dir / "fingerprint.json").write_text(
+        json.dumps({"combined_sha256": combined, "files": per_file}, indent=2)
+    )
+    lines = [f"\nDATA FINGERPRINT  {combined[:16]}  ({len(per_file)} files)",
+             "Every shard must print this same value. If one differs, its results are not "
+             "comparable -- diff fingerprint.json to find the file."]
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
