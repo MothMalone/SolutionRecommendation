@@ -48,11 +48,15 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# Our 23 evaluation datasets (the RQ3 set).
-OUR_DATASETS = [
-    "248", "1066", "1164", "1047", "862", "40663", "1054", "1387", "876", "18", "1520",
-    "1548", "184", "378", "381", "1485", "14", "27", "29", "31", "1049", "1050", "1063",
-]
+# The evaluation set. Single source of truth -- do NOT re-declare it here.
+#
+# This list used to be maintained separately and had silently drifted from eval_ids.EVAL_IDS by
+# three substitutions (1049/1050/1063 present, 2/382/993 absent), so an arm could run datasets
+# that were never held out of the reference library. Importing removes that failure mode.
+sys.path.insert(0, str(REPO / "src"))
+from automl_aco.eval_ids import EVAL_IDS  # noqa: E402
+
+OUR_DATASETS = list(EVAL_IDS)
 
 # AutoDP's evaluation datasets, transcribed from their paper's table.
 #
@@ -107,6 +111,35 @@ def done_ids(out_path: Path, arm: str, protocol: str) -> set:
     return seen
 
 
+# The deployed ACORec configuration (docs/EXPERIMENTS.md "REF"). The arms exist to vary ONE thing
+# -- the operator space or the data -- so every other knob must match the configuration the paper
+# reports, or the arms measure something nobody claimed.
+#
+# `--train-metric-inline` is the one that silently mattered: without it (and without any
+# --metric-* flag) run_recommend leaves `train_metric_inline=False` and falls back to plain COSINE
+# similarity on raw metafeatures. That is the RQ2.1 *ablation*, not ACORec. Every arm run before
+# this was added measured the ablation.
+#
+# `--require-autogluon` is the second: without it an AutoGluon failure quietly falls back to the
+# LogReg proxy and still writes a score, which is how `autogluon_failed` rows ended up mixed into
+# docs/local_full_run.
+ACOREC_REF_FLAGS = [
+    "--train-metric-inline",
+    "--metric-loss", "pearson",
+    "--metric-weight-decay", "1e-4",
+    "--metric-objective", "embedding_cosine",
+    "--aco-mmas-bounds",
+    "--aco-weight-method", "linear",
+    "--hybrid-select",
+    "--final-autogluon-topk", "1",
+    "--proxy-seeds", "42,52,62",
+    "--cv-select-folds", "3",
+    "--optimizer", "aco",
+    "--require-autogluon",
+    "--autogluon-profile", "best_quality",
+]
+
+
 def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args) -> list:
     cmd = [
         sys.executable, str(REPO / "scripts" / "run_recommend.py"),
@@ -115,16 +148,23 @@ def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args) -
         "--target-column", args.target_column,
         "--dataset-id", str(dataset_id),
         "--operator-space", ops,
-        "--use-aco", "--hybrid-select",
+        "--use-aco",
         "--n-ants", str(args.n_ants),
         "--n-iterations", str(args.n_iterations),
-        "--cv-select-folds", "3",
         "--prepare-mode", "native" if args.protocol == "native" else "leakfree",
         "--time-limit", str(args.time_limit),
+        "--seed", str(args.seed),
         "--output-dir", str(workdir),
     ]
+    if args.acorec_config == "ref":
+        cmd += ACOREC_REF_FLAGS
+    else:
+        cmd += ["--hybrid-select", "--cv-select-folds", "3"]
+    # Trailing extras win, so an ablation can override any REF flag above.
     if args.extra:
         cmd += shlex.split(args.extra)
+    if args.acorec_extra:
+        cmd += shlex.split(args.acorec_extra)
     return cmd
 
 
@@ -144,7 +184,34 @@ def autodp_cmd(dataset_id: str, ops: str, out_dir: Path, args) -> list:
     ]
     if args.extra:
         cmd += shlex.split(args.extra)
+    if args.adp_extra:
+        cmd += shlex.split(args.adp_extra)
     return cmd
+
+
+def check_extra_flags(cmd_head: list, extra: str, label: str) -> None:
+    """Fail fast if an --extra flag is not accepted by the tool it will be handed to.
+
+    `--extra` reaches whichever tool the arm uses, so a string written for AutoDP arms
+    (`--adp-python`, `--cap-seconds`) makes run_recommend exit 2 on EVERY dataset -- 30 rows of
+    `status: failed` an hour later. One `--help` parse up front turns that into an immediate
+    error. Use --acorec-extra / --adp-extra to keep one command template across all arms.
+    """
+    if not extra:
+        return
+    try:
+        helptext = subprocess.run(cmd_head + ["--help"], capture_output=True, text=True,
+                                  timeout=120).stdout
+    except Exception:
+        return  # never block a run on the checker itself
+    unknown = [tok for tok in shlex.split(extra)
+               if tok.startswith("--") and tok.split("=")[0] not in helptext]
+    if unknown:
+        raise SystemExit(
+            f"[arms] {label} does not accept {unknown} (from --extra/{label}-extra).\n"
+            f"        These would fail on every dataset. If they are meant for the other tool, "
+            f"pass them via --acorec-extra or --adp-extra instead of --extra."
+        )
 
 
 def read_acorec_result(workdir: Path) -> dict:
@@ -203,8 +270,22 @@ def main() -> int:
                     help="directory holding <dataset_id>.csv")
     ap.add_argument("--target-column", default="target")
     ap.add_argument("--time-limit", type=int, default=300, help="AutoGluon seconds per fit")
-    ap.add_argument("--n-ants", type=int, default=10)
-    ap.add_argument("--n-iterations", type=int, default=10)
+    # REF budget (docs/EXPERIMENTS.md), not the old 10/10.
+    ap.add_argument("--n-ants", type=int, default=4)
+    ap.add_argument("--n-iterations", type=int, default=3)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--acorec-config", choices=["ref", "minimal"], default="ref",
+                    help="ref (default) = the deployed ACORec config from docs/EXPERIMENTS.md, "
+                         "including the trained Siamese and --require-autogluon. minimal = the "
+                         "old bare invocation, which silently used cosine similarity.")
+    ap.add_argument("--acorec-extra", default="",
+                    help="Extra flags for run_recommend.py only (ACORec arms).")
+    ap.add_argument("--adp-extra", default="",
+                    help="Extra flags for adp_bench.py only (AutoDP arms).")
+    ap.add_argument("--ack-autodp-not-retrained", action="store_true",
+                    help="Required for arms running AutoDP over ACORec's operator space. "
+                         "Acknowledges that its meta-learner and value model are applied "
+                         "out-of-domain via operator-code aliasing rather than retrained.")
     ap.add_argument("--protocol", choices=["native", "leakfree"], default="native",
                     help="native (default) = AutoDP's published transductive protocol, and ACORec "
                          "prepared the SAME way, so both see the same information. leakfree = "
@@ -224,6 +305,10 @@ def main() -> int:
         arms = [args.arm] if args.arm else sorted(ARMS)
         for arm in arms:
             ds = [d.strip() for d in args.datasets.split(",") if d.strip()] or datasets_for(arm)
+            if ARMS[arm]["method"] == "autodp" and ARMS[arm]["ops"] == "ours":
+                print(f"\n# NOTE: arm {arm} additionally requires --ack-autodp-not-retrained "
+                      "(its meta-models are aliased to our operator codes, not retrained -- "
+                      "see docs/OPERATOR_SPACE_COMPARISON.md section 6).")
             if args.per_dataset or not args.shards:
                 # One dataset per command: the fastest way to see a first result, and a Kaggle
                 # notebook that dies takes exactly one dataset down with it.
@@ -263,6 +348,37 @@ def main() -> int:
         print("[arms] WARNING: THEIR_DATASETS ids are transcribed from the paper and UNVERIFIED. "
               "Confirm against OpenML and hold out any overlap with the reference library "
               "before reporting.")
+
+    # AutoDP over OUR operator space: its two learned components were trained over THEIR operator
+    # vocabulary and are being applied out-of-domain via code aliasing (scripts/autodp_our_space.py
+    # ALIAS). pca/svd have no counterpart in their space at all and are aliased to `TB`. Reporting
+    # this arm as "AutoDP on our operators" without retraining overstates it -- see
+    # docs/OPERATOR_SPACE_COMPARISON.md sections 5 and 6, which also show the retrain is cheap
+    # (it reuses the existing performance matrix; no AutoGluon re-runs).
+    if spec["method"] == "autodp" and spec["ops"] == "ours" and not args.ack_autodp_not_retrained:
+        ap.error(
+            f"arm {args.arm} runs AutoDP over ACORec's operator space, but its meta-learner "
+            "(get_CLA_meta_task_order) and value model (model_CLA.pickle) are NOT retrained -- "
+            "they are applied out-of-domain through operator-code aliasing. Retrain them "
+            "(OPERATOR_SPACE_COMPARISON.md section 6), or pass "
+            "--ack-autodp-not-retrained to run anyway and disclose the aliasing when reporting."
+        )
+    if spec["method"] == "autodp" and spec["ops"] == "ours":
+        print("[arms] DISCLOSE WHEN REPORTING: AutoDP's meta-models are un-retrained here and "
+              "reach our operators only via aliasing; pca/svd are aliased to TB.")
+
+    # Validate passthrough flags against the tool that will receive them, before running anything.
+    if spec["method"] == "acorec":
+        head = [sys.executable, str(REPO / "scripts" / "run_recommend.py")]
+        check_extra_flags(head, args.extra, "run_recommend.py")
+        check_extra_flags(head, args.acorec_extra, "run_recommend.py")
+        print(f"[arms] acorec-config={args.acorec_config}"
+              + ("  (Siamese TRAINED, AutoGluon required)" if args.acorec_config == "ref"
+                 else "  WARNING: 'minimal' uses COSINE similarity, not the trained Siamese"))
+    else:
+        head = [sys.executable, str(REPO / "scripts" / "adp_bench.py")]
+        check_extra_flags(head, args.extra, "adp_bench.py")
+        check_extra_flags(head, args.adp_extra, "adp_bench.py")
 
     for n, ds in enumerate(todo, 1):
         csv_path = Path(args.data_dir) / f"{ds}.csv"

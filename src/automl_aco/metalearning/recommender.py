@@ -87,26 +87,12 @@ class MetaPipelineRecommender:
         self.metafeatures_df = metafeatures_df.copy()
         self.verbose = verbose
 
-        def _normalize_id(val: Any) -> str:
-            if pd.isna(val):
-                return ""
-            if isinstance(val, (int, np.integer)):
-                return str(int(val))
-            if isinstance(val, (float, np.floating)):
-                f = float(val)
-                if np.isfinite(f) and abs(f - round(f)) <= 1e-9:
-                    return str(int(round(f)))
-                return str(val).strip()
-
-            s = str(val).strip()
-            float_like = re.fullmatch(r"([0-9]+)\.0+", s)
-            if float_like:
-                return float_like.group(1)
-
-            prefixed = re.fullmatch(r"(?i)(?:d|dataset|openml)[_\-: ]*([0-9]+)", s)
-            if prefixed:
-                return prefixed.group(1)
-            return s
+        # Single source of truth, shared with the leakage holdout. This used to be a private copy
+        # that had to be kept in sync by hand, and it had drifted: it collapsed `248.0` but not the
+        # `D_1037.1` form pandas produces for a duplicated column. That made a duplicated dataset
+        # look like TWO datasets here, so excluding `query_dataset_id="1037"` left the `.1` copy in
+        # the neighbour pool and the query could still retrieve itself.
+        from ..eval_ids import normalize_id as _normalize_id
 
         perf_cols = list(self.performance_matrix.columns)
         meta_idx = list(self.metafeatures_df.index)
