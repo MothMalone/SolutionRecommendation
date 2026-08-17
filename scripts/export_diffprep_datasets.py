@@ -71,11 +71,38 @@ def _gh(path: str) -> bytes:
     return out.stdout
 
 
-def load_one(name: str, folder: str, root: Path | None) -> pd.DataFrame:
+def index_dataset_dirs(root: Path) -> dict:
+    """basename (lowercased) -> directory holding data.csv, found anywhere under root.
+
+    Kaggle mounts nest unpredictably: the folders may sit at <root>/abalone/, or one or two levels
+    down (<root>/data/abalone/, <root>/DiffPrep/data/abalone/). Requiring an exact layout produced
+    17 FileNotFoundErrors against a correctly-attached dataset, so walk instead of assuming.
+    """
+    found = {}
+    for path in root.rglob("data.csv"):
+        found.setdefault(path.parent.name.lower(), path.parent)
+    return found
+
+
+def index_id_csvs(roots) -> dict:
+    """'<id>' -> path of <id>.csv, found anywhere under any root."""
+    found = {}
+    for root in roots:
+        if not root or not Path(root).is_dir():
+            continue
+        for path in Path(root).rglob("*.csv"):
+            found.setdefault(path.stem, path)
+    return found
+
+
+def load_one(name: str, folder: str, root: Path | None, dir_index: dict | None = None) -> pd.DataFrame:
     if root is not None:
-        data_path, info_path = root / folder / "data.csv", root / folder / "info.json"
-        if not data_path.exists():
-            raise FileNotFoundError(data_path)
+        src_dir = (dir_index or {}).get(folder.lower())
+        if src_dir is None:
+            raise FileNotFoundError(
+                f"no directory named {folder!r} containing data.csv anywhere under {root}"
+            )
+        data_path, info_path = src_dir / "data.csv", src_dir / "info.json"
         df = pd.read_csv(data_path)
         info = json.loads(info_path.read_text())
     else:
@@ -100,8 +127,10 @@ def main() -> int:
     ap.add_argument("--download", action="store_true",
                     help="Fetch from GitHub via the gh CLI instead of a local root.")
     ap.add_argument("--out-dir", type=Path, required=True, help="Where to write <id>.csv")
-    ap.add_argument("--copy-openml-from", type=Path, default=None,
-                    help="Also copy the 13 OpenML eval CSVs from here, so one dir serves all 30.")
+    ap.add_argument("--copy-openml-from", type=Path, action="append", default=[],
+                    help="Repeatable: root to search (recursively) for the 13 OpenML eval "
+                         "<id>.csv files, so one dir serves all 30. The repo's own "
+                         "data/eval_datasets is always searched as well.")
     ap.add_argument("--only", default="", help="Comma-separated subset of names.")
     args = ap.parse_args()
 
@@ -109,13 +138,23 @@ def main() -> int:
         ap.error("pass --diffprep-root or --download")
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    dir_index = {}
+    if not args.download:
+        if not args.diffprep_root.is_dir():
+            ap.error(f"--diffprep-root {args.diffprep_root} is not a directory")
+        dir_index = index_dataset_dirs(args.diffprep_root)
+        print(f"[scan] {len(dir_index)} dataset dir(s) with a data.csv under {args.diffprep_root}")
+        if not dir_index:
+            print("[scan] nothing found -- check the mount with: "
+                  f"find {args.diffprep_root} -name data.csv | head")
+
     wanted = [n.strip() for n in args.only.split(",") if n.strip()] or list(DIFFPREP_FOLDERS)
     written, failed = [], []
     for name in wanted:
         folder = DIFFPREP_FOLDERS[name]
         did = EVAL_DATASETS[name]
         try:
-            df = load_one(name, folder, args.diffprep_root if not args.download else None)
+            df = load_one(name, folder, args.diffprep_root if not args.download else None, dir_index)
         except Exception as exc:
             print(f"  FAIL {name:16} {type(exc).__name__}: {exc}")
             failed.append(name)
@@ -127,16 +166,32 @@ def main() -> int:
               f"({n_sym} symbolic, {df['target'].nunique()} classes) -> {dest.name}")
         written.append(name)
 
-    if args.copy_openml_from:
-        openml_names = [n for n in EVAL_DATASETS if n not in DIFFPREP_FOLDERS]
-        for name in openml_names:
-            did = EVAL_DATASETS[name]
-            src = args.copy_openml_from / f"{did}.csv"
-            if src.exists():
-                shutil.copy(src, args.out_dir / f"{did}.csv")
-            else:
-                print(f"  MISS {name:16} id={did} not in {args.copy_openml_from}")
-                failed.append(name)
+    # The 13 OpenML eval CSVs. Searched recursively across every supplied root plus the repo's own
+    # data/eval_datasets, because no single Kaggle mount holds all of them (862 in particular is in
+    # the repo but not in the mathurinache/openml dump).
+    openml_roots = list(args.copy_openml_from) + [REPO / "data" / "eval_datasets"]
+    id_index = index_id_csvs(openml_roots)
+    openml_names = [n for n in EVAL_DATASETS if n not in DIFFPREP_FOLDERS]
+    for name in openml_names:
+        did = EVAL_DATASETS[name]
+        dest = args.out_dir / f"{did}.csv"
+        if dest.exists():
+            continue
+        src = id_index.get(did)
+        if src is not None:
+            shutil.copy(src, dest)
+            n_rows = sum(1 for _ in open(dest)) - 1
+            # Files exported before the cap was removed are exactly 5000 rows. Copying one silently
+            # reinstates the truncation this pipeline just stopped doing, so say so. Of the 13
+            # OpenML eval datasets only ipums-la-99 (378, true size 8,844) is actually affected --
+            # the other 12 are smaller than the old cap.
+            warn = ("  <-- WARNING: exactly 5000 rows, i.e. the OLD CAP. Re-export it with "
+                    "scripts/export_eval_datasets.py (no cap by default) to get its true size."
+                    if n_rows == 5000 else "")
+            print(f"  ok   {name:16} id={did:<7} copied from {src.parent} ({n_rows} rows){warn}")
+        else:
+            print(f"  MISS {name:16} id={did} -- no {did}.csv under {[str(r) for r in openml_roots]}")
+            failed.append(name)
 
     present = {p.stem for p in args.out_dir.glob("*.csv")}
     missing = [f"{n}({i})" for n, i in EVAL_DATASETS.items() if i not in present]
