@@ -138,10 +138,43 @@ def load_openml_dataset(
     verbose: bool = False,
     local_data_folder: Optional[str] = None,
     use_direct_api: bool = True,
+    prefer_local: bool = True,
+    max_samples_if_test: int = 100000,
 ) -> Optional[Dict[str, Any]]:
-    """Load OpenML dataset with optional local-file fallback."""
+    """Load OpenML dataset, preferring a local ``<id>.csv`` when one is supplied.
+
+    ``prefer_local`` (default True) makes a present local CSV authoritative instead of a mere
+    fallback-on-exception. That ordering matters for correctness, not convenience: several
+    evaluation datasets share an OpenML id with a DIFFERENT table of the same name. DiffPrep's
+    `pol` is 15,000 rows; OpenML 722 fetched through the API and row-capped is 5,000. With the old
+    ordering an API that happened to be reachable silently won, so the run scored the wrong data
+    (observed on Kaggle: "722 [native] 5000 rows x 48 features"), and ids the API could reach but
+    not parse failed outright instead of using the file that was sitting right there.
+
+    Set ``prefer_local=False`` to restore the old API-first behaviour.
+    """
     direct_api_error: Optional[Exception] = None
     sklearn_error: Optional[Exception] = None
+
+    if prefer_local and local_data_folder:
+        local_df = _load_local_openml_csv(dataset_id=dataset_id, local_data_folder=local_data_folder)
+        if local_df is not None:
+            target_column = _detect_target_column(local_df)
+            if verbose:
+                print(
+                    f"Using local CSV for dataset {dataset_id} from {local_data_folder} "
+                    f"(target={target_column}); OpenML API not consulted"
+                )
+            return _prepare_dataset_from_xy(
+                X=local_df.drop(columns=[target_column]).copy(),
+                y=local_df[target_column].copy(),
+                dataset_id=dataset_id,
+                test_dataset_ids=test_dataset_ids,
+                max_samples_if_test=max_samples_if_test,
+                max_samples_default=5000,
+                verbose=verbose,
+            )
+
     try:
         if use_direct_api:
             try:
@@ -153,7 +186,7 @@ def load_openml_dataset(
                         y=y_direct,
                         dataset_id=dataset_id,
                         test_dataset_ids=test_dataset_ids,
-                        max_samples_if_test=100000,
+                        max_samples_if_test=max_samples_if_test,
                         max_samples_default=5000,
                         verbose=verbose,
                     )
@@ -177,7 +210,7 @@ def load_openml_dataset(
             y=dataset.target,
             dataset_id=dataset_id,
             test_dataset_ids=test_dataset_ids,
-            max_samples_if_test=100000,
+            max_samples_if_test=max_samples_if_test,
             max_samples_default=5000,
             verbose=verbose,
         )
@@ -200,7 +233,7 @@ def load_openml_dataset(
                         y=y,
                         dataset_id=dataset_id,
                         test_dataset_ids=test_dataset_ids,
-                        max_samples_if_test=100000,
+                        max_samples_if_test=max_samples_if_test,
                         max_samples_default=5000,
                         verbose=verbose,
                     )

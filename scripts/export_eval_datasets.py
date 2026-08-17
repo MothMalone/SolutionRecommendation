@@ -6,7 +6,8 @@ cannot import our loaders. To keep the comparison apples-to-apples, this script 
 *same* frame ``run_recommend.py`` builds in memory:
 
     dataset = load_openml_dataset(id)      # drop all-NaN columns, drop NaN targets, coerce target,
-    df = dataset["X"]; df["target"] = y    # drop classes with <5 rows, 5000-row cap @ random_state=42
+    df = dataset["X"]; df["target"] = y    # drop classes with <5 rows, optional --max-rows cap
+                                           # (default: NO cap) @ random_state=42
 
 and writes it to ``<out-dir>/<id>.csv``. Row ORDER is the contract: every downstream stage
 re-derives the seed-42 0.6/0.2/0.2 split positionally from this row order, so the same physical
@@ -32,6 +33,9 @@ from automl_aco.eval_ids import EVAL_IDS
 
 # Searched for <id>.csv when OpenML is unreachable (Kaggle sessions with internet off).
 DEFAULT_LOCAL_ROOTS = ("/kaggle/input", "data/openml", "test_data_local")
+
+# --max-rows 0 means "keep every row"; the loader wants a concrete bound.
+_NO_CAP = 10 ** 9
 
 
 def _internet_available(host: str = "api.openml.org", port: int = 443, timeout: float = 5.0) -> bool:
@@ -81,6 +85,17 @@ def main() -> None:
                     help="repeatable: extra root to search for <id>.csv")
     ap.add_argument("--overwrite", action="store_true")
     ap.add_argument("--verbose", action="store_true")
+    # The loader caps at 5000 rows unless the id is declared "test". This script never declared
+    # them, so every EVALUATION dataset was silently downsampled to 5000 -- which is why paper
+    # Table 2 lists ipums-la-99 at 8,844 rows while the older data/eval_datasets/378.csv holds
+    # 5,000. The 5000 was an experimentation-era setting, never an intended part of the protocol.
+    #
+    # Default is now NO CAP, so exported datasets are their true size and match Table 2. Pass
+    # --max-rows N to reinstate a cap. The value used is recorded in the manifest.
+    ap.add_argument("--max-rows", type=int, default=0,
+                    help="Row cap per evaluation dataset. Default 0 = NO CAP (datasets keep their "
+                         "true size). The historical experimentation value was 5000. Recorded in "
+                         "the manifest.")
     args = ap.parse_args()
 
     ids = [t for t in args.ids.replace(",", " ").split() if t]
@@ -130,10 +145,14 @@ def main() -> None:
         print(f"[load] {did} from {src} ...", flush=True)
         ds = load_openml_dataset(
             did,
+            # Declaring the ids as "test" selects the loader's max_samples_if_test branch, which is
+            # how --max-rows takes effect; see the flag's help for why this was a silent 5000.
+            test_dataset_ids=[str(d) for d in ids],
             verbose=args.verbose,
             local_data_folder=local_dir,
             # Offline, the API attempt only burns time on DNS/connect failures.
             use_direct_api=online,
+            max_samples_if_test=(args.max_rows if args.max_rows > 0 else _NO_CAP),
         )
         if ds is None or "X" not in ds or "y" not in ds:
             why = ("no local CSV found and OpenML is unreachable — enable Internet or mount the "
@@ -162,7 +181,8 @@ def main() -> None:
 
     man_path = os.path.join(args.out_dir, "manifest.json")
     with open(man_path, "w") as f:
-        json.dump({"datasets": manifest, "failed": failed}, f, indent=2)
+        json.dump({"datasets": manifest, "failed": failed,
+                   "max_rows": args.max_rows or None}, f, indent=2)
     n_reg = sum(1 for m in manifest if m["task_type"] == "regression")
     print(f"\nWrote {len(manifest)} datasets to {args.out_dir} "
           f"({n_reg} regression, {len(manifest) - n_reg} classification); manifest -> {man_path}")
