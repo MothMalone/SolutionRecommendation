@@ -42,34 +42,21 @@ except Exception:  # pragma: no cover
 
 
 def _autogluon_runtime_error() -> Optional[str]:
-    # Prefer a direct runtime import check. If AutoGluon imports successfully,
-    # we treat the environment as usable even if metadata/version pins look odd.
+    # The runtime import is authoritative. AutoGluon 1.5 supports NumPy 2, so
+    # version-only rejection would incorrectly disable healthy Kaggle installs.
     try:
         from autogluon.tabular import TabularPredictor as _TabularPredictor  # noqa: F401
         from autogluon.features.generators import IdentityFeatureGenerator as _IdentityFeatureGenerator  # noqa: F401
         return None
     except Exception as exc:
-        import_error = str(exc)
-    try:
-        import numpy as _np
-    except Exception as exc:
-        return f"NumPy import failed: {exc}; AutoGluon import failed: {import_error}"
-    try:
-        major = int(str(_np.__version__).split(".")[0])
-    except Exception:
-        major = 0
-    if major >= 2:
-        return f"AutoGluon requires NumPy < 2.0 (found {_np.__version__}). Import error: {import_error}"
-    return import_error
+        return f"{type(exc).__name__}: {exc}"
 
 
 def _is_autogluon_unavailable_error(exc: Exception) -> bool:
     msg = str(exc).lower()
     markers = (
         "autogluon not available",
-        "requires numpy < 2.0",
         "no module named 'autogluon'",
-        "numpy<2",
     )
     return any(m in msg for m in markers)
 

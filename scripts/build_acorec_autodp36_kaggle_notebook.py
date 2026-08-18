@@ -95,8 +95,9 @@ cells = [
                 "-c",
                 (
                     "import numpy, pandas, sklearn; "
+                    "from autogluon.tabular import TabularPredictor; "
                     "print('Dependency health:', numpy.__version__, "
-                    "pandas.__version__, sklearn.__version__)"
+                    "pandas.__version__, sklearn.__version__, TabularPredictor.__name__)"
                 ),
             ],
             check=True,
@@ -305,10 +306,16 @@ cells = [
         import autogluon
         from autogluon.tabular import TabularPredictor
         from autogluon.features.generators import IdentityFeatureGenerator
+        from automl_aco.search.evaluation import _load_autogluon_components
+
+        evaluator_predictor, evaluator_generator = _load_autogluon_components()
+        assert evaluator_predictor is TabularPredictor
+        assert evaluator_generator is IdentityFeatureGenerator
 
         print("AutoGluon version:", getattr(autogluon, "__version__", "unknown"))
         print("Final evaluator:", TabularPredictor.__name__)
         print("Feature generator after ACORec preprocessing:", IdentityFeatureGenerator.__name__)
+        print("ACORec evaluator runtime preflight: PASS")
         """
     ),
     code(

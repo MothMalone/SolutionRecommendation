@@ -22,6 +22,10 @@ previous notebook version installed `numpy<2` in the active session and pandas
 raises `numpy.dtype size changed`, restart the Kaggle session once, then run the
 updated notebook from the first cell.
 
+The install and evaluator cells both perform a real AutoGluon import preflight.
+The run should not enter ACO unless `ACORec evaluator runtime preflight: PASS`
+has been printed; AutoGluon 1.5 supports NumPy 2 within the pinned `<2.4` range.
+
 The runner supports three download modes through `--openml-backend`:
 
 - `gitlab` downloads the DataGit/OpenML Parquet mirror and caches it in

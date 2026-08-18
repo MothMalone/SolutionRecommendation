@@ -26,6 +26,22 @@ from ..utils.logging import get_logger
 logger = get_logger(__name__)
 
 
+def _load_autogluon_components():
+    """Import the AutoGluon classes used by the final evaluator.
+
+    AutoGluon 1.5 supports NumPy 2 (currently ``numpy>=1.25,<2.4``). Older
+    versions of this module rejected every NumPy 2 runtime before attempting
+    the import, incorrectly disabling a healthy Kaggle installation. The
+    runtime import itself is the authoritative compatibility check.
+    """
+    try:
+        from autogluon.tabular import TabularPredictor  # type: ignore
+        from autogluon.features.generators import IdentityFeatureGenerator  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("AutoGluon not available in environment") from exc
+    return TabularPredictor, IdentityFeatureGenerator
+
+
 def _normalize_proxy_settings(proxy_settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     cfg = dict(proxy_settings or {})
     seeds = cfg.get("split_seeds", [42])
@@ -316,15 +332,7 @@ def evaluate_candidates_autogluon(
     # candidate is only chosen when it beats the default on validation by >= select_margin. This
     # biases toward the safe baseline so a search pipeline that only marginally wins on val (noise)
     # cannot lose on test — the anti-over-preprocessing guard.
-    try:
-        import numpy as _np
-        ver = _np.__version__.split(".")
-        if len(ver) >= 1 and int(ver[0]) >= 2:
-            raise RuntimeError("AutoGluon requires NumPy < 2.0; please install numpy<2")
-        from autogluon.tabular import TabularPredictor  # type: ignore
-        from autogluon.features.generators import IdentityFeatureGenerator  # type: ignore
-    except Exception as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError("AutoGluon not available in environment") from exc
+    TabularPredictor, IdentityFeatureGenerator = _load_autogluon_components()
 
     df = _normalize_dataset(dataset, target_column)
     if target_column not in df.columns:
@@ -798,14 +806,7 @@ def evaluate_candidates_autogluon_cv(
     uses k-fold CV over the remaining 80%, a far less noisy estimate of each candidate's true AutoGluon
     quality than a single validation split, curing the winner's curse; cost is (k+1) fits per candidate.
     """
-    try:
-        import numpy as _np
-        if int(_np.__version__.split(".")[0]) >= 2:
-            raise RuntimeError("AutoGluon requires NumPy < 2.0; please install numpy<2")
-        from autogluon.tabular import TabularPredictor  # type: ignore
-        from autogluon.features.generators import IdentityFeatureGenerator  # type: ignore
-    except Exception as exc:  # pragma: no cover
-        raise RuntimeError("AutoGluon not available in environment") from exc
+    TabularPredictor, IdentityFeatureGenerator = _load_autogluon_components()
     from sklearn.model_selection import StratifiedKFold, KFold
 
     df = _normalize_dataset(dataset, target_column)
