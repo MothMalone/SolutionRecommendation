@@ -66,7 +66,8 @@ def test_wrapper_uses_train_60_and_scores_outer_test_20_only():
     instance = FakeTPOTClassifier.last_instance
     assert result["train_rows_raw"] == 60
     assert result["train_rows_processed"] == 60
-    assert result["validation_rows_unused"] == 20
+    assert result["validation_rows_aco_search"] == 20
+    assert result["validation_reused_by_tpot"] is False
     assert result["test_rows"] == 20
     assert result["test_fraction"] == 0.2
     assert result["primary_metric"] == "accuracy"

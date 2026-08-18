@@ -37,14 +37,14 @@ cells = [
         operator space with its original performance matrix and proxy evaluator. Its
         frozen top-1 preprocessing pipeline is then evaluated by TPOT with:
 
-        - fixed seed-42 60% train / 20% unused validation / 20% outer test;
+        - fixed seed-42 60% train / 20% ACO-search validation / 20% outer test;
         - `preprocessing=False`;
         - estimator-only `classifiers` or `regressors` search space;
         - accuracy for classification and R² for regression.
 
         Therefore the reported classification accuracy is computed only from TPOT's
         predictions on the fixed outer 20% test split. TPOT never evolves another
-        preprocessing pipeline on top of ACORec.
+        preprocessing pipeline on top of ACORec and does not reuse ACO's validation rows.
         """
     ),
     code(
@@ -186,6 +186,11 @@ cells = [
             sys.executable,
             str(REPO_DIR / "scripts" / "run_recommend.py"),
             "--operator-space", "ours",
+            "--performance-matrix", str(
+                REPO_DIR / "data" / "openml" / "training_performance_matrix_autogluon.csv"
+            ),
+            "--metafeatures", str(REPO_DIR / "data" / "openml" / "dataset_feats.csv"),
+            "--pipeline-configs", str(REPO_DIR / "aco" / "pipeline_configs.json"),
             "--dataset-source", "openml",
             "--openml-backend", "gitlab",
             "--openml-local-folder", str(CACHE_DIR),
@@ -282,7 +287,8 @@ cells = [
                 "accuracy": result.get("accuracy"),
                 "r2": result.get("r2"),
                 "train_rows": result.get("train_rows_processed"),
-                "validation_rows_unused": result.get("validation_rows_unused"),
+                "validation_rows_aco_search": result.get("validation_rows_aco_search"),
+                "validation_reused_by_tpot": result.get("validation_reused_by_tpot"),
                 "test_rows": result.get("test_rows"),
                 "tpot_preprocessing": result.get("tpot_preprocessing"),
             })
@@ -304,8 +310,9 @@ cells = [
         After smoke succeeds, set `RUN_MODE="final"` and run ten Kaggle Save
         Versions with `SHARD_INDEX=0..9`. Each final run contains three datasets.
 
-        A valid row must report `tpot_preprocessing=False`, `validation_rows_unused`
-        equal to 20% of the loaded rows, and `test_rows` equal to the fixed outer 20%.
+        A valid row must report `tpot_preprocessing=False`,
+        `validation_rows_aco_search` equal to 20% of the loaded rows,
+        `validation_reused_by_tpot=False`, and `test_rows` equal to the fixed outer 20%.
         Download each `.tar.gz` archive from the Kaggle Output panel.
         """
     ),

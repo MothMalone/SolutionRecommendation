@@ -2,11 +2,11 @@
 """Evaluate one frozen ACORec recommendation with estimator-only TPOT.
 
 This is deliberately an experiment-side wrapper. It does not modify ACORec's
-search, recommender, operator space, or performance matrix. The recommended
-preprocessing pipeline is fitted on the fixed 60% training split, the 20%
-validation split is left unused, and TPOT searches estimators using training
-CV only. The reported score is computed exactly once on the fixed 20% test
-split.
+search, recommender, operator space, or performance matrix. ACORec uses the
+fixed 20% validation split while searching for its preprocessing pipeline.
+After selection, that pipeline and estimator-only TPOT are fitted using the
+fixed 60% training split; TPOT does not reuse validation. The reported score
+is computed exactly once on the fixed 20% test split.
 """
 from __future__ import annotations
 
@@ -190,7 +190,8 @@ def evaluate_recommendation(
         "tpot_seed": int(tpot_seed),
         "train_rows_raw": int(len(X_train)),
         "train_rows_processed": int(train_matrix.shape[0]),
-        "validation_rows_unused": int(len(X_val)),
+        "validation_rows_aco_search": int(len(X_val)),
+        "validation_reused_by_tpot": False,
         "test_rows": int(len(X_test)),
         "raw_features": int(X.shape[1]),
         "transformed_features": int(train_matrix.shape[1]),
