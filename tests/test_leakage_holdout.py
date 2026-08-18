@@ -187,3 +187,50 @@ def test_acorec_arms_use_the_trained_siamese_not_cosine():
     cmd = mod.acorec_cmd("1066", pathlib.Path("/x.csv"), "ours", pathlib.Path("/w"), args)
     for required in ("--train-metric-inline", "--require-autogluon", "--aco-mmas-bounds"):
         assert required in cmd, f"{required} missing from the ACORec arm command"
+
+
+# --------------------------------------------------------------------------- AutoDP meta-corpus
+
+def test_adp_meta_corpus_excludes_eval_ids():
+    """The retrained meta-learner corpus is a fitting step, so no eval dataset may enter it."""
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "build_adp_meta_corpus",
+        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "build_adp_meta_corpus.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class _Args:
+        ids = ""
+        n_datasets = 500
+        seed = 42
+        shard = ""
+
+    chosen = mod.choose_ids(_Args())
+    assert chosen, "corpus selection returned nothing"
+    leaked = [d for d in chosen if normalize_id(d) in EVAL_ID_SET]
+    assert not leaked, f"eval datasets leaked into the AutoDP meta-corpus: {leaked}"
+
+
+def test_adp_meta_corpus_rejects_eval_ids_passed_explicitly():
+    """--ids must not be an escape hatch around the holdout."""
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "build_adp_meta_corpus",
+        pathlib.Path(__file__).resolve().parent.parent / "scripts" / "build_adp_meta_corpus.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class _Args:
+        ids = "1066,2,29"          # 1066 is an eval dataset
+        n_datasets = 10
+        seed = 42
+        shard = ""
+
+    with pytest.raises(Exception) as excinfo:
+        mod.choose_ids(_Args())
+    assert "1066" in str(excinfo.value) or "eval" in str(excinfo.value).lower()

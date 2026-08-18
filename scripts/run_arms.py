@@ -182,6 +182,8 @@ def autodp_cmd(dataset_id: str, ops: str, out_dir: Path, args) -> list:
         "--openml-local-folder", str(args.data_dir),
         "--operator-space", ops if ops == "ours" else "theirs",
     ]
+    if ops == "ours" and getattr(args, "adp_meta_corpus", ""):
+        cmd += ["--adp-meta-corpus", str(args.adp_meta_corpus)]
     if args.extra:
         cmd += shlex.split(args.extra)
     if args.adp_extra:
@@ -289,6 +291,9 @@ def main() -> int:
                     help="Extra flags for run_recommend.py only (ACORec arms).")
     ap.add_argument("--adp-extra", default="",
                     help="Extra flags for adp_bench.py only (AutoDP arms).")
+    ap.add_argument("--adp-meta-corpus", default="",
+                    help="Corpus dir from scripts/build_adp_meta_corpus.py: retrains AutoDP's "
+                         "1-NN meta-learner over ACORec's operator space instead of aliasing.")
     ap.add_argument("--ack-autodp-not-retrained", action="store_true",
                     help="Required for arms running AutoDP over ACORec's operator space. "
                          "Acknowledges that its meta-learner and value model are applied "
@@ -313,9 +318,10 @@ def main() -> int:
         for arm in arms:
             ds = [d.strip() for d in args.datasets.split(",") if d.strip()] or datasets_for(arm)
             if ARMS[arm]["method"] == "autodp" and ARMS[arm]["ops"] == "ours":
-                print(f"\n# NOTE: arm {arm} additionally requires --ack-autodp-not-retrained "
-                      "(its meta-models are aliased to our operator codes, not retrained -- "
-                      "see docs/OPERATOR_SPACE_COMPARISON.md section 6).")
+                print(f"\n# NOTE: arm {arm} additionally requires either "
+                      "--adp-meta-corpus DIR (meta-learner retrained over our operators, "
+                      "built by scripts/build_adp_meta_corpus.py) or "
+                      "--ack-autodp-not-retrained (fall back to operator-code aliasing).")
             if args.per_dataset or not args.shards:
                 # One dataset per command: the fastest way to see a first result, and a Kaggle
                 # notebook that dies takes exactly one dataset down with it.
@@ -356,23 +362,39 @@ def main() -> int:
               "Confirm against OpenML and hold out any overlap with the reference library "
               "before reporting.")
 
-    # AutoDP over OUR operator space: its two learned components were trained over THEIR operator
-    # vocabulary and are being applied out-of-domain via code aliasing (scripts/autodp_our_space.py
-    # ALIAS). pca/svd have no counterpart in their space at all and are aliased to `TB`. Reporting
-    # this arm as "AutoDP on our operators" without retraining overstates it -- see
-    # docs/OPERATOR_SPACE_COMPARISON.md sections 5 and 6, which also show the retrain is cheap
-    # (it reuses the existing performance matrix; no AutoGluon re-runs).
-    if spec["method"] == "autodp" and spec["ops"] == "ours" and not args.ack_autodp_not_retrained:
-        ap.error(
-            f"arm {args.arm} runs AutoDP over ACORec's operator space, but its meta-learner "
-            "(get_CLA_meta_task_order) and value model (model_CLA.pickle) are NOT retrained -- "
-            "they are applied out-of-domain through operator-code aliasing. Retrain them "
-            "(OPERATOR_SPACE_COMPARISON.md section 6), or pass "
-            "--ack-autodp-not-retrained to run anyway and disclose the aliasing when reporting."
-        )
+    # AutoDP over OUR operator space. Its meta-learner (get_CLA_meta_task_order) is a plain 1-NN
+    # over two CSVs, so it CAN be retrained over our operators -- that is what
+    # scripts/build_adp_meta_corpus.py produces, and --adp-meta-corpus is now the expected path.
+    #
+    # Its value model (model_CLA.pickle) is deliberately NOT retrained. get_Estimate builds a
+    # MultiHeadAttention with fresh random weights on every call and never persists them (no
+    # torch.save/load exists anywhere in the package), so the MLP is queried through a different
+    # random projection each time: measured signal/noise 0.076 (between-pipeline sd 0.0235 vs
+    # within-pipeline sd 0.3114, 4 pipelines x 40 calls). Refitting it would fit one projection and
+    # be queried through another. It is also not load-bearing -- MCTS evaluates every expanded node
+    # for real (mctsdata.getAcc) and drop_unpromising prunes on those real scores alone.
+    # See docs/DATASET_CHANGE_AND_RQ3.md.
     if spec["method"] == "autodp" and spec["ops"] == "ours":
-        print("[arms] DISCLOSE WHEN REPORTING: AutoDP's meta-models are un-retrained here and "
-              "reach our operators only via aliasing; pca/svd are aliased to TB.")
+        if args.adp_meta_corpus:
+            corpus = Path(args.adp_meta_corpus)
+            for required in ("Metafeature.csv", "label.csv"):
+                if not (corpus / required).exists():
+                    ap.error(f"--adp-meta-corpus {corpus} has no {required}; build it with "
+                             f"scripts/build_adp_meta_corpus.py")
+            print(f"[arms] meta-learner RETRAINED over our operators from {corpus}")
+            print("[arms] DISCLOSE WHEN REPORTING: the value estimator is not retrained "
+                  "(noise-dominated by construction; see docs).")
+        elif args.ack_autodp_not_retrained:
+            print("[arms] DISCLOSE WHEN REPORTING: AutoDP's meta-learner is NOT retrained here "
+                  "and reaches our operators only via aliasing; pca/svd are aliased to TB.")
+        else:
+            ap.error(
+                f"arm {args.arm} runs AutoDP over ACORec's operator space. Pass "
+                "--adp-meta-corpus DIR to use a meta-learner retrained over our operators "
+                "(build it with scripts/build_adp_meta_corpus.py), or "
+                "--ack-autodp-not-retrained to fall back to operator-code aliasing and "
+                "disclose it when reporting."
+            )
 
     # Validate passthrough flags against the tool that will receive them, before running anything.
     if spec["method"] == "acorec":

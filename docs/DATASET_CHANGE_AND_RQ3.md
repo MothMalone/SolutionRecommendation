@@ -543,3 +543,88 @@ reported baseline — if so it must be disclosed in the paper, since it favours 
 **Recommended order:** confirm the dataset list → land the six code changes → add timers → one
 re-run of everything through `run_recommend.py` → then items 2, 3, 5, 6 all fall out of that single
 consistent output set.
+
+---
+
+## Appendix C — Retraining AutoDP's meta-learner over our operator space
+
+Supervisor item 4 requires AutoDP results on our operators. AutoDP has two learned components.
+One can be retrained and now is; the other cannot be, for a reason worth reporting in its own right.
+
+### C.1 The meta-learner — retrained
+
+`get_CLA_meta_task_order` (`Pipeline_Generation/MCTS.py`) is a deterministic 1-NN: compute 7
+metafeatures for the query dataset, find the nearest row of `Metafeature.csv`, take that
+neighbour's best-scoring pipeline from `label.csv`, and read the operator-family order off it.
+Both files ship describing AutoDP's own operators, so applying it to our space previously required
+aliasing every operator onto their nearest class id — and `pca`/`svd`, which have no counterpart in
+their space at all, both collapsed onto `TB` (tree-based feature selection).
+
+`scripts/build_adp_meta_corpus.py` regenerates both CSVs over our 19 operators: sample library
+datasets, sample pipelines over our six families in a shuffled order, score each with the LogReg
+proxy, and write the corpus in their exact format. Their 7-slot pipeline shape is preserved (six
+preprocessing families plus a model slot), so `n_features_in_` stays 14 — the arm varies the
+vocabulary, not the architecture.
+
+Verified: with a retrained corpus, `dimensionality_reduction` is returned as a first-class family.
+Under aliasing that was unreachable.
+
+Two correctness details:
+
+- **Metafeatures are computed by AutoDP itself**, not by a port. A pure-python port was written and
+  abandoned: pandas 1.x (their pin) returns True from `is_string_dtype` for *any* object dtype
+  while 2.x does not, and `unique()`/`LabelEncoder` differ on NaN. The residual was small — max
+  relative 4e-3 — but a nearest-neighbour lookup can flip on that silently. `adp_metafeatures.py`
+  shells into `.venv-autodp`, the same two-environment split `adp_bench.py` already uses.
+  `tests/test_adp_metafeature_port.py` diffs the two implementations.
+- **Exactly k rows per dataset.** Their reader slices `df.iloc[k*minid : k*minid+k]`, which assumes
+  a fixed block. Their own shipped `label.csv` violates this (group sizes 10/6/4/11/9), so their
+  neighbour lookup misaligns for datasets after the first irregular one. Writing a fixed k makes
+  the indexing correct here. Disclose as a side effect of retraining, not as an operator-space
+  effect.
+
+### C.2 The value estimator — not retrained, and why
+
+`model_CLA.pickle` is deliberately left alone. `Estimate_after_profit.get_Estimate` constructs a
+`MultiHeadAttention` with fresh random weights on **every call** and feeds its output to the MLP.
+The weights are never loaded — there is no `torch.save`, `torch.load`, or `state_dict` anywhere in
+the package.
+
+Measured, one dataset, 4 distinct pipelines x 40 calls each:
+
+| quantity | value |
+|---|---|
+| between-pipeline sd of means | 0.0235 |
+| within-pipeline sd (re-instantiation noise) | 0.3114 |
+| signal / noise | **0.076** |
+
+Pipeline identity moves the output ~13x less than re-instantiating the module does. Refitting the
+MLP would fit one random projection and be queried through a different one on every call; making it
+coherent requires seeding and persisting the attention, which changes their architecture and
+forfeits the arm's claim to be "their search".
+
+### C.3 Why AutoDP still works, and what to claim
+
+The estimator is not load-bearing. `get_profit` calls `mctsdata.getAcc` — a real accuracy
+measurement — for every expanded node, and `drop_unpromising` prunes on those real `pre_profit`
+values alone. The estimate enters only `best_child`'s score and `backup`. So noise there costs
+search efficiency, not correctness: the returned pipeline was always genuinely evaluated.
+
+What remains once the learned components are discounted is guided random search over preprocessing
+pipelines with real evaluation and real pruning — a strong baseline that will beat no-preprocessing
+comfortably. AutoDP's published gains are consistent with the search budget rather than with
+transfer.
+
+Two further signals consistent with the estimator not mattering: `best_child`'s exploration term is
+`15 * floor(log10(0.001)) * sqrt(temp)` = **-45*sqrt(temp)**, a negative coefficient that penalises
+under-visited nodes (inverted UCB); and `backup` propagates a running max of the *estimates*, so the
+noise accumulates upward.
+
+**Claim to make:** AutoDP's advantage comes from search budget and real evaluation, not from its
+learned transfer. Supported by the 0.076 ratio, by pruning being estimator-independent, and
+testably by the constant-estimator ablation (replace `get_Estimate` with a constant; if scores hold,
+the learned components are decorative).
+
+**Caveat to state:** the 0.076 figure is one dataset and four pipelines. The mechanism is structural
+— random init per call, visible in the code — so it does not depend on the dataset or the operator
+space, but the exact ratio would vary.

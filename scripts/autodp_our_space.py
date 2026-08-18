@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -144,8 +145,67 @@ def _apply_pipeline(dataset: dict, order) -> None:
         _apply_step(dataset, *mapped)
 
 
-def install(verbose: bool = False) -> None:
-    """Patch autodatapre in memory so its MCTS searches ACORec's operator space."""
+def _retrained_order_fn(corpus_dir: Path, our_lists: dict, MCTS):
+    """Their 1-NN meta-learner, reading a corpus built over OUR operators.
+
+    Same algorithm as `get_CLA_meta_task_order` -- 7 metafeatures, nearest row of
+    Metafeature.csv by their std-normalised euclidean distance, best-scoring pipeline of that
+    neighbour, family order read off it. The only difference is that the corpus describes our
+    operator space, so no aliasing is involved and pca/svd are selectable in their own right.
+    """
+    import numpy as _np
+    import pandas as _pd
+    import torch as _torch
+    from autodatapre.Pipeline_Generation import MetaFeature
+
+    meta = _pd.read_csv(corpus_dir / "Metafeature.csv")
+    label = _pd.read_csv(corpus_dir / "label.csv")
+    k = len(label) // len(meta)
+    if k * len(meta) != len(label):
+        raise ValueError(
+            f"{corpus_dir}: label.csv has {len(label)} rows for {len(meta)} datasets; their "
+            "reader slices a fixed block per dataset, so it must divide exactly."
+        )
+    code_to_family = {_code(step, op): step for step, ops in STEP_OPERATORS.items() for op in ops}
+
+    def fn(df):
+        matrix = MetaFeature.getfeature(df)
+        query = _torch.Tensor(_np.transpose(matrix.numpy()).mean(axis=1))
+
+        best, best_id = None, 0
+        for idx, row in meta.iterrows():
+            row_t = _torch.Tensor(row.values)
+            d = _np.linalg.norm(query - row_t)
+            d = d / _np.sqrt(_torch.std(query) ** 2 + _torch.std(row_t) ** 2)
+            if best is None or d < best:
+                best, best_id = d, idx
+
+        block = label.iloc[k * best_id: k * best_id + k]
+        pipeline = block.loc[block["EvaluationMetric"].idxmax()]["Pipeline"].split(",")
+
+        order, seen = [], set()
+        for token in pipeline:
+            fam = code_to_family.get(token)
+            if fam is None or fam in seen:
+                continue          # the model slot, or a family already placed
+            seen.add(fam)
+            order.append(fam)
+        if not order:
+            raise ValueError(f"{corpus_dir}: neighbour pipeline had no known operator: {pipeline}")
+        step_to_index = {v: i for i, v in THEIR_FAMILY_TO_OUR_STEP.items()}
+        return [MCTS.list7] + [our_lists[step_to_index[f]] for f in order]
+
+    return fn
+
+
+def install(verbose: bool = False, retrained_dir=None) -> None:
+    """Patch autodatapre in memory so its MCTS searches ACORec's operator space.
+
+    ``retrained_dir`` points at a corpus from scripts/build_adp_meta_corpus.py. With it, the
+    meta-learner is retrained over our operators. Without it, their shipped corpus is reused and
+    the family order is transferred through aliasing -- the original behaviour, kept so the two
+    can be compared.
+    """
     global _installed
     if _installed:
         return
@@ -199,12 +259,20 @@ def install(verbose: bool = False) -> None:
         their_List = _their_family_indices(df, orig_order_fn, original_lists, MCTS)
         return [MCTS.list7] + [our_lists[i] for i in their_List]
 
-    MCTS.get_CLA_meta_task_order = get_CLA_meta_task_order
+    if retrained_dir is not None:
+        MCTS.get_CLA_meta_task_order = _retrained_order_fn(Path(retrained_dir), our_lists, MCTS)
+    else:
+        MCTS.get_CLA_meta_task_order = get_CLA_meta_task_order
 
     _installed = True
     if verbose:
+        mode = f"meta-learner RETRAINED from {retrained_dir}" if retrained_dir else \
+               "meta-learner ALIASED from their shipped corpus"
         print(f"[adapter] AutoDP now searches ACORec's space: "
-              f"{sum(len(v) for v in our_lists.values())} operators across {len(our_lists)} families")
+              f"{sum(len(v) for v in our_lists.values())} operators across {len(our_lists)} "
+              f"families; {mode}")
+        print("[adapter] value estimator model_CLA.pickle is NOT retrained: its input is a "
+              "per-call random projection (signal/noise 0.076). See docs.")
 
 
 class _FamList(list):

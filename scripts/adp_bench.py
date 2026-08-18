@@ -100,7 +100,8 @@ def _export_dataset(did: str, dest_dir: str, local_folder, verbose: bool) -> str
 
 
 def _run_autodp(adp_python: str, csv_path: str, did: str, mode: str, scratch: str,
-                cap_seconds: float, runtime, seed: int, operator_space: str = "theirs") -> str:
+                cap_seconds: float, runtime, seed: int, operator_space: str = "theirs",
+                 meta_corpus=None) -> str:
     """Run the AutoDP search in its own environment. Returns the dir holding prepared.csv."""
     cmd = [adp_python, os.path.join(_HERE, "run_autodatapre.py"),
            "--dataset-csv", csv_path, "--dataset-id", str(did), "--mode", mode,
@@ -108,6 +109,8 @@ def _run_autodp(adp_python: str, csv_path: str, did: str, mode: str, scratch: st
     if operator_space == "ours":
         # AutoDP's MCTS searching ACORec's operator space (scripts/autodp_our_space.py).
         cmd += ["--operator-space", "ours"]
+        if meta_corpus:
+            cmd += ["--adp-meta-corpus", str(meta_corpus)]
     if runtime is not None:
         cmd += ["--runtime", str(runtime)]
     env = dict(os.environ)
@@ -202,7 +205,7 @@ def run(args) -> None:
 
             prepared_dir, rc = _run_autodp(args.adp_python, csv_path, did, mode, scratch,
                                            args.cap_seconds, args.runtime, args.seed,
-                                           args.operator_space)
+                                           args.operator_space, args.adp_meta_corpus)
             failed = os.path.join(prepared_dir, "autodp_failed.json")
             if os.path.exists(failed) or rc != 0:
                 info = {}
@@ -373,6 +376,8 @@ def main() -> None:
     ap.add_argument("--import-dir", default=None,
                     help="adopt results from an earlier run_autodatapre_all.sh output dir "
                          "(outputs/autodp) into --out, then continue with whatever is missing")
+    ap.add_argument("--adp-meta-corpus", default=None,
+                    help="Retrained meta-learner corpus (scripts/build_adp_meta_corpus.py).")
     ap.add_argument("--operator-space", choices=["theirs", "ours"], default="theirs",
                     help="which operator space AutoDP's MCTS searches. 'theirs' = its own; "
                          "'ours' = ACORec's space via scripts/autodp_our_space.py.")
