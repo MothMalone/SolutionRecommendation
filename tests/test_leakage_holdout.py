@@ -207,6 +207,7 @@ def test_adp_meta_corpus_excludes_eval_ids():
         n_datasets = 500
         seed = 42
         shard = ""
+        allow_download = True      # exercise the full library pool, not just what is on disk
 
     chosen = mod.choose_ids(_Args())
     assert chosen, "corpus selection returned nothing"
@@ -230,6 +231,7 @@ def test_adp_meta_corpus_rejects_eval_ids_passed_explicitly():
         n_datasets = 10
         seed = 42
         shard = ""
+        allow_download = True
 
     with pytest.raises(Exception) as excinfo:
         mod.choose_ids(_Args())

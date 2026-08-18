@@ -105,7 +105,20 @@ def load_table(dataset_id: str, local_dirs, target_column: str):
     return df
 
 
-def choose_ids(args) -> list:
+def available_locally(local_dirs) -> set:
+    """Dataset ids with a ready-made <id>.csv in any of the supplied directories."""
+    found = set()
+    for d in local_dirs:
+        base = Path(d)
+        if base.is_dir():
+            for f in base.rglob("*.csv"):
+                stem = f.stem
+                if stem.isdigit():
+                    found.add(normalize_id(stem))
+    return found
+
+
+def choose_ids(args, local_dirs=()) -> list:
     if args.ids:
         chosen = [normalize_id(i) for i in args.ids.split(",") if i.strip()]
         assert_disjoint(chosen, context="adp meta-corpus --ids")
@@ -114,6 +127,26 @@ def choose_ids(args) -> list:
     pool = [normalize_id(i) for i in feats.index]
     pool = [i for i in pool if i not in EVAL_ID_SET]
     assert_disjoint(pool, context="adp meta-corpus candidate pool")
+
+    # Prefer datasets that are already on disk. Sampling the library blind and relying on an
+    # OpenML fetch fails wholesale in offline/partially-offline environments (observed on Kaggle:
+    # 200/200 instant failures), and the corpus does not need any PARTICULAR datasets -- only
+    # enough non-evaluation tables to learn a task order from.
+    if not args.allow_download:
+        have = available_locally(local_dirs)
+        usable = [i for i in pool if i in have]
+        if len(usable) < args.n_datasets:
+            print(f"[corpus] note: {len(usable)} of {args.n_datasets} requested datasets are "
+                  f"available locally in {[str(d) for d in local_dirs]}.")
+            if not usable:
+                raise SystemExit(
+                    "[corpus] no usable datasets on disk. Point --local-dir at a folder of "
+                    "<id>.csv files (e.g. the mathurinache/openml Kaggle mount), or pass "
+                    "--allow-download to fetch from OpenML."
+                )
+        pool = usable
+        print(f"[corpus] {len(pool)} non-evaluation datasets available locally")
+
     rng = random.Random(args.seed)
     rng.shuffle(pool)
     chosen = pool[: args.n_datasets]
@@ -138,6 +171,10 @@ def main() -> int:
                     help="directory of ready-made <id>.csv; repeatable")
     ap.add_argument("--target-column", default="target")
     ap.add_argument("--adp-python", default=str(REPO / ".venv-autodp" / "bin" / "python"))
+    ap.add_argument("--allow-download", action="store_true",
+                    help="Sample from the whole library and fetch missing tables from OpenML. "
+                         "Off by default: selection is restricted to <id>.csv already on disk, "
+                         "so the build cannot fail wholesale on a blocked or partial network.")
     ap.add_argument("--merge", action="store_true",
                     help="skip generation; assemble Metafeature.csv/label.csv from progress.jsonl")
     args = ap.parse_args()
@@ -155,8 +192,9 @@ def main() -> int:
                 r = json.loads(line)
                 done[r["dataset_id"]] = r
 
+    local_dirs = [Path(d) for d in args.local_dir] + [cache]
     if not args.merge:
-        ids = choose_ids(args)
+        ids = choose_ids(args, local_dirs)
         todo = [d for d in ids if d not in done]
         print(f"[corpus] {len(ids)} datasets selected, {len(done)} already done, {len(todo)} to run")
 
@@ -164,7 +202,7 @@ def main() -> int:
             for k, ds in enumerate(todo, 1):
                 t0 = time.time()
                 try:
-                    df = load_table(ds, args.local_dir + [str(cache)], args.target_column)
+                    df = load_table(ds, local_dirs, args.target_column)
                     df.to_csv(cache / f"{ds}.csv", index=False)
 
                     rng = random.Random(f"{args.seed}:{ds}")
