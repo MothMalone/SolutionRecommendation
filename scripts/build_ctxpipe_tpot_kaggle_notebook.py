@@ -399,6 +399,11 @@ cells = [
                 "NUMEXPR_NUM_THREADS": "1",
             }
         )
+        # The runner file lives under OUTPUT_DIR and is invoked by absolute path;
+        # explicitly expose the official CtxPipe checkout so config.py/test.py resolve.
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(CTXPIPE_DIR), env.get("PYTHONPATH", "")]
+        ).rstrip(os.pathsep)
         parsed = {}
         native_failures = {}
         runner_source = "\\n".join(
