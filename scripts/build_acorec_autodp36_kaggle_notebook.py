@@ -51,6 +51,11 @@ cells = [
         repository. The remaining OpenML datasets use the GitLab mirror. In particular,
         `google=100000` is a synthetic project ID and is loaded from
         `google/data.csv`, not OpenML.
+
+        If an older version of this notebook already installed `numpy<2` in the
+        current Kaggle session, use **Session > Restart Session** once before running
+        this updated notebook. The current dependency pins preserve Kaggle's NumPy 2
+        ABI and validate NumPy/pandas/sklearn in a clean subprocess.
         Start with `RUN_MODE = "smoke"`; change it to `"final"` after the first ID
         completes successfully.
         """
@@ -79,6 +84,21 @@ cells = [
 
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-q", "-r", str(REPO_DIR / "requirements-kaggle.txt")],
+            check=True,
+        )
+        # Verify binary compatibility in a clean interpreter before importing the repo
+        # in this notebook kernel. This produces a direct installation error instead of
+        # an opaque pandas/numpy ABI traceback in the following cell.
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import numpy, pandas, sklearn; "
+                    "print('Dependency health:', numpy.__version__, "
+                    "pandas.__version__, sklearn.__version__)"
+                ),
+            ],
             check=True,
         )
         os.chdir(REPO_DIR)

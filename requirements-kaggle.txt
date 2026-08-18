@@ -1,5 +1,8 @@
-numpy<2
-pandas<3
+# Match AutoGluon 1.5's supported ABI range and keep Kaggle's NumPy 2 build.
+# Pinning NumPy <2 downgrades it underneath Kaggle's prebuilt pandas and causes
+# "numpy.dtype size changed" until the kernel is restarted.
+numpy>=1.25,<2.4
+pandas>=2,<2.4
 scipy
 requests
 pyarrow
