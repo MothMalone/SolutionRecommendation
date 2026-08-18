@@ -34,7 +34,9 @@ def _empty_autodp36_config():
 def test_cli_default_is_unchanged_and_autodp36_is_explicit():
     parser = _build_arg_parser()
     assert parser.parse_args([]).operator_space == "ours"
+    assert parser.parse_args([]).openml_backend == "auto"
     assert parser.parse_args(["--operator-space", "autodp36"]).operator_space == "autodp36"
+    assert parser.parse_args(["--openml-backend", "gitlab"]).openml_backend == "gitlab"
 
 
 def test_preprocessor_factory_preserves_original_and_routes_autodp36():

@@ -1,11 +1,16 @@
 """Dataset loading helpers (OpenML, Kaggle, dummy, CSV)."""
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
+import json
 import os
+import tempfile
+import time
+from pathlib import Path
 import pandas as pd
 import numpy as np
+import requests
 from sklearn.preprocessing import LabelEncoder
 from sklearn.utils import shuffle
 from sklearn.datasets import fetch_openml
@@ -23,9 +28,9 @@ def load_dummy_dataset(dataset_id: Any, verbose: bool = False) -> Dict[str, Any]
 
 
 def _coerce_task_target(y: pd.Series) -> Tuple[pd.Series, str]:
-    if y.dtype == "object" or y.dtype.name == "category":
+    if not pd.api.types.is_numeric_dtype(y):
         le = LabelEncoder()
-        y = pd.Series(le.fit_transform(y), index=y.index)
+        y = pd.Series(le.fit_transform(y.astype(str)), index=y.index)
 
     if y.nunique() > 50 and y.dtype.kind in "iufc":
         task_type = "regression"
@@ -42,6 +47,7 @@ def _prepare_dataset_from_xy(
     test_dataset_ids: Optional[list],
     max_samples_if_test: int,
     max_samples_default: int,
+    force_task_type: Optional[str] = None,
     verbose: bool = False,
 ) -> Dict[str, Any]:
     if isinstance(X, pd.DataFrame):
@@ -53,7 +59,19 @@ def _prepare_dataset_from_xy(
     X = X[mask].reset_index(drop=True)
     y = y[mask].reset_index(drop=True)
 
-    y, task_type = _coerce_task_target(y)
+    if force_task_type == "regression":
+        y = pd.to_numeric(y, errors="coerce")
+        numeric_mask = y.notna()
+        X = X.loc[numeric_mask].reset_index(drop=True)
+        y = y.loc[numeric_mask].reset_index(drop=True)
+        task_type = "regression"
+    elif force_task_type == "classification":
+        if not pd.api.types.is_numeric_dtype(y):
+            y = pd.Series(LabelEncoder().fit_transform(y.astype(str)), index=y.index)
+        y = y.astype(int)
+        task_type = "classification"
+    else:
+        y, task_type = _coerce_task_target(y)
 
     if task_type == "classification":
         class_counts = y.value_counts()
@@ -132,9 +150,133 @@ def _load_openml_dataset_direct_api(dataset_id: Any) -> Optional[Tuple[pd.DataFr
     return X.copy(), y
 
 
+GITLAB_OPENML_ROOT = "https://gitlab.com/data/d/openml"
+
+
+def _metadata_attributes(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
+def _download_gitlab_openml_file(
+    dataset_id: int,
+    relative_path: str,
+    destination: Path,
+    *,
+    retries: int = 3,
+) -> Path:
+    if destination.exists() and destination.stat().st_size > 0:
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    url = f"{GITLAB_OPENML_ROOT}/{dataset_id}/-/raw/master/{relative_path}"
+    errors = []
+    for attempt in range(1, retries + 1):
+        try:
+            with requests.get(
+                url,
+                stream=True,
+                timeout=(20, 300),
+                allow_redirects=True,
+                headers={"User-Agent": "ACORec-AutoDP36/1.0"},
+            ) as response:
+                response.raise_for_status()
+                with temporary.open("wb") as output:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            output.write(chunk)
+            if not temporary.exists() or temporary.stat().st_size == 0:
+                raise IOError(f"empty response from {url}")
+            os.replace(temporary, destination)
+            return destination
+        except Exception as exc:
+            errors.append(f"attempt {attempt}: {type(exc).__name__}: {exc}")
+            temporary.unlink(missing_ok=True)
+            if attempt < retries:
+                time.sleep(2 ** (attempt - 1))
+    raise RuntimeError(" | ".join(errors))
+
+
+def load_gitlab_openml_dataset(
+    dataset_id: Any,
+    *,
+    test_dataset_ids: Optional[Iterable[int]] = None,
+    regression_dataset_ids: Optional[Iterable[int]] = None,
+    verbose: bool = False,
+    cache_dir: Optional[str] = None,
+    max_samples_if_test: int = 100000,
+) -> Optional[Dict[str, Any]]:
+    """Load an OpenML dataset from DataGit's GitLab Parquet mirror.
+
+    Files are cached by dataset ID. The Parquet magic bytes are checked before
+    parsing so Git LFS pointers, HTML error pages, and truncated downloads fail
+    clearly instead of surfacing later as opaque ``ArrowInvalid`` errors.
+    """
+    did = int(dataset_id)
+    cache_root = Path(cache_dir or tempfile.gettempdir()) / "openml_gitlab" / str(did)
+    try:
+        metadata_path = _download_gitlab_openml_file(
+            did, "dataset/metadata.json", cache_root / "metadata.json"
+        )
+        parquet_path = _download_gitlab_openml_file(
+            did, "dataset/tables/data.pq", cache_root / "data.pq"
+        )
+        with parquet_path.open("rb") as source:
+            header = source.read(4)
+            source.seek(-4, os.SEEK_END)
+            footer = source.read(4)
+        if header != b"PAR1" or footer != b"PAR1":
+            parquet_path.unlink(missing_ok=True)
+            raise ValueError(
+                f"GitLab dataset {did} is not a complete Parquet file "
+                f"(header={header!r}, footer={footer!r})"
+            )
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        description = metadata.get("data_set_description", metadata)
+        targets = _metadata_attributes(description.get("default_target_attribute"))
+        if len(targets) != 1:
+            raise ValueError(f"expected one target for dataset {did}, got {targets}")
+
+        frame = pd.read_parquet(parquet_path)
+        frame.columns = frame.columns.astype(str)
+        target = targets[0]
+        if target not in frame.columns:
+            raise KeyError(f"target {target!r} is absent from GitLab dataset {did}")
+        excluded = {target}
+        excluded.update(_metadata_attributes(description.get("ignore_attribute")))
+        excluded.update(_metadata_attributes(description.get("row_id_attribute")))
+        features = [column for column in frame.columns if column not in excluded]
+        force_task_type = (
+            "regression"
+            if regression_dataset_ids and did in {int(value) for value in regression_dataset_ids}
+            else None
+        )
+        prepared = _prepare_dataset_from_xy(
+            X=frame[features].copy(),
+            y=frame[target].copy(),
+            dataset_id=did,
+            test_dataset_ids=list(test_dataset_ids or []),
+            max_samples_if_test=max_samples_if_test,
+            max_samples_default=5000,
+            force_task_type=force_task_type,
+            verbose=verbose,
+        )
+        prepared["download_backend"] = "gitlab-parquet"
+        return prepared
+    except Exception as exc:
+        if verbose:
+            print(f"Failed to load GitLab/OpenML dataset {did}: {type(exc).__name__}: {exc}")
+        return None
+
+
 def load_openml_dataset(
     dataset_id: Any,
     test_dataset_ids: Optional[list] = None,
+    regression_dataset_ids: Optional[Iterable[int]] = None,
     verbose: bool = False,
     local_data_folder: Optional[str] = None,
     use_direct_api: bool = True,
@@ -155,6 +297,12 @@ def load_openml_dataset(
     """
     direct_api_error: Optional[Exception] = None
     sklearn_error: Optional[Exception] = None
+    force_task_type = (
+        "regression"
+        if regression_dataset_ids
+        and int(dataset_id) in {int(value) for value in regression_dataset_ids}
+        else None
+    )
 
     if prefer_local and local_data_folder:
         local_df = _load_local_openml_csv(dataset_id=dataset_id, local_data_folder=local_data_folder)
@@ -172,6 +320,7 @@ def load_openml_dataset(
                 test_dataset_ids=test_dataset_ids,
                 max_samples_if_test=max_samples_if_test,
                 max_samples_default=5000,
+                force_task_type=force_task_type,
                 verbose=verbose,
             )
 
@@ -188,6 +337,7 @@ def load_openml_dataset(
                         test_dataset_ids=test_dataset_ids,
                         max_samples_if_test=max_samples_if_test,
                         max_samples_default=5000,
+                        force_task_type=force_task_type,
                         verbose=verbose,
                     )
             except Exception as exc:
@@ -212,6 +362,7 @@ def load_openml_dataset(
             test_dataset_ids=test_dataset_ids,
             max_samples_if_test=max_samples_if_test,
             max_samples_default=5000,
+            force_task_type=force_task_type,
             verbose=verbose,
         )
     except Exception as e:
@@ -235,6 +386,7 @@ def load_openml_dataset(
                         test_dataset_ids=test_dataset_ids,
                         max_samples_if_test=max_samples_if_test,
                         max_samples_default=5000,
+                        force_task_type=force_task_type,
                         verbose=verbose,
                     )
                 except Exception as local_exc:

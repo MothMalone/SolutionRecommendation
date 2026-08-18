@@ -1,6 +1,9 @@
 numpy<2
 pandas<3
 scipy
+requests
+pyarrow
+openml
 # Install only Tabular since the project uses autogluon.tabular APIs.
 # Let pip resolve compatible scikit-learn/xgboost versions with AutoGluon.
 autogluon.tabular==1.5.0

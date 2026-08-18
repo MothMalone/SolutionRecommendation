@@ -37,6 +37,7 @@ from automl_aco.config import (
 )
 from automl_aco.data.loaders import (
     load_openml_dataset,
+    load_gitlab_openml_dataset,
     load_kaggle_dataset,
     load_dummy_dataset,
     load_csv_dataset,
@@ -45,6 +46,8 @@ from automl_aco.data.metafeatures import extract_enhanced_metafeatures
 from automl_aco.eval_ids import EVAL_IDS, holdout_reference
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
 from automl_aco.preprocessing.autodp import (
+    AUTODP_60_IDS,
+    AUTODP_REGRESSION_IDS,
     AUTODP_OPTIONS as AUTODP36_OPTIONS,
     DEFAULT_AUTODP_ORDER as AUTODP36_ORDER,
     exclude_holdout_columns as exclude_autodp60_holdout_columns,
@@ -112,8 +115,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         required=False,
         default=None,
         help=(
-            "Optional local folder for OpenML fallback files (e.g., 1520.csv or 1520.csv.zip). "
-            "Used only when --dataset-source openml and API fetch fails."
+            "Optional local folder for OpenML CSV snapshots (e.g., 1520.csv) and the "
+            "GitLab/Parquet download cache when --openml-backend gitlab/auto is selected."
         ),
     )
     parser.add_argument("--kaggle-data-folder", default=KAGGLE_DATA_FOLDER, help="Kaggle data folder for csv by id")
@@ -281,6 +284,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "paper-style AutoDP space and matching 36-pipeline performance matrix generated "
             "by notebooks/build-performance-matrix-autodp.ipynb; its matrix/config paths are "
             "selected automatically unless explicitly overridden."
+        ),
+    )
+    parser.add_argument(
+        "--openml-backend",
+        choices=["auto", "openml", "gitlab"],
+        default="auto",
+        help=(
+            "Dataset backend for openml/local sources. auto tries local/OpenML first and "
+            "GitLab/DataGit as fallback; openml disables GitLab fallback; gitlab reads the "
+            "GitLab Parquet mirror directly and caches it under --openml-local-folder."
         ),
     )
     parser.add_argument(
@@ -1492,10 +1505,38 @@ def main() -> None:
 
     def _load_dataset_for_run(dataset_id: Any):
         if dataset_source == "openml":
-            return load_openml_dataset(
+            autodp_test_ids = list(AUTODP_60_IDS) if is_autodp36 else None
+            autodp_regression_ids = list(AUTODP_REGRESSION_IDS) if is_autodp36 else None
+            backend = str(getattr(args, "openml_backend", "auto"))
+            if backend == "gitlab":
+                return load_gitlab_openml_dataset(
+                    dataset_id,
+                    test_dataset_ids=autodp_test_ids,
+                    regression_dataset_ids=autodp_regression_ids,
+                    verbose=args.verbose,
+                    cache_dir=args.openml_local_folder,
+                    max_samples_if_test=100000,
+                )
+
+            loaded = load_openml_dataset(
                 dataset_id,
+                test_dataset_ids=autodp_test_ids,
+                regression_dataset_ids=autodp_regression_ids,
                 verbose=args.verbose,
                 local_data_folder=args.openml_local_folder,
+                max_samples_if_test=100000,
+            )
+            if loaded is not None or backend == "openml":
+                return loaded
+            if args.verbose:
+                print(f"OpenML failed for D_{dataset_id}; trying GitLab/DataGit mirror")
+            return load_gitlab_openml_dataset(
+                dataset_id,
+                test_dataset_ids=autodp_test_ids,
+                regression_dataset_ids=autodp_regression_ids,
+                verbose=args.verbose,
+                cache_dir=args.openml_local_folder,
+                max_samples_if_test=100000,
             )
         if dataset_source == "kaggle":
             return load_kaggle_dataset(

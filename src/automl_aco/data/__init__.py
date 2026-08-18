@@ -3,7 +3,13 @@
 from .schemas import Dataset, ensure_dataset
 from .splits import split_train_val_test
 from .metafeatures import extract_enhanced_metafeatures, build_metafeatures_matrix, load_metafeatures_csv
-from .loaders import load_openml_dataset, load_kaggle_dataset, load_dummy_dataset, load_csv_dataset
+from .loaders import (
+    load_openml_dataset,
+    load_gitlab_openml_dataset,
+    load_kaggle_dataset,
+    load_dummy_dataset,
+    load_csv_dataset,
+)
 from .openml_analysis import (
     compute_outlier_ratio,
     compute_scale_ratio,
@@ -21,6 +27,7 @@ __all__ = [
     "build_metafeatures_matrix",
     "load_metafeatures_csv",
     "load_openml_dataset",
+    "load_gitlab_openml_dataset",
     "load_kaggle_dataset",
     "load_dummy_dataset",
     "load_csv_dataset",

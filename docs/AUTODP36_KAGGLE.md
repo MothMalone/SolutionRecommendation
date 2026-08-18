@@ -17,10 +17,16 @@ cd /kaggle/working/SolutionRecommendation
 python -m pip install -r requirements-kaggle.txt
 ```
 
-If the evaluation CSVs are attached as a Kaggle Dataset, place or mount them as
-`<folder>/<openml_id>.csv` (or `.csv.zip`) and pass that folder through
-`--openml-local-folder`. The loader prefers these local snapshots and only
-falls back to the OpenML API.
+The runner supports three download modes through `--openml-backend`:
+
+- `gitlab` downloads the DataGit/OpenML Parquet mirror and caches it in
+  `--openml-local-folder`; no Kaggle Dataset upload is required;
+- `openml` uses the official `openml-python` package, then sklearn's OpenML
+  loader, without falling back to GitLab;
+- `auto` tries local/OpenML first and falls back to GitLab.
+
+For reproducible Kaggle runs, use `gitlab`. OpenML remains selectable for
+connectivity tests and environments where its API is responsive.
 
 ## One-dataset smoke run
 
@@ -29,9 +35,10 @@ This diagnostic skips AutoGluon and runs a tiny ACO budget:
 ```bash
 python scripts/run_recommend.py \
   --operator-space autodp36 \
-  --dataset-source local \
+  --dataset-source openml \
+  --openml-backend gitlab \
   --dataset-id 36 \
-  --openml-local-folder /kaggle/input/autodp60-csv \
+  --openml-local-folder /kaggle/working/autodp60_cache \
   --optimizer aco \
   --n-ants 1 \
   --n-iterations 1 \
@@ -48,9 +55,10 @@ the normal AutoGluon final evaluator run:
 ```bash
 python scripts/run_recommend.py \
   --operator-space autodp36 \
-  --dataset-source local \
+  --dataset-source openml \
+  --openml-backend gitlab \
   --dataset-ids 36 728 735 737 \
-  --openml-local-folder /kaggle/input/autodp60-csv \
+  --openml-local-folder /kaggle/working/autodp60_cache \
   --optimizer aco \
   --n-ants 10 \
   --n-iterations 10 \
@@ -64,3 +72,7 @@ python scripts/run_recommend.py \
 Use `--shard i/n` to distribute the dataset IDs across independent Kaggle
 Save-Version runs. Explicit `--performance-matrix` and `--pipeline-configs`
 arguments still override the profile defaults when needed.
+
+The ready-to-import notebook is
+`notebooks/run-acorec-autodp36-kaggle.ipynb`. Its smoke mode validates one
+dataset without AutoGluon; final mode runs the normal AutoGluon evaluator.
