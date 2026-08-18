@@ -44,10 +44,22 @@ from automl_aco.data.loaders import (
 from automl_aco.data.metafeatures import extract_enhanced_metafeatures
 from automl_aco.eval_ids import EVAL_IDS, holdout_reference
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
+from automl_aco.preprocessing.autodp import (
+    AUTODP_OPTIONS as AUTODP36_OPTIONS,
+    DEFAULT_AUTODP_ORDER as AUTODP36_ORDER,
+    exclude_holdout_columns as exclude_autodp60_holdout_columns,
+)
 from automl_aco.utils.operator_spec import base_operator_name
 from automl_aco.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+# ACO's option insertion order is also its default execution order.  Reorder
+# the paper-space mapping to exactly match the fixed order used to build the
+# AutoDP36 performance matrix.
+AUTODP36_PIPELINE_OPTIONS = {
+    step: list(AUTODP36_OPTIONS[step]) for step in AUTODP36_ORDER
+}
 
 
 def _cli_flag_was_passed(flag: str) -> bool:
@@ -256,7 +268,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--operator-space",
-        choices=["ours", "theirs"],
+        choices=["ours", "theirs", "autodp36"],
         default="ours",
         help=(
             "Which operator space ACORec searches. 'ours' = the 19-operator ACORec space. "
@@ -265,7 +277,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "'theirs' adds a duplicate_removal step and has no dimensionality_reduction, because "
             "that is the shape of their space. NOTE: the reference performance matrix is written "
             "in OUR operator codes, so the no_search_retrieval transfer arm is disabled under "
-            "'theirs' unless --transfer-arm-anyway is given."
+            "'theirs' unless --transfer-arm-anyway is given. 'autodp36' = the standalone "
+            "paper-style AutoDP space and matching 36-pipeline performance matrix generated "
+            "by notebooks/build-performance-matrix-autodp.ipynb; its matrix/config paths are "
+            "selected automatically unless explicitly overridden."
         ),
     )
     parser.add_argument(
@@ -883,6 +898,13 @@ def _tar_output_dir(output_dir: str) -> Optional[str]:
 def main() -> None:
     configure_logging()
     args = build_arg_parser().parse_args()
+    is_autodp36 = str(args.operator_space) == "autodp36"
+    if is_autodp36 and args.notebook_legacy_options:
+        raise ValueError("--operator-space autodp36 cannot be combined with --notebook-legacy-options")
+    if is_autodp36 and args.operator_param_search:
+        raise ValueError(
+            "--operator-param-search is defined for ACORec's original operators, not autodp36"
+        )
     metric_target_explicit = _cli_flag_was_passed("--metric-similarity-target")
 
     if args.notebook_legacy_mode:
@@ -986,6 +1008,19 @@ def main() -> None:
 
     if args.performance_matrix:
         performance_matrix_path = args.performance_matrix
+    elif is_autodp36:
+        performance_matrix_path = pick_existing(
+            "AutoDP36 performance matrix",
+            [
+                str(ROOT / "autodp_matrix" / "merged" / "training_performance_matrix_autodp36_ready.csv"),
+                os.path.join(
+                    args.kaggle_root,
+                    "autodp_matrix",
+                    "merged",
+                    "training_performance_matrix_autodp36_ready.csv",
+                ),
+            ],
+        )
     else:
         if use_kaggle:
             repo_perf_primary = os.path.join(args.kaggle_root, "data", "openml", "training_performance_matrix_autogluon.csv")
@@ -1009,7 +1044,12 @@ def main() -> None:
             repo_meta_secondary = os.path.join(args.kaggle_root, "aco", "dataset_feats.csv")
             metafeatures_path = pick_existing(
                 "metafeatures",
-                [repo_meta_primary, repo_meta_secondary, KAGGLE_METAFEATURES_PATH],
+                [
+                    repo_meta_primary,
+                    repo_meta_secondary,
+                    str(ROOT / "data" / "openml" / "dataset_feats.csv"),
+                    KAGGLE_METAFEATURES_PATH,
+                ],
             )
         else:
             metafeatures_path = pick_existing(
@@ -1019,6 +1059,14 @@ def main() -> None:
 
     if args.pipeline_configs:
         pipeline_configs_path = args.pipeline_configs
+    elif is_autodp36:
+        pipeline_configs_path = pick_existing(
+            "AutoDP36 pipeline configs",
+            [
+                str(ROOT / "aco" / "pipeline_configs_autodp36.json"),
+                os.path.join(args.kaggle_root, "aco", "pipeline_configs_autodp36.json"),
+            ],
+        )
     else:
         if use_kaggle:
             repo_pipelines = os.path.join(args.kaggle_root, "aco", "pipeline_configs.json")
@@ -1034,11 +1082,23 @@ def main() -> None:
             )
 
     perf = pd.read_csv(performance_matrix_path, index_col=0)
+    autodp60_columns_removed: List[str] = []
+    if is_autodp36:
+        # Defense in depth: even if a caller overrides the ready matrix with the
+        # historical/full file, AutoDP's 60 evaluation datasets never enter the
+        # metric learner or retrieval reference.
+        perf, autodp60_columns_removed = exclude_autodp60_holdout_columns(perf)
     meta_raw = pd.read_csv(metafeatures_path)
     if args.verbose:
         print(f"Loaded performance matrix: {performance_matrix_path}")
         print(f"Loaded metafeatures: {metafeatures_path}")
         print(f"Loaded pipeline configs: {pipeline_configs_path}")
+        if is_autodp36:
+            print(
+                "AutoDP36 profile: "
+                f"matrix={perf.shape[0]}x{perf.shape[1]}, "
+                f"AutoDP60 columns removed defensively={len(autodp60_columns_removed)}"
+            )
 
     def _normalize_id(val: object) -> str:
         if pd.isna(val):
@@ -1290,7 +1350,29 @@ def main() -> None:
                 f"meta {holdout_report['meta_rows_before']}->{holdout_report['meta_rows_after']} rows."
             )
 
-    recommender = MetaPipelineRecommender(perf_ref, meta_ref, pipeline_configs, verbose=args.verbose)
+    if is_autodp36:
+        recommender_options = {
+            step: list(values) for step, values in AUTODP36_PIPELINE_OPTIONS.items()
+        }
+    elif str(args.operator_space) == "theirs":
+        recommender_options = {
+            step: list(values) for step, values in AUTODP_PIPELINE_OPTIONS.items()
+        }
+    elif args.notebook_legacy_options:
+        recommender_options = {
+            step: list(values) for step, values in NOTEBOOK_LEGACY_PIPELINE_OPTIONS.items()
+        }
+    else:
+        recommender_options = {
+            step: list(values) for step, values in DEFAULT_PIPELINE_OPTIONS.items()
+        }
+    recommender = MetaPipelineRecommender(
+        perf_ref,
+        meta_ref,
+        pipeline_configs,
+        pipeline_options=recommender_options,
+        verbose=args.verbose,
+    )
     if args.metric_path:
         recommender.load_metric(args.metric_path)
         if args.verbose:
@@ -1435,6 +1517,8 @@ def main() -> None:
 
     def _active_options():
         """The operator space this run is searching, before per-run restriction."""
+        if is_autodp36:
+            return AUTODP36_PIPELINE_OPTIONS
         if str(getattr(args, "operator_space", "ours")) == "theirs":
             return AUTODP_PIPELINE_OPTIONS
         if getattr(args, "notebook_legacy_options", False):
@@ -1442,12 +1526,19 @@ def main() -> None:
         return DEFAULT_PIPELINE_OPTIONS
 
     def _active_step_order():
-        return (list(AUTODP_PREPROCESSOR_ORDER)
-                if str(getattr(args, "operator_space", "ours")) == "theirs" else None)
+        if is_autodp36:
+            return list(AUTODP36_ORDER)
+        return (
+            list(AUTODP_PREPROCESSOR_ORDER)
+            if str(getattr(args, "operator_space", "ours")) == "theirs"
+            else None
+        )
 
     def _build_run_options(dataset_id: Any):
         # Copy lists so per-run constraints do not mutate global defaults.
-        if str(getattr(args, "operator_space", "ours")) == "theirs":
+        if is_autodp36:
+            base_options = AUTODP36_PIPELINE_OPTIONS
+        elif str(getattr(args, "operator_space", "ours")) == "theirs":
             # AutoDP's operator space, reimplemented leak-free. See
             # src/automl_aco/preprocessing/autodp_ops.py for the full deviation table.
             base_options = AUTODP_PIPELINE_OPTIONS
@@ -1711,16 +1802,20 @@ def main() -> None:
                     # Validate the "light floor": best normalization (scale + onehot, NO imputation,
                     # NO structural) vs the bare no-prep pipeline, same 80%-fit. If light ties no-prep,
                     # the light floor costs ~nothing while never being "no preprocessing".
-                    scalers = [s for s in run_options.get("scaling", []) if str(s).lower() != "none"] or ["standard"]
+                    scale_step = "normalization" if is_autodp36 else "scaling"
+                    scale_default = "zscore" if is_autodp36 else "standard"
+                    scalers = [
+                        s for s in run_options.get(scale_step, []) if str(s).lower() != "none"
+                    ] or [scale_default]
                     light_cands = []
                     for s in scalers:
                         c = {step: "none" for step in _active_options()}
-                        c["scaling"] = s
-                        c["encoding"] = "onehot"
+                        c[scale_step] = s
+                        c["encoding"] = "none" if is_autodp36 else "onehot"
                         c["name"] = f"light_{s}"
                         light_cands.append(c)
                     no_prep = {step: "none" for step in _active_options()}
-                    no_prep["encoding"] = "onehot"
+                    no_prep["encoding"] = "none" if is_autodp36 else "onehot"
                     no_prep["name"] = "no_preprocessing"
                     _bc, _bs, b_results, _b = evaluate_candidates_autogluon(
                         dataset=test_dataset_df, target_column="target",
@@ -1774,7 +1869,7 @@ def main() -> None:
                     if ns_cfg is None:
                         raise RuntimeError(f"No retrieval neighbor available for {dataset_id}")
                     no_prep = {step: "none" for step in _active_options()}
-                    no_prep["encoding"] = "onehot"
+                    no_prep["encoding"] = "none" if is_autodp36 else "onehot"
                     no_prep["name"] = "no_preprocessing"
                     _b_cfg, _b_best, b_results, _b = evaluate_candidates_autogluon(
                         dataset=test_dataset_df, target_column="target",
@@ -1819,7 +1914,7 @@ def main() -> None:
                     base_cfg["name"] = "autogluon_native"
                 else:
                     base_cfg = {step: "none" for step in _active_options()}
-                    base_cfg["encoding"] = "onehot"
+                    base_cfg["encoding"] = "none" if is_autodp36 else "onehot"
                     base_cfg["name"] = "no_preprocessing"
                 b_cfg, b_score, b_results, _b = evaluate_candidates_autogluon(
                     dataset=test_dataset_df, target_column="target",
@@ -1982,6 +2077,13 @@ def main() -> None:
 
         rec_path = os.path.join(run_output_dir, "recommendation.json")
         recommendation["dataset_id"] = dataset_id
+        recommendation["operator_space"] = str(args.operator_space)
+        recommendation["reference_assets"] = {
+            "performance_matrix": str(performance_matrix_path),
+            "pipeline_configs": str(pipeline_configs_path),
+            "metafeatures": str(metafeatures_path),
+            "autodp60_columns_removed_defensively": list(autodp60_columns_removed),
+        }
         recommendation["search_options"] = run_options
         recommendation["leakage_holdout"] = holdout_report
         recommendation["search_hyperparams"] = {

@@ -18,6 +18,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import LinearSVC
 
 from ..data.splits import split_train_val_test
+from ..preprocessing.autodp import AutoDP36Preprocessor
 from ..preprocessing.preprocessor import Preprocessor
 from ..utils.operator_spec import base_operator_name
 from ..utils.logging import get_logger
@@ -135,9 +136,18 @@ def _detect_problem_type(y: pd.Series) -> Tuple[str, str]:
     return "multiclass", "accuracy"
 
 
-def _make_preprocessor(cfg: Dict[str, Any]) -> Preprocessor:
+def _make_preprocessor(cfg: Dict[str, Any]):
     step_order = cfg.get("step_order")
     pre_cfg = {k: v for k, v in cfg.items() if k != "step_order"}
+    # The AutoDP36 matrix uses the paper-style ``normalization`` family.  That
+    # key is intentionally absent from ACORec's original and the newer
+    # uppercase ``theirs`` spaces, so it is a safe, self-describing adapter
+    # switch that leaves their existing execution paths untouched.
+    if "normalization" in pre_cfg:
+        return AutoDP36Preprocessor(
+            pre_cfg,
+            step_order=step_order if isinstance(step_order, list) and step_order else None,
+        )
     if isinstance(step_order, list) and len(step_order) > 0:
         return Preprocessor(pre_cfg, step_order=step_order)
     return Preprocessor(pre_cfg)
@@ -151,6 +161,8 @@ _ROW_DROPPING_OPERATORS = {
     "iqr", "zscore", "lof", "isolation_forest",
     # AutoDP's space (reimplemented)
     "ZSB", "IQR", "LOF", "ED", "DROP",
+    # AutoDP36's lowercase paper-style vocabulary.
+    "drop", "exact", "approximate",
 }
 
 

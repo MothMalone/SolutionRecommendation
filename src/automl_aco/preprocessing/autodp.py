@@ -19,7 +19,10 @@ from sklearn.feature_selection import RFE
 from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.neighbors import LocalOutlierFactor
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder, StandardScaler
+from scipy import sparse
 
 
 class AutoDPResourceLimitError(RuntimeError):
@@ -153,7 +156,7 @@ class AutoDPPreprocessor:
         self,
         config: Mapping[str, str],
         *,
-        task_type: str,
+        task_type: str = "auto",
         step_order: Optional[Sequence[str]] = None,
         random_state: int = 42,
         missing_ratio_threshold: float = 0.40,
@@ -221,6 +224,10 @@ class AutoDPPreprocessor:
         y_work = self._series(y)
         if y_work is not None and len(X_work) != len(y_work):
             raise ValueError("X and y must have the same length")
+        if self.task_type == "auto":
+            unique = 0 if y_work is None else int(y_work.nunique(dropna=True))
+            numeric_target = y_work is not None and pd.api.types.is_numeric_dtype(y_work)
+            self.task_type = "regression" if numeric_target and unique > 50 else "classification"
         self.input_columns_ = X_work.columns.tolist()
         self.numeric_columns_ = X_work.select_dtypes(include=[np.number]).columns.tolist()
         self.categorical_columns_ = [c for c in X_work.columns if c not in self.numeric_columns_]
@@ -271,6 +278,7 @@ class AutoDPPreprocessor:
             if column not in X_work:
                 X_work[column] = np.nan
         return X_work[self.output_columns_].reset_index(drop=True)
+
 
     def _fit_fallback_imputers(self, X: pd.DataFrame) -> None:
         num = X[self.imputation_numeric_columns_].copy()
@@ -623,6 +631,94 @@ class AutoDPPreprocessor:
         return X[self.selected_columns_]
 
 
+class AutoDP36Preprocessor:
+    """Apply AutoDP operators plus the matrix's fixed model-input adapter.
+
+    The adapter is not searched: it only supplies numeric model input using
+    median imputation and categorical mode/one-hot encoding, exactly as in the
+    script that produced the 36-pipeline performance matrix.
+    """
+
+    def __init__(
+        self,
+        config: Mapping[str, str],
+        *,
+        task_type: str = "auto",
+        step_order: Optional[Sequence[str]] = None,
+        random_state: int = 42,
+    ) -> None:
+        self.config = dict(config)
+        self.base = AutoDPPreprocessor(
+            self.config,
+            task_type=task_type,
+            step_order=step_order,
+            random_state=random_state,
+        )
+        self.adapter_: Optional[ColumnTransformer] = None
+        self.output_columns_: List[str] = []
+
+    @staticmethod
+    def _make_adapter(X: pd.DataFrame) -> ColumnTransformer:
+        numeric = X.select_dtypes(include=[np.number]).columns.tolist()
+        categorical = [column for column in X.columns if column not in numeric]
+        transformers = []
+        if numeric:
+            transformers.append(("num", SimpleImputer(strategy="median"), numeric))
+        if categorical:
+            transformers.append(
+                (
+                    "cat",
+                    Pipeline(
+                        [
+                            ("impute", SimpleImputer(strategy="most_frequent")),
+                            (
+                                "onehot",
+                                OneHotEncoder(handle_unknown="ignore", sparse_output=True),
+                            ),
+                        ]
+                    ),
+                    categorical,
+                )
+            )
+        return ColumnTransformer(
+            transformers=transformers,
+            remainder="drop",
+            sparse_threshold=1.0,
+            verbose_feature_names_out=True,
+        )
+
+    def _as_frame(self, values, *, index: pd.Index) -> pd.DataFrame:
+        if isinstance(values, pd.DataFrame):
+            frame = values.copy()
+            frame.index = index
+            frame.columns = self.output_columns_
+        elif sparse.issparse(values):
+            frame = pd.DataFrame.sparse.from_spmatrix(
+                values, index=index, columns=self.output_columns_
+            )
+        else:
+            frame = pd.DataFrame(values, index=index, columns=self.output_columns_)
+        # Some sklearn/pandas combinations emit sparse pandas frames whose
+        # implicit one-hot zeros are represented with a NaN fill value.
+        return frame.fillna(0.0).reset_index(drop=True)
+
+    def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None):
+        X_base, y_base = self.base.fit_transform(X, y)
+        if X_base.shape[1] == 0:
+            return X_base, y_base
+        self.adapter_ = self._make_adapter(X_base)
+        values = self.adapter_.fit_transform(X_base)
+        self.output_columns_ = self.adapter_.get_feature_names_out().astype(str).tolist()
+        return self._as_frame(values, index=X_base.index), y_base
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X_base = self.base.transform(X)
+        if self.adapter_ is None:
+            return X_base
+        values = self.adapter_.transform(X_base)
+        return self._as_frame(values, index=X_base.index)
+
+
 __all__ = [
     "AUTODP_OPTIONS",
     "DEFAULT_AUTODP_ORDER",
@@ -631,6 +727,7 @@ __all__ = [
     "AUTODP_60_IDS",
     "AutoDPResourceLimitError",
     "AutoDPPreprocessor",
+    "AutoDP36Preprocessor",
     "autodp_space_size",
     "build_autodp_reference_pipelines",
     "exclude_holdout_columns",
