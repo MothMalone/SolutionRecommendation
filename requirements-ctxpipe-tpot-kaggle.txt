@@ -1,0 +1,9 @@
+# Modern Kaggle environment for native CtxPipe inference plus estimator-only TPOT.
+# Do not install CtxPipe's frozen Python-3.8 requirements wholesale.
+-r requirements-tpot-kaggle.txt
+transformers==4.36.2
+huggingface-hub>=0.19.4,<1.0
+loguru>=0.7,<0.8
+peewee>=3.17,<4
+sentencepiece>=0.1.99
+psutil>=5.9,<8
