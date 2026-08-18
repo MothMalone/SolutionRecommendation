@@ -200,10 +200,17 @@ def check_extra_flags(cmd_head: list, extra: str, label: str) -> None:
     if not extra:
         return
     try:
-        helptext = subprocess.run(cmd_head + ["--help"], capture_output=True, text=True,
-                                  timeout=120).stdout
+        proc = subprocess.run(cmd_head + ["--help"], capture_output=True, text=True, timeout=120)
+        helptext = proc.stdout
     except Exception:
         return  # never block a run on the checker itself
+    # A failed or empty --help must NOT read as "every flag is unknown" -- that would abort a valid
+    # run. (run_recommend's --help did crash for a while: a literal '%' in a help string made
+    # argparse raise "unsupported format character", so stdout came back empty.)
+    if proc.returncode != 0 or len(helptext) < 200:
+        print(f"[arms] note: could not read {label} --help (rc={proc.returncode}); "
+              f"skipping passthrough-flag validation")
+        return
     unknown = [tok for tok in shlex.split(extra)
                if tok.startswith("--") and tok.split("=")[0] not in helptext]
     if unknown:

@@ -306,7 +306,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--baseline-fit-include-val",
         action="store_true",
         help=(
-            "For --baseline-only, fit the final model on train+val (80%) instead of train (60%), "
+            # '%%' -- argparse runs help text through %-formatting, so a bare '%' raises
+            # "ValueError: unsupported format character" and takes down --help entirely.
+            "For --baseline-only, fit the final model on train+val (80%%) instead of train (60%%), "
             "matching the CV evaluator's final-fit so scores are directly comparable to CV-path runs."
         ),
     )
