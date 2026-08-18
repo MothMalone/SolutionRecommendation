@@ -1,0 +1,326 @@
+[
+  {
+    "name": "autodp_00_baseline",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_imputation_random",
+    "imputation": "random",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_imputation_drop",
+    "imputation": "drop",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_imputation_knn",
+    "imputation": "knn",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_imputation_most_frequent",
+    "imputation": "most_frequent",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_imputation_em",
+    "imputation": "em",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_imputation_mice",
+    "imputation": "mice",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_encoding_ordinal",
+    "imputation": "none",
+    "encoding": "ordinal",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_encoding_binary",
+    "imputation": "none",
+    "encoding": "binary",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_encoding_frequency",
+    "imputation": "none",
+    "encoding": "frequency",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_encoding_catboost",
+    "imputation": "none",
+    "encoding": "catboost",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_normalization_zscore",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "zscore",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_normalization_minmax",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "minmax",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_normalization_decimal_scale",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "decimal_scale",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_feature_selection_missing_ratio",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "missing_ratio",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_feature_selection_wrapper",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "wrapper",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_feature_selection_collinear",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "collinear",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_feature_selection_tree_based",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "tree_based",
+    "duplicate_removal": "none",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_duplicate_removal_exact",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "exact",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_duplicate_removal_approximate",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "approximate",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_ofat_outlier_removal_zscore",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "zscore"
+  },
+  {
+    "name": "autodp_ofat_outlier_removal_iqr",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "iqr"
+  },
+  {
+    "name": "autodp_ofat_outlier_removal_lof",
+    "imputation": "none",
+    "encoding": "none",
+    "normalization": "none",
+    "feature_selection": "none",
+    "duplicate_removal": "none",
+    "outlier_removal": "lof"
+  },
+  {
+    "name": "autodp_combo_01_basic",
+    "imputation": "most_frequent",
+    "encoding": "ordinal",
+    "normalization": "zscore",
+    "feature_selection": "missing_ratio",
+    "duplicate_removal": "exact",
+    "outlier_removal": "iqr"
+  },
+  {
+    "name": "autodp_combo_02_knn_binary",
+    "imputation": "knn",
+    "encoding": "binary",
+    "normalization": "minmax",
+    "feature_selection": "collinear",
+    "duplicate_removal": "exact",
+    "outlier_removal": "lof"
+  },
+  {
+    "name": "autodp_combo_03_mice_catboost",
+    "imputation": "mice",
+    "encoding": "catboost",
+    "normalization": "zscore",
+    "feature_selection": "tree_based",
+    "duplicate_removal": "approximate",
+    "outlier_removal": "zscore"
+  },
+  {
+    "name": "autodp_combo_04_em_frequency",
+    "imputation": "em",
+    "encoding": "frequency",
+    "normalization": "decimal_scale",
+    "feature_selection": "wrapper",
+    "duplicate_removal": "exact",
+    "outlier_removal": "iqr"
+  },
+  {
+    "name": "autodp_combo_05_random_ordinal",
+    "imputation": "random",
+    "encoding": "ordinal",
+    "normalization": "zscore",
+    "feature_selection": "collinear",
+    "duplicate_removal": "approximate",
+    "outlier_removal": "lof"
+  },
+  {
+    "name": "autodp_combo_06_drop_binary",
+    "imputation": "drop",
+    "encoding": "binary",
+    "normalization": "minmax",
+    "feature_selection": "tree_based",
+    "duplicate_removal": "exact",
+    "outlier_removal": "zscore"
+  },
+  {
+    "name": "autodp_combo_07_mf_frequency",
+    "imputation": "most_frequent",
+    "encoding": "frequency",
+    "normalization": "decimal_scale",
+    "feature_selection": "missing_ratio",
+    "duplicate_removal": "approximate",
+    "outlier_removal": "iqr"
+  },
+  {
+    "name": "autodp_combo_08_knn_catboost",
+    "imputation": "knn",
+    "encoding": "catboost",
+    "normalization": "zscore",
+    "feature_selection": "wrapper",
+    "duplicate_removal": "none",
+    "outlier_removal": "lof"
+  },
+  {
+    "name": "autodp_combo_09_mice_ordinal",
+    "imputation": "mice",
+    "encoding": "ordinal",
+    "normalization": "minmax",
+    "feature_selection": "collinear",
+    "duplicate_removal": "exact",
+    "outlier_removal": "none"
+  },
+  {
+    "name": "autodp_combo_10_em_binary",
+    "imputation": "em",
+    "encoding": "binary",
+    "normalization": "decimal_scale",
+    "feature_selection": "missing_ratio",
+    "duplicate_removal": "approximate",
+    "outlier_removal": "zscore"
+  },
+  {
+    "name": "autodp_combo_11_random_frequency",
+    "imputation": "random",
+    "encoding": "frequency",
+    "normalization": "zscore",
+    "feature_selection": "tree_based",
+    "duplicate_removal": "none",
+    "outlier_removal": "iqr"
+  },
+  {
+    "name": "autodp_combo_12_drop_catboost",
+    "imputation": "drop",
+    "encoding": "catboost",
+    "normalization": "minmax",
+    "feature_selection": "wrapper",
+    "duplicate_removal": "exact",
+    "outlier_removal": "lof"
+  },
+  {
+    "name": "autodp_combo_13_mf_binary",
+    "imputation": "most_frequent",
+    "encoding": "binary",
+    "normalization": "decimal_scale",
+    "feature_selection": "collinear",
+    "duplicate_removal": "approximate",
+    "outlier_removal": "zscore"
+  }
+]
