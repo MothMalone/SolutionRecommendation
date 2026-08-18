@@ -35,8 +35,9 @@ cells = [
         # ACORec on AutoDP's operator space — Kaggle runner
 
         This notebook clones the isolated `feature/acorec-autodp-space` branch and
-        runs ACORec with `--operator-space autodp36` on AutoDP's 60 evaluation
-        datasets. The matching 36×818 training matrix and 36 reference pipeline
+        runs ACORec with `--operator-space autodp36`. By default it evaluates the
+        project's canonical 30-dataset test suite; `autodp60` remains available as
+        a switch. The matching 36×818 training matrix and 36 reference pipeline
         configs are selected automatically by the command runner.
 
         Dataset backends:
@@ -45,8 +46,11 @@ cells = [
         - `openml`: uses `openml-python`, then `sklearn.fetch_openml`;
         - `auto`: tries local/OpenML first and GitLab as fallback.
 
-        You do **not** need to upload all 60 datasets when using `gitlab`. Downloads
-        are cached under `/kaggle/working/autodp60_cache` for the current Kaggle run.
+        For the 30-dataset suite, the exact 17 DiffPrep CSVs are read from an attached
+        Kaggle input when available, otherwise downloaded from the DiffPrep GitHub
+        repository. The remaining OpenML datasets use the GitLab mirror. In particular,
+        `google=100000` is a synthetic project ID and is loaded from
+        `google/data.csv`, not OpenML.
         Start with `RUN_MODE = "smoke"`; change it to `"final"` after the first ID
         completes successfully.
         """
@@ -93,10 +97,12 @@ cells = [
             AUTODP_CLASSIFICATION_IDS,
             AUTODP_REGRESSION_IDS,
         )
+        from automl_aco.eval_ids import EVAL_DATASETS
 
+        DATASET_SUITE = "ours30"     # "ours30" (paper suite) or "autodp60"
         RUN_MODE = "smoke"          # "smoke" first, then "final"
         DOWNLOAD_BACKEND = "gitlab" # "gitlab" (recommended), "openml", or "auto"
-        NUM_SHARDS = 10              # 6 datasets per final Kaggle run
+        NUM_SHARDS = 10              # ours30: 3/run; autodp60: 6/run
         SHARD_INDEX = 0              # run 0..9 in separate Save-Version jobs
         WORKERS = 1                  # keep 1: AutoGluon + large datasets are RAM-heavy
 
@@ -105,6 +111,8 @@ cells = [
         FINAL_METRIC_EPOCHS = 100
         FINAL_AUTOGLUON_SECONDS = 300
 
+        if DATASET_SUITE not in {"ours30", "autodp60"}:
+            raise ValueError("DATASET_SUITE must be 'ours30' or 'autodp60'")
         if RUN_MODE not in {"smoke", "final"}:
             raise ValueError("RUN_MODE must be 'smoke' or 'final'")
         if DOWNLOAD_BACKEND not in {"gitlab", "openml", "auto"}:
@@ -112,19 +120,72 @@ cells = [
         if not 0 <= SHARD_INDEX < NUM_SHARDS:
             raise ValueError("SHARD_INDEX must satisfy 0 <= SHARD_INDEX < NUM_SHARDS")
 
-        all_ids = list(AUTODP_60_IDS)
+        ours30_ids = [int(dataset_id) for dataset_id in EVAL_DATASETS.values()]
+        all_ids = ours30_ids if DATASET_SUITE == "ours30" else list(AUTODP_60_IDS)
         shard_ids = all_ids[SHARD_INDEX::NUM_SHARDS]
         run_ids = shard_ids[:1] if RUN_MODE == "smoke" else shard_ids
 
-        CACHE_DIR = Path("/kaggle/working/autodp60_cache")
-        OUTPUT_DIR = Path(f"/kaggle/working/acorec_autodp36_{RUN_MODE}_shard_{SHARD_INDEX:02d}")
+        CACHE_DIR = Path(f"/kaggle/working/acorec_{DATASET_SUITE}_data")
+        OUTPUT_DIR = Path(
+            f"/kaggle/working/acorec_autodp36_{DATASET_SUITE}_{RUN_MODE}_shard_{SHARD_INDEX:02d}"
+        )
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        print(f"Mode={RUN_MODE}; backend={DOWNLOAD_BACKEND}")
+        print(f"Suite={DATASET_SUITE}; mode={RUN_MODE}; backend={DOWNLOAD_BACKEND}")
         print(f"Shard {SHARD_INDEX}/{NUM_SHARDS - 1}: {shard_ids}")
         print("IDs executed now:", run_ids)
         print(f"Classification IDs={len(AUTODP_CLASSIFICATION_IDS)}; regression IDs={len(AUTODP_REGRESSION_IDS)}")
+        """
+    ),
+    code(
+        """
+        # Materialize the exact DiffPrep half of our 30-dataset suite as <id>.csv.
+        # This includes google=100000, which has no OpenML entry.
+        import pandas as pd
+
+        if DATASET_SUITE == "ours30":
+            diffprep_folders = {
+                "abalone", "ada_prior", "avila", "connect-4", "eeg", "google",
+                "house", "jungle_chess", "micro", "mozilla4", "obesity",
+                "page-blocks", "pbcseq", "pol", "run_or_walk", "uscensus",
+                "wall-robot-nav",
+            }
+            expected_local_ids = {
+                int(EVAL_DATASETS[name]) for name in diffprep_folders
+            }
+            input_root = Path("/kaggle/input")
+            attached_google = list(input_root.glob("**/google/data.csv")) if input_root.exists() else []
+            export_command = [
+                sys.executable,
+                str(REPO_DIR / "scripts" / "export_diffprep_datasets.py"),
+                "--out-dir", str(CACHE_DIR),
+            ]
+            if attached_google:
+                # The exporter scans recursively, so /kaggle/input is layout-independent.
+                export_command += ["--diffprep-root", str(input_root)]
+                print("Using attached DiffPrep Kaggle input:", attached_google[0])
+            else:
+                export_command += ["--download"]
+                print("No DiffPrep Kaggle input found; downloading frozen CSVs from GitHub.")
+
+            # Exit code may be 1 because the 13 OpenML CSVs are intentionally absent here;
+            # those IDs are supplied by the GitLab backend below.
+            export_result = subprocess.run(export_command, cwd=REPO_DIR, check=False)
+            present_local_ids = {
+                int(path.stem) for path in CACHE_DIR.glob("*.csv") if path.stem.isdigit()
+            }
+            missing_local = sorted(expected_local_ids - present_local_ids)
+            if missing_local:
+                raise RuntimeError(f"Missing DiffPrep CSV IDs after export: {missing_local}")
+            google_frame = pd.read_csv(CACHE_DIR / "100000.csv")
+            if "target" not in google_frame.columns:
+                raise KeyError("Exported Google CSV does not contain normalized 'target' column")
+            print(
+                f"Exact DiffPrep snapshots ready: {len(expected_local_ids)}/17; "
+                f"Google shape={google_frame.shape}, classes={google_frame['target'].nunique()}"
+            )
+            del google_frame
         """
     ),
     code(
@@ -189,7 +250,7 @@ cells = [
 
         preview_id = int(run_ids[0])
         common = dict(
-            test_dataset_ids=list(AUTODP_60_IDS),
+            test_dataset_ids=list(all_ids),
             regression_dataset_ids=list(AUTODP_REGRESSION_IDS),
             verbose=True,
             max_samples_if_test=100_000,
@@ -318,12 +379,15 @@ cells = [
     ),
     markdown(
         """
-        ## Running all 60 datasets
+        ## Running the full evaluation suite
 
         1. Keep `NUM_SHARDS = 10`.
         2. Set `RUN_MODE = "final"`.
         3. Create ten Kaggle Save-Version runs with `SHARD_INDEX = 0, 1, ..., 9`.
         4. Download each output archive/result directory.
+
+        With `DATASET_SUITE = "ours30"`, each final shard has three datasets. The
+        shard containing ID 100000 loads the exported Google CSV automatically.
 
         `WORKERS = 1` is intentional. Shards divide work across separate Kaggle
         sessions; they do not launch multiple AutoGluon processes into the same RAM.

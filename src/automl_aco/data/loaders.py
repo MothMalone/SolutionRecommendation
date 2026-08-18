@@ -211,6 +211,11 @@ def load_gitlab_openml_dataset(
 ) -> Optional[Dict[str, Any]]:
     """Load an OpenML dataset from DataGit's GitLab Parquet mirror.
 
+    A local ``<dataset_id>.csv`` in ``cache_dir`` is authoritative. This lets a
+    mixed evaluation suite use exact frozen snapshots (including synthetic IDs
+    such as DiffPrep's Google dataset 100000) while missing IDs still download
+    from the mirror.
+
     Files are cached by dataset ID. The Parquet magic bytes are checked before
     parsing so Git LFS pointers, HTML error pages, and truncated downloads fail
     clearly instead of surfacing later as opaque ``ArrowInvalid`` errors.
@@ -218,6 +223,29 @@ def load_gitlab_openml_dataset(
     did = int(dataset_id)
     cache_root = Path(cache_dir or tempfile.gettempdir()) / "openml_gitlab" / str(did)
     try:
+        if cache_dir:
+            local_df = _load_local_openml_csv(dataset_id=did, local_data_folder=cache_dir)
+            if local_df is not None:
+                target = _detect_target_column(local_df)
+                force_task_type = (
+                    "regression"
+                    if regression_dataset_ids
+                    and did in {int(value) for value in regression_dataset_ids}
+                    else None
+                )
+                prepared = _prepare_dataset_from_xy(
+                    X=local_df.drop(columns=[target]).copy(),
+                    y=local_df[target].copy(),
+                    dataset_id=did,
+                    test_dataset_ids=list(test_dataset_ids or []),
+                    max_samples_if_test=max_samples_if_test,
+                    max_samples_default=5000,
+                    force_task_type=force_task_type,
+                    verbose=verbose,
+                )
+                prepared["download_backend"] = "local-csv"
+                return prepared
+
         metadata_path = _download_gitlab_openml_file(
             did, "dataset/metadata.json", cache_root / "metadata.json"
         )

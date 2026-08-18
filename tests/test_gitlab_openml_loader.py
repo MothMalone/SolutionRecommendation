@@ -60,3 +60,26 @@ def test_gitlab_loader_can_force_known_regression_task(tmp_path):
     assert loaded is not None
     assert loaded["task_type"] == "regression"
     assert loaded["y"].dtype.kind in "iufc"
+
+
+def test_gitlab_backend_prefers_synthetic_local_csv(tmp_path):
+    dataset_id = 100000
+    frame = pd.DataFrame(
+        {
+            "Category": ["TOOLS", "GAME"] * 6,
+            "Reviews": range(12),
+            "Rating>4.2": [0, 1] * 6,
+        }
+    )
+    frame.to_csv(tmp_path / f"{dataset_id}.csv", index=False)
+
+    loaded = load_gitlab_openml_dataset(
+        dataset_id,
+        cache_dir=str(tmp_path),
+        test_dataset_ids=[dataset_id],
+    )
+
+    assert loaded is not None
+    assert loaded["X"].columns.tolist() == ["Category", "Reviews"]
+    assert loaded["task_type"] == "classification"
+    assert loaded["download_backend"] == "local-csv"

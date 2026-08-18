@@ -1505,7 +1505,10 @@ def main() -> None:
 
     def _load_dataset_for_run(dataset_id: Any):
         if dataset_source == "openml":
-            autodp_test_ids = list(AUTODP_60_IDS) if is_autodp36 else None
+            evaluation_test_ids = {int(value) for value in EVAL_IDS}
+            if is_autodp36:
+                evaluation_test_ids.update(int(value) for value in AUTODP_60_IDS)
+            autodp_test_ids = sorted(evaluation_test_ids)
             autodp_regression_ids = list(AUTODP_REGRESSION_IDS) if is_autodp36 else None
             backend = str(getattr(args, "openml_backend", "auto"))
             if backend == "gitlab":

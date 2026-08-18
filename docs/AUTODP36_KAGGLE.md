@@ -76,3 +76,11 @@ arguments still override the profile defaults when needed.
 The ready-to-import notebook is
 `notebooks/run-acorec-autodp36-kaggle.ipynb`. Its smoke mode validates one
 dataset without AutoGluon; final mode runs the normal AutoGluon evaluator.
+
+The notebook defaults to `DATASET_SUITE = "ours30"` and splits the canonical
+30 test datasets into ten shards of three datasets. For the 17 DiffPrep
+snapshots it scans an attached Kaggle input first, then downloads the frozen
+files from the DiffPrep GitHub repository. Dataset `100000` (`google`) is not
+an OpenML ID: it is loaded from DiffPrep's `google/data.csv`, whose label
+`Rating>4.2` is normalized to `target`. Set `DATASET_SUITE = "autodp60"` only
+when switching back to AutoDP's 60-dataset suite.
