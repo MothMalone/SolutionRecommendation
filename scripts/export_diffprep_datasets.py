@@ -183,6 +183,7 @@ def main() -> int:
                   f"find {args.diffprep_root} -name data.csv | head")
 
     wanted = [n.strip() for n in args.only.split(",") if n.strip()] or list(DIFFPREP_FOLDERS)
+    wanted_set = set(wanted)
     written, failed = [], []
     for name in wanted:
         folder = DIFFPREP_FOLDERS[name]
@@ -205,7 +206,12 @@ def main() -> int:
     # the repo but not in the mathurinache/openml dump).
     openml_roots = list(args.copy_openml_from) + [REPO / "data" / "eval_datasets"]
     id_index = index_id_csvs(openml_roots)
-    openml_names = [n for n in EVAL_DATASETS if n not in DIFFPREP_FOLDERS]
+    # With --only, validate only the requested subset. This makes shard-level exports
+    # return success when unrelated evaluation datasets are intentionally absent.
+    openml_names = [
+        n for n in EVAL_DATASETS
+        if n not in DIFFPREP_FOLDERS and n in wanted_set
+    ]
     for name in openml_names:
         did = EVAL_DATASETS[name]
         dest = args.out_dir / f"{did}.csv"
@@ -228,7 +234,10 @@ def main() -> int:
             failed.append(name)
 
     present = {p.stem for p in args.out_dir.glob("*.csv")}
-    missing = [f"{n}({i})" for n, i in EVAL_DATASETS.items() if i not in present]
+    missing = [
+        f"{n}({i})" for n, i in EVAL_DATASETS.items()
+        if n in wanted_set and i not in present
+    ]
     print(f"\n{len(written)} DiffPrep CSV(s) written to {args.out_dir}")
     print(f"evaluation datasets present in out-dir: {30 - len(missing)}/30")
     if missing:
