@@ -31,6 +31,7 @@ import json
 import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 import pandas as pd
@@ -61,15 +62,29 @@ DIFFPREP_FOLDERS = {
     "wall-robot-nav": "wall-robot-navigation",
 }
 GH_REPO = "chu-data-lab/DiffPrep"
+GH_BRANCH = "main"
 
 
 def _gh(path: str) -> bytes:
-    """Read a file from the DiffPrep repo via the gh CLI (works for files >1MB)."""
-    out = subprocess.run(
-        ["gh", "api", f"repos/{GH_REPO}/contents/{path}", "-H", "Accept: application/vnd.github.raw"],
-        capture_output=True, check=True,
-    )
-    return out.stdout
+    """Read a file from the DiffPrep repo.
+
+    Plain HTTPS against raw.githubusercontent.com, because the gh CLI is not installed on Kaggle
+    (and needs auth), while raw.* needs neither and has no 1MB content-API size limit. Falls back
+    to gh only if the fetch fails, for environments that proxy raw.* but allow the API.
+    """
+    url = f"https://raw.githubusercontent.com/{GH_REPO}/{GH_BRANCH}/{path}"
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            return resp.read()
+    except Exception as exc:
+        try:
+            return subprocess.run(
+                ["gh", "api", f"repos/{GH_REPO}/contents/{path}",
+                 "-H", "Accept: application/vnd.github.raw"],
+                capture_output=True, check=True,
+            ).stdout
+        except Exception:
+            raise RuntimeError(f"could not fetch {url}: {exc}") from exc
 
 
 def index_dataset_dirs(root: Path) -> dict:
@@ -133,7 +148,20 @@ def main() -> int:
                          "<id>.csv files, so one dir serves all 30. The repo's own "
                          "data/eval_datasets is always searched as well.")
     ap.add_argument("--only", default="", help="Comma-separated subset of names.")
+    # Lets a notebook cell re-print the digest after a later step (e.g. re-exporting 378) without
+    # importing this module -- a stale copy on the Kaggle mount makes `python -c "from
+    # export_diffprep_datasets import write_fingerprint"` an ImportError that kills the cell.
+    ap.add_argument("--fingerprint-only", action="store_true",
+                    help="Print the digest of --out-dir and exit; do not export anything.")
     args = ap.parse_args()
+
+    if args.fingerprint_only:
+        if not args.out_dir.is_dir():
+            ap.error(f"--out-dir {args.out_dir} does not exist")
+        if not any(args.out_dir.glob("*.csv")):
+            ap.error(f"--out-dir {args.out_dir} contains no <id>.csv files")
+        print(write_fingerprint(args.out_dir))
+        return 0
 
     if not args.download and args.diffprep_root is None:
         ap.error("pass --diffprep-root or --download")
@@ -142,7 +170,12 @@ def main() -> int:
     dir_index = {}
     if not args.download:
         if not args.diffprep_root.is_dir():
-            ap.error(f"--diffprep-root {args.diffprep_root} is not a directory")
+            ap.error(
+                f"--diffprep-root {args.diffprep_root} is not a directory.\n"
+                "        The DiffPrep dataset is not attached to this notebook. Either add it "
+                "(Add Data -> search 'diffprep'), or drop --diffprep-root and pass --download to "
+                "fetch the 17 CSVs straight from github.com/chu-data-lab/DiffPrep."
+            )
         dir_index = index_dataset_dirs(args.diffprep_root)
         print(f"[scan] {len(dir_index)} dataset dir(s) with a data.csv under {args.diffprep_root}")
         if not dir_index:
