@@ -199,3 +199,33 @@ def test_zero_scoring_round_stops_instead_of_retrying():
     """A round that scores nothing fails for structural reasons; a second round repeats it."""
     src = (REPO / "scripts" / "build_adp_meta_corpus.py").read_text()
     assert "if gained == 0:" in src, "fail-fast on a zero-scoring round is missing"
+
+
+def test_pool_excludes_frames_far_wider_than_any_eval_dataset():
+    """Proxy cost scales with COLUMNS, not just rows, and --score-max-rows only caps rows.
+
+    Dataset 4136 (dexter, ~20k features) burned 1444s and scored nothing. In a 120-dataset sample
+    11 sat above 5k features, up to 54,614 -- hours of guaranteed waste. They also cannot be
+    retrieved: the widest evaluation dataset is madelon at 500 features, so a 50k-feature corpus
+    row is never anyone's nearest neighbour.
+    """
+    import pandas as pd
+
+    src = (REPO / "scripts" / "build_adp_meta_corpus.py").read_text()
+    assert 'feats["NumberOfFeatures"] <= args.max_features' in src, "width filter missing"
+    assert '"--max-features"' in src
+
+    feats = pd.read_csv(REPO / "data" / "openml" / "dataset_feats.csv", index_col=0)
+    wide = int((feats["NumberOfFeatures"] > 1000).sum())
+    assert wide > 0, "expected some very wide datasets in the library"
+
+
+def test_width_filter_keeps_the_widest_eval_dataset_in_range():
+    """The default must not exclude datasets comparable to what we actually evaluate on."""
+    import pandas as pd
+
+    feats = pd.read_csv(REPO / "data" / "openml" / "dataset_feats.csv", index_col=0)
+    # madelon (1485) is the widest evaluation dataset at ~500 features
+    if 1485 in feats.index:
+        assert feats.loc[1485, "NumberOfFeatures"] <= 1000, (
+            "default --max-features would exclude datasets as wide as our own eval set")

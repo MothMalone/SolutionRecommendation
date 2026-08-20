@@ -199,6 +199,16 @@ def choose_ids(args, local_dirs=()) -> list:
         before = len(feats)
         feats = feats[feats["NumberOfClasses"] >= 2]
         print(f"[corpus] pool restricted to classification: {before} -> {len(feats)} datasets")
+    # Drop extreme-width frames. --score-max-rows caps rows, but the proxy's cost is driven by
+    # COLUMNS: dataset 4136 (dexter, ~20k features) burned 1444s and scored nothing. 11 of a
+    # 120-dataset sample sat above 5k features, up to 54,614 -- some hours of guaranteed waste.
+    # They also cannot help: the widest evaluation dataset is madelon at 500 features, so a
+    # 50k-feature corpus row is never the nearest neighbour of anything we evaluate.
+    if args.max_features and "NumberOfFeatures" in feats.columns:
+        before = len(feats)
+        feats = feats[feats["NumberOfFeatures"] <= args.max_features]
+        print(f"[corpus] pool restricted to <= {args.max_features} features: "
+              f"{before} -> {len(feats)} datasets")
     pool = [normalize_id(i) for i in feats.index]
     pool = [i for i in pool if i not in EVAL_ID_SET]
     assert_disjoint(pool, context="adp meta-corpus candidate pool")
@@ -261,6 +271,10 @@ def main() -> int:
                          "to hundreds of features, after which outlier removal deletes every row. "
                          "Two rounds bounds the damage; a dataset that still cannot fill its block "
                          "is recorded as a failure rather than chased.")
+    ap.add_argument("--max-features", type=int, default=1000,
+                    help="skip library datasets wider than this. Proxy cost scales with columns, "
+                         "and frames far wider than any evaluation dataset cannot be retrieved as "
+                         "a neighbour anyway. 0 disables.")
     ap.add_argument("--score-max-rows", type=int, default=1500,
                     help="subsample to at most this many rows for the PROXY SCORING only; "
                          "metafeatures still come from the full cached frame. 0 disables.")
