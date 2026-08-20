@@ -97,6 +97,30 @@ def sample_pipeline(rng: random.Random, *, has_missing: bool = False,
     return slots + [MODEL_SLOT], cfg
 
 
+def subsample_preserving_classes(df: pd.DataFrame, target_column: str, n: int,
+                                 seed: int) -> pd.DataFrame:
+    """Subsample to ~n rows without starving any class.
+
+    A plain df.sample() drops rare classes below the proxy's 3-member minimum, at which point it
+    returns no results at all and the dataset is lost -- observed on 184 (18 classes, 28k rows):
+    "only 0/10 pipelines scored" in 0.03s, because nothing was ever evaluated. Take a floor of 3
+    rows per class first, then fill the remainder at random.
+    """
+    if n <= 0 or len(df) <= n:
+        return df
+    y = df[target_column]
+    counts = y.value_counts()
+    floor = pd.concat([
+        df[y == cls].sample(n=min(3, int(cnt)), random_state=seed)
+        for cls, cnt in counts.items()
+    ])
+    if len(floor) >= n:
+        return floor                       # more classes than the budget; keep the floor intact
+    remainder = df.drop(index=floor.index)
+    extra = remainder.sample(n=min(n - len(floor), len(remainder)), random_state=seed)
+    return pd.concat([floor, extra]).sample(frac=1.0, random_state=seed)
+
+
 def describe_frame(df: pd.DataFrame, target_column: str) -> dict:
     X = df.drop(columns=[target_column], errors="ignore")
     return {
@@ -288,9 +312,8 @@ def main() -> int:
                     # later from the CACHED FULL csv, so row count -- their metafeature #1 -- stays
                     # honest; only the proxy fit is cheapened. Without this a single 4000x60
                     # dataset costs ~390s and a 12h session cannot hold both the corpus and the arm.
-                    scoring_df = df
-                    if args.score_max_rows and len(df) > args.score_max_rows:
-                        scoring_df = df.sample(n=args.score_max_rows, random_state=args.seed)
+                    scoring_df = subsample_preserving_classes(
+                        df, args.target_column, args.score_max_rows, args.seed)
                     shape = describe_frame(scoring_df, args.target_column)
                     k = args.pipelines_per_dataset
 
@@ -393,9 +416,29 @@ def main() -> int:
                          "Time": 0.0, "Size": r.get("shape", ""), "Website": "acorec-retrained"})
     pd.DataFrame(rows).to_csv(out / "label.csv", index=False)
 
+    # Every shard notebook builds this corpus independently -- artifacts cannot be passed
+    # between Kaggle notebooks here. If two shards end up with different corpora, their arm
+    # results are not comparable and nothing downstream would notice. The fingerprint is over the
+    # dataset ids and their pipeline/score blocks, so a differing corpus is caught by eye.
+    import hashlib
+
+    h = hashlib.sha256()
+    for r in ok:
+        h.update(r["dataset_id"].encode())
+        for pipe, sc in zip(r["pipelines"][:k], r["scores"][:k]):
+            h.update(pipe.encode())
+            h.update(f"{sc:.6f}".encode())
+    fingerprint = h.hexdigest()[:16]
+    (out / "corpus_fingerprint.txt").write_text(fingerprint + "\n")
+
     print(f"[corpus] wrote {out/'Metafeature.csv'}  ({meta.shape[0]} x {meta.shape[1]})")
     print(f"[corpus] wrote {out/'label.csv'}        ({len(rows)} rows, {k} per dataset)")
-    print(f"[corpus] failures: {sum(1 for r in done.values() if r.get('status')!='ok')}")
+    n_fail = sum(1 for r in done.values() if r.get("status") == "fail")
+    n_skip = sum(1 for r in done.values() if r.get("status") == "no_signal")
+    print(f"[corpus] {len(ok)} datasets usable | {n_fail} failed | {n_skip} dropped (no signal)")
+    print()
+    print(f"CORPUS FINGERPRINT  {fingerprint}  ({len(ok)} datasets x {k} pipelines)")
+    print("Every shard must print this same value, or its arm results are not comparable.")
     return 0
 
 

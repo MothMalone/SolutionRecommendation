@@ -103,3 +103,45 @@ def test_score_max_rows_does_not_shrink_the_cached_frame(tmp_path):
 
     loaded = mod.load_table("999", [src], "target")
     assert len(loaded) == 3000, "load_table must return the full frame; subsampling is scoring-only"
+
+
+def test_subsample_keeps_every_class_above_proxy_minimum():
+    """Unstratified sampling starved rare classes and cost us whole datasets (184: 0/10 scored)."""
+    mod = _mod()
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.RandomState(0)
+    # 18 classes, heavily imbalanced -- several classes have only 4 rows in 20k.
+    y = np.concatenate([rng.randint(0, 5, 19_000), np.repeat(np.arange(5, 18), 4)])
+    df = pd.DataFrame(rng.randn(len(y), 6), columns=list("abcdef"))
+    df["target"] = y
+
+    sub = mod.subsample_preserving_classes(df, "target", 1500, seed=42)
+
+    assert len(sub) <= 1500 + 18, f"subsample overshot: {len(sub)}"
+    counts = sub["target"].value_counts()
+    assert set(counts.index) == set(np.unique(y)), "a class disappeared from the subsample"
+    assert counts.min() >= 3, f"class starved below the proxy minimum: {counts.min()}"
+
+
+def test_subsample_is_a_noop_when_frame_is_small():
+    mod = _mod()
+    import pandas as pd
+    df = pd.DataFrame({"a": range(10), "target": [0, 1] * 5})
+    assert mod.subsample_preserving_classes(df, "target", 1500, 42) is df
+    assert mod.subsample_preserving_classes(df, "target", 0, 42) is df
+
+
+def test_subsample_survives_more_classes_than_budget():
+    """Floor of 3/class can exceed n; must return something valid rather than crash."""
+    mod = _mod()
+    import numpy as np
+    import pandas as pd
+    rng = np.random.RandomState(0)
+    y = np.repeat(np.arange(100), 5)
+    df = pd.DataFrame(rng.randn(len(y), 3), columns=list("abc"))
+    df["target"] = y
+    sub = mod.subsample_preserving_classes(df, "target", 50, seed=42)
+    assert sub["target"].nunique() == 100
+    assert sub["target"].value_counts().min() >= 3
