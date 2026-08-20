@@ -13,6 +13,7 @@ scripts/adp_bench.py already uses. Slower, and correct by construction.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Sequence
@@ -52,10 +53,17 @@ def batch_dataset_vectors(
             f"AutoDP interpreter not found at {adp_python}. Build it with "
             "`ADP_VENV=... bash scripts/setup_autodp_env.sh`, or pass --adp-python."
         )
+    # PYTHONPATH must NOT reach this interpreter. It outranks the venv's own site-packages, so a
+    # caller exporting PYTHONPATH=/tmp/aglibs (AutoGluon's numpy, built for 3.12) makes this 3.10
+    # venv import the wrong numpy and die with "you should not try to import numpy from its source
+    # directory". scripts/adp_bench.py scrubs it for the same reason.
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
+    env["MPLBACKEND"] = "Agg"
     proc = subprocess.run(
         [str(adp_python), "-c", _WORKER],
         input=json.dumps([str(p) for p in csv_paths]),
-        capture_output=True, text=True,
+        capture_output=True, text=True, env=env,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"AutoDP metafeature worker failed:\n{proc.stderr[-2000:]}")

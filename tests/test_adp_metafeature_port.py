@@ -74,3 +74,20 @@ def test_failure_is_reported_not_raised(tmp_path):
     assert isinstance(got[str(bad)], dict) and "error" in got[str(bad)]
     with pytest.raises(ValueError, match="metafeatures failed"):
         as_matrix(got, [bad])
+
+
+def test_worker_ignores_a_hostile_pythonpath(monkeypatch):
+    """PYTHONPATH must not reach the AutoDP venv.
+
+    On Kaggle the cell exports PYTHONPATH=/tmp/aglibs so AutoGluon is importable. That path holds
+    numpy built for python 3.12 and outranks the venv's own site-packages, so the 3.10 worker died
+    with "you should not try to import numpy from its source directory" -- after the whole corpus
+    had already been scored. adp_bench.py scrubs it; this worker must too.
+    """
+    from automl_aco.adp_metafeatures import batch_dataset_vectors
+
+    monkeypatch.setenv("PYTHONPATH", "/nonexistent/hostile/path")
+    files = _fixtures()[:1]
+    got = batch_dataset_vectors(files, adp_python=ADP_PY)
+    assert isinstance(got[str(files[0])], list), got[str(files[0])]
+    assert len(got[str(files[0])]) == 7

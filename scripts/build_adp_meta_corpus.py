@@ -307,6 +307,17 @@ def main() -> int:
                     df = load_table(ds, local_dirs, args.target_column)
                     df.to_csv(cache / f"{ds}.csv", index=False)
 
+                    # The corpus feeds their CLASSIFICATION meta-learner (label.csv); regression
+                    # has its own label_reg.csv. A continuous target makes every pipeline fail with
+                    # "Unknown label type: continuous" -- two full sampling rounds spent to learn
+                    # what the target column already says.
+                    y_col = df[args.target_column]
+                    if y_col.dtype.kind == "f" and y_col.nunique() > max(20, 0.05 * len(y_col)):
+                        row = {"dataset_id": ds, "status": "regression",
+                               "shape": f"{df.shape[0]}*{df.shape[1]}",
+                               "seconds": round(time.time() - t0, 2)}
+                        raise _NoSignal(row)
+
                     rng = random.Random(f"{args.seed}:{ds}")
                     # Score on a subsample when the frame is large. Metafeatures are computed
                     # later from the CACHED FULL csv, so row count -- their metafeature #1 -- stays
@@ -367,9 +378,12 @@ def main() -> int:
                 fh.write(json.dumps(row) + "\n")
                 fh.flush()
                 done[ds] = row
-                mark = {"ok": "ok  ", "no_signal": "SKIP", "fail": "FAIL"}[row["status"]]
+                mark = {"ok": "ok  ", "no_signal": "SKIP", "regression": "SKIP",
+                        "fail": "FAIL"}[row["status"]]
                 extra = row.get("error", "")
-                if row["status"] == "no_signal":
+                if row["status"] == "regression":
+                    extra = "continuous target -- classification corpus only, excluded"
+                elif row["status"] == "no_signal":
                     extra = f"all {row['distinct_scores']} distinct score(s) -- no signal, excluded"
                 elif row["status"] == "ok":
                     extra = f"{row['distinct_scores']} distinct scores"
@@ -434,7 +448,8 @@ def main() -> int:
     print(f"[corpus] wrote {out/'Metafeature.csv'}  ({meta.shape[0]} x {meta.shape[1]})")
     print(f"[corpus] wrote {out/'label.csv'}        ({len(rows)} rows, {k} per dataset)")
     n_fail = sum(1 for r in done.values() if r.get("status") == "fail")
-    n_skip = sum(1 for r in done.values() if r.get("status") == "no_signal")
+    n_skip = sum(1 for r in done.values()
+                 if r.get("status") in ("no_signal", "regression"))
     print(f"[corpus] {len(ok)} datasets usable | {n_fail} failed | {n_skip} dropped (no signal)")
     print()
     print(f"CORPUS FINGERPRINT  {fingerprint}  ({len(ok)} datasets x {k} pipelines)")
