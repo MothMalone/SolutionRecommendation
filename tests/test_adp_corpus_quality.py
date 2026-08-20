@@ -145,3 +145,30 @@ def test_subsample_survives_more_classes_than_budget():
     sub = mod.subsample_preserving_classes(df, "target", 50, seed=42)
     assert sub["target"].nunique() == 100
     assert sub["target"].value_counts().min() >= 3
+
+
+def test_continuous_target_detected_by_sklearn_not_by_heuristic():
+    """A float target with few distinct values is still 'continuous' to sklearn.
+
+    The first guard here checked dtype + cardinality, which let such datasets through; every
+    sampled pipeline then failed with "Unknown label type: continuous", burning two full sampling
+    rounds per dataset to rediscover what the target column already said.
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.utils.multiclass import type_of_target
+
+    y = pd.Series(np.tile(np.arange(12) + 0.5, 100))   # 12 distinct, float
+    assert type_of_target(y) == "continuous"
+    # the discarded heuristic would NOT have flagged this
+    assert not (y.dtype.kind == "f" and y.nunique() > max(20, 0.05 * len(y)))
+
+
+def test_integer_multiclass_target_is_not_treated_as_regression():
+    """Guard must not throw away legitimate multiclass datasets."""
+    import numpy as np
+    import pandas as pd
+    from sklearn.utils.multiclass import type_of_target
+
+    y = pd.Series(np.tile(np.arange(12), 100))          # 12 distinct, integer
+    assert type_of_target(y) == "multiclass"

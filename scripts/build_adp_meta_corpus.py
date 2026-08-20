@@ -39,11 +39,25 @@ import argparse
 import json
 import random
 import sys
+import warnings
 import time
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# The proxy fits thousands of models; sklearn emits ConvergenceWarning per lbfgs fit and
+# "Features [...] are constant" per feature-selection call on PCA'd input. Left on, they bury the
+# per-dataset progress lines under thousands of lines of noise and make the run unreadable.
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=RuntimeWarning)
+try:
+    from sklearn.exceptions import ConvergenceWarning, DataConversionWarning
+    warnings.filterwarnings("ignore", category=ConvergenceWarning)
+    warnings.filterwarnings("ignore", category=DataConversionWarning)
+except Exception:
+    pass
+np.seterr(divide="ignore", invalid="ignore")
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -311,8 +325,16 @@ def main() -> int:
                     # has its own label_reg.csv. A continuous target makes every pipeline fail with
                     # "Unknown label type: continuous" -- two full sampling rounds spent to learn
                     # what the target column already says.
-                    y_col = df[args.target_column]
-                    if y_col.dtype.kind == "f" and y_col.nunique() > max(20, 0.05 * len(y_col)):
+                    # Ask sklearn, do not guess. A float target with as few as 12 distinct values
+                    # is "continuous" to type_of_target -- the exact function that raises inside
+                    # the proxy -- so a dtype+cardinality heuristic lets those through and every
+                    # sampled pipeline then dies with "Unknown label type: continuous".
+                    from sklearn.utils.multiclass import type_of_target
+                    try:
+                        target_kind = type_of_target(df[args.target_column])
+                    except Exception:
+                        target_kind = "unknown"
+                    if target_kind.startswith("continuous"):
                         row = {"dataset_id": ds, "status": "regression",
                                "shape": f"{df.shape[0]}*{df.shape[1]}",
                                "seconds": round(time.time() - t0, 2)}
