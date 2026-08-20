@@ -57,23 +57,53 @@ from autodp_our_space import STEP_OPERATORS, _code  # noqa: E402
 # Their pipeline is 7 slots: 6 preprocessing families then a model. Our space has exactly 6
 # families, so the shape is preserved and n_features_in_ stays 14 -- the arm varies the
 # vocabulary, not the architecture.
+class _NoSignal(Exception):
+    """Dataset scored fine but every pipeline tied; carries the row to record."""
+
+    def __init__(self, row):
+        super().__init__(row.get("dataset_id", "?"))
+        self.row = row
+
+
 FAMILY_ORDER = ["imputation", "encoding", "scaling", "feature_selection",
                 "dimensionality_reduction", "outlier_removal"]
 MODEL_SLOT = "RF"          # constant: our proxy is LogReg; the slot exists only to keep 7 slots.
 NULL = "none"
 
 
-def sample_pipeline(rng: random.Random) -> tuple:
-    """(ordered slot codes, config dict). Order is sampled too -- it is what the meta-learner learns."""
+def sample_pipeline(rng: random.Random, *, has_missing: bool = False,
+                    has_categorical: bool = False) -> tuple:
+    """(ordered slot codes, config dict). Order is sampled too -- it is what the meta-learner learns.
+
+    Turning a family off is only offered where the data allows it. The proxy rejects
+    `imputation: none` on a frame with missing values ("missing values require non-'none'
+    imputation") and cannot fit a model on unencoded categoricals, so sampling those blind wasted
+    ~50% of every dataset's evaluations AND -- because a rejected pipeline was written as 0.0 --
+    taught the meta-learner that a perfectly good pipeline was the worst one available.
+    """
     order = FAMILY_ORDER[:]
     rng.shuffle(order)
     cfg, slots = {}, []
     for fam in order:
+        may_skip = True
+        if fam == "imputation" and has_missing:
+            may_skip = False
+        if fam == "encoding" and has_categorical:
+            may_skip = False
         # A family is off ~25% of the time, mirroring the *_null slots in their label.csv.
-        op = NULL if rng.random() < 0.25 else rng.choice(STEP_OPERATORS[fam])
+        op = NULL if (may_skip and rng.random() < 0.25) else rng.choice(STEP_OPERATORS[fam])
         cfg[fam] = op
         slots.append(_code(fam, op))
     return slots + [MODEL_SLOT], cfg
+
+
+def describe_frame(df: pd.DataFrame, target_column: str) -> dict:
+    X = df.drop(columns=[target_column], errors="ignore")
+    return {
+        "has_missing": bool(X.isna().to_numpy().any()),
+        "has_categorical": bool(any(X[c].dtype == object or str(X[c].dtype) == "category"
+                                    for c in X.columns)),
+    }
 
 
 def load_table(dataset_id: str, local_dirs, target_column: str):
@@ -171,12 +201,26 @@ def main() -> int:
                     help="directory of ready-made <id>.csv; repeatable")
     ap.add_argument("--target-column", default="target")
     ap.add_argument("--adp-python", default=str(REPO / ".venv-autodp" / "bin" / "python"))
+    ap.add_argument("--split-seeds", type=lambda v: [int(x) for x in v.split(",")],
+                    default=[42, 52, 62],
+                    help="proxy train/val splits to average per pipeline. More seeds cost time but "
+                         "give finer resolution -- a single small split ties many pipelines at the "
+                         "same accuracy, which carries no signal.")
+    ap.add_argument("--min-distinct-scores", type=int, default=3,
+                    help="drop a dataset whose sampled pipelines produce fewer distinct scores "
+                         "than this; it cannot teach a task order.")
+    ap.add_argument("--max-sample-rounds", type=int, default=4,
+                    help="oversampling rounds allowed to reach --pipelines-per-dataset valid scores")
     ap.add_argument("--allow-download", action="store_true",
                     help="Sample from the whole library and fetch missing tables from OpenML. "
                          "Off by default: selection is restricted to <id>.csv already on disk, "
                          "so the build cannot fail wholesale on a blocked or partial network.")
     ap.add_argument("--merge", action="store_true",
                     help="skip generation; assemble Metafeature.csv/label.csv from progress.jsonl")
+    ap.add_argument("--merge-from", action="append", default=[],
+                    help="additional corpus dir(s) whose progress.jsonl and datasets/ to fold in. "
+                         "Repeatable. Use when shards ran in separate notebooks, each having "
+                         "written its own progress.jsonl.")
     args = ap.parse_args()
 
     out = Path(args.out_dir)
@@ -185,12 +229,29 @@ def main() -> int:
     cache.mkdir(exist_ok=True)
     progress = out / "progress.jsonl"
 
+    # Fold in sibling shard dirs first, so their rows are visible both to --merge and to the
+    # resume check. Later sources win only if the earlier row was not a success.
     done = {}
-    if progress.exists():
-        for line in progress.read_text().splitlines():
-            if line.strip():
-                r = json.loads(line)
+    extra_caches = []
+    for src in list(args.merge_from) + [str(out)]:
+        src_dir = Path(src)
+        extra_caches.append(src_dir / "datasets")
+        pfile = src_dir / "progress.jsonl"
+        if not pfile.exists():
+            if src_dir != out:
+                print(f"[corpus] warning: no progress.jsonl in {src_dir}")
+            continue
+        n = 0
+        for line in pfile.read_text().splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            prev = done.get(r["dataset_id"])
+            if prev is None or prev.get("status") != "ok":
                 done[r["dataset_id"]] = r
+            n += 1
+        if src_dir != out:
+            print(f"[corpus] folded in {n} row(s) from {pfile}")
 
     local_dirs = [Path(d) for d in args.local_dir] + [cache]
     if not args.merge:
@@ -199,33 +260,59 @@ def main() -> int:
         print(f"[corpus] {len(ids)} datasets selected, {len(done)} already done, {len(todo)} to run")
 
         with progress.open("a") as fh:
-            for k, ds in enumerate(todo, 1):
+            for i, ds in enumerate(todo, 1):
                 t0 = time.time()
                 try:
                     df = load_table(ds, local_dirs, args.target_column)
                     df.to_csv(cache / f"{ds}.csv", index=False)
 
                     rng = random.Random(f"{args.seed}:{ds}")
-                    slots, cfgs = [], []
-                    for _ in range(args.pipelines_per_dataset):
-                        s, c = sample_pipeline(rng)
-                        slots.append(s)
-                        cfgs.append(c)
+                    shape = describe_frame(df, args.target_column)
+                    k = args.pipelines_per_dataset
 
-                    _, _, results, _ = evaluate_candidates_simple(
-                        df, args.target_column, cfgs,
-                        proxy_settings={"model": "logreg", "split_seeds": [42]},
-                    )
-                    by_cfg = {json.dumps(c, sort_keys=True): sc for c, sc in results}
-                    scores = [by_cfg.get(json.dumps(c, sort_keys=True)) for c in cfgs]
-                    if all(s is None or not np.isfinite(s) for s in scores):
-                        raise RuntimeError("every pipeline failed to score")
+                    # Oversample and keep the first k that actually score. A rejected pipeline is
+                    # dropped, never written as 0.0 -- a failed evaluation is missing information,
+                    # not evidence that the pipeline is bad.
+                    keep_slots, keep_scores, attempts = [], [], 0
+                    while len(keep_slots) < k and attempts < args.max_sample_rounds:
+                        attempts += 1
+                        want = k - len(keep_slots)
+                        batch = [sample_pipeline(rng, **shape) for _ in range(want * 2)]
+                        _, _, results, _ = evaluate_candidates_simple(
+                            df, args.target_column, [c for _, c in batch],
+                            proxy_settings={"model": "logreg",
+                                            "split_seeds": args.split_seeds},
+                        )
+                        by_cfg = {json.dumps(c, sort_keys=True): sc for c, sc in results}
+                        for slot, cfg in batch:
+                            sc = by_cfg.get(json.dumps(cfg, sort_keys=True))
+                            if sc is not None and np.isfinite(sc) and len(keep_slots) < k:
+                                keep_slots.append(slot)
+                                keep_scores.append(float(sc))
+
+                    if len(keep_slots) < k:
+                        raise RuntimeError(
+                            f"only {len(keep_slots)}/{k} pipelines scored after "
+                            f"{attempts} sampling round(s)")
+                    # A dataset whose pipelines all tie teaches the meta-learner nothing: their
+                    # 1-NN takes idxmax of the neighbour's block, so with every score equal the
+                    # "best" pipeline is just whichever came first. Exclude it rather than let it
+                    # contribute an arbitrary task order.
+                    if len(set(round(x, 6) for x in keep_scores)) < args.min_distinct_scores:
+                        row = {"dataset_id": ds, "status": "no_signal",
+                               "shape": f"{df.shape[0]}*{df.shape[1]}",
+                               "distinct_scores": len(set(round(x, 6) for x in keep_scores)),
+                               "seconds": round(time.time() - t0, 2)}
+                        raise _NoSignal(row)
 
                     row = {"dataset_id": ds, "status": "ok",
                            "shape": f"{df.shape[0]}*{df.shape[1]}",
-                           "pipelines": [",".join(s) for s in slots],
-                           "scores": [None if s is None else float(s) for s in scores],
+                           "pipelines": [",".join(sl) for sl in keep_slots],
+                           "scores": keep_scores,
+                           "distinct_scores": len(set(round(x, 6) for x in keep_scores)),
                            "seconds": round(time.time() - t0, 2)}
+                except _NoSignal as skip:
+                    row = skip.row
                 except Exception as exc:
                     row = {"dataset_id": ds, "status": "fail",
                            "error": f"{type(exc).__name__}: {exc}",
@@ -233,8 +320,13 @@ def main() -> int:
                 fh.write(json.dumps(row) + "\n")
                 fh.flush()
                 done[ds] = row
-                mark = "ok  " if row["status"] == "ok" else "FAIL"
-                print(f"  [{k}/{len(todo)}] {mark} {ds}  {row.get('error','')} ({row['seconds']}s)")
+                mark = {"ok": "ok  ", "no_signal": "SKIP", "fail": "FAIL"}[row["status"]]
+                extra = row.get("error", "")
+                if row["status"] == "no_signal":
+                    extra = f"all {row['distinct_scores']} distinct score(s) -- no signal, excluded"
+                elif row["status"] == "ok":
+                    extra = f"{row['distinct_scores']} distinct scores"
+                print(f"  [{i}/{len(todo)}] {mark} {ds}  {extra} ({row['seconds']}s)")
 
     # ---- assemble ----
     ok = [r for r in done.values() if r.get("status") == "ok"]
@@ -244,7 +336,14 @@ def main() -> int:
     ok.sort(key=lambda r: r["dataset_id"])
     assert_disjoint([r["dataset_id"] for r in ok], context="adp meta-corpus output")
 
-    files = [cache / f"{r['dataset_id']}.csv" for r in ok]
+    def _cached(dsid: str) -> Path:
+        for base in [cache] + extra_caches:
+            cand = base / f"{dsid}.csv"
+            if cand.exists():
+                return cand
+        return cache / f"{dsid}.csv"        # reported as missing below
+
+    files = [_cached(r["dataset_id"]) for r in ok]
     missing = [f for f in files if not f.exists()]
     if missing:
         print(f"[corpus] {len(missing)} cached CSV(s) missing, e.g. {missing[0]}; rerun without --merge")
@@ -260,14 +359,13 @@ def main() -> int:
         # which silently misaligns on their own shipped label.csv (group sizes 10/6/4/11/9).
         # Padding to a fixed k is what makes that indexing correct here.
         pipes, scores = r["pipelines"][:k], r["scores"][:k]
-        while len(pipes) < k:
-            pipes.append(pipes[-1])
-            scores.append(scores[-1])
+        if len(pipes) != k:
+            raise ValueError(f"{r['dataset_id']}: {len(pipes)} pipelines, expected exactly {k}")
         for p, s in zip(pipes, scores):
             pid += 1
             rows.append({"Id": pid, "DatasetName": r["dataset_id"], "Target": "target",
                          "Pipeline": p,
-                         "EvaluationMetric": 0.0 if s is None else float(s),
+                         "EvaluationMetric": float(s),
                          "Time": 0.0, "Size": r.get("shape", ""), "Website": "acorec-retrained"})
     pd.DataFrame(rows).to_csv(out / "label.csv", index=False)
 
