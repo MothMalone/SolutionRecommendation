@@ -214,7 +214,8 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS)
 
 
 def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: str,
-            operator_space: str = "theirs", meta_corpus=None) -> None:
+            operator_space: str = "theirs", meta_corpus=None,
+            family_order: str = "prior") -> None:
     """Body of one dataset run. Executed in a child process so a wall-clock cap can kill it."""
     random.seed(seed)
     np.random.seed(seed)
@@ -231,7 +232,8 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
         # patch points and the disclosure about pca/svd being unrepresentable in their value model.
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import autodp_our_space
-        autodp_our_space.install(verbose=True, retrained_dir=meta_corpus)
+        autodp_our_space.install(verbose=True, retrained_dir=meta_corpus,
+                                 family_order=family_order)
         global _ADAPTER
         _ADAPTER = autodp_our_space
 
@@ -293,6 +295,11 @@ def main() -> None:
                          "explicit runTime equal to the cap, so a non-converging dataset still "
                          "yields a prepared frame instead of nothing.")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--adp-family-order", choices=["prior", "all"], default="prior",
+                    help="prior (default) = transfer their shipped task-order prior through "
+                         "operator aliasing. all = give the search all six families in ACORec's "
+                         "canonical order with no transferred prior, which is the symmetric "
+                         "comparison since ACORec's ACO searches all six every run.")
     ap.add_argument("--adp-meta-corpus", default=None,
                     help="Corpus dir from scripts/build_adp_meta_corpus.py. Retrains AutoDP's "
                          "1-NN meta-learner over ACORec's operators instead of aliasing onto "
@@ -323,7 +330,8 @@ def main() -> None:
                   f"retrying with an explicit runTime={retry_runtime:.0f}s budget", flush=True)
         proc = ctx.Process(target=_worker, args=(args.dataset_csv, args.target, args.mode, runtime,
                                                  args.seed, out_dir, args.operator_space,
-                                                 args.adp_meta_corpus))
+                                                 args.adp_meta_corpus,
+                                                 args.adp_family_order))
         proc.start()
         proc.join(timeout=args.cap_seconds)
         if proc.is_alive():

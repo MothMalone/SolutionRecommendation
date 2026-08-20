@@ -198,7 +198,32 @@ def _retrained_order_fn(corpus_dir: Path, our_lists: dict, MCTS):
     return fn
 
 
-def install(verbose: bool = False, retrained_dir=None) -> None:
+def _neutral_order_fn(our_lists: dict, MCTS):
+    """Give the search all six families in ACORec's canonical order, with no transferred prior.
+
+    The alternative -- reusing their shipped corpus -- hands AutoDP a prior learned over a
+    DIFFERENT operator vocabulary. Their family 5 is deduplication, which their own training
+    pipelines skip 97.8% of the time (1955/2000 use dup_null), and it maps onto our
+    dimensionality_reduction. So the transferred prior selects pca/svd in roughly one search in
+    ten while every other family is selected normally.
+
+    That is not a missing prior, it is a WRONG one, and it biases the arm in ACORec's favour:
+    ACORec's ACO searches all six families on every run, so AutoDP seeing five of them most of the
+    time is an asymmetry in our own favour -- the direction that most damages the comparison.
+    """
+    from automl_aco.preprocessing.preprocessor import DEFAULT_PREPROCESSOR_ORDER
+
+    step_to_index = {v: i for i, v in THEIR_FAMILY_TO_OUR_STEP.items()}
+    ordered = [our_lists[step_to_index[step]] for step in DEFAULT_PREPROCESSOR_ORDER
+               if step in step_to_index]
+
+    def fn(df):
+        return [MCTS.list7] + ordered
+
+    return fn
+
+
+def install(verbose: bool = False, retrained_dir=None, family_order: str = "prior") -> None:
     """Patch autodatapre in memory so its MCTS searches ACORec's operator space.
 
     ``retrained_dir`` points at a corpus from scripts/build_adp_meta_corpus.py. With it, the
@@ -261,13 +286,19 @@ def install(verbose: bool = False, retrained_dir=None) -> None:
 
     if retrained_dir is not None:
         MCTS.get_CLA_meta_task_order = _retrained_order_fn(Path(retrained_dir), our_lists, MCTS)
+    elif family_order == "all":
+        MCTS.get_CLA_meta_task_order = _neutral_order_fn(our_lists, MCTS)
     else:
         MCTS.get_CLA_meta_task_order = get_CLA_meta_task_order
 
     _installed = True
     if verbose:
-        mode = f"meta-learner RETRAINED from {retrained_dir}" if retrained_dir else \
-               "meta-learner ALIASED from their shipped corpus"
+        if retrained_dir:
+            mode = f"meta-learner RETRAINED from {retrained_dir}"
+        elif family_order == "all":
+            mode = "NEUTRAL family order (all 6, ACORec canonical); no prior transferred"
+        else:
+            mode = "meta-learner ALIASED from their shipped corpus"
         print(f"[adapter] AutoDP now searches ACORec's space: "
               f"{sum(len(v) for v in our_lists.values())} operators across {len(our_lists)} "
               f"families; {mode}")
@@ -301,7 +332,10 @@ def _their_family_indices(df, orig_order_fn, original_lists, MCTS) -> list:
             setattr(MCTS, f"list{i}", saved[i])
 
     indices = [fam.idx for fam in their_List[1:] if isinstance(fam, _FamList)]
-    return indices or [1, 2, 3, 4, 6]  # fall back to the five shared families
+    # Include 5: it maps onto our dimensionality_reduction. Omitting it made pca/svd unreachable
+    # whenever their meta-learner returned nothing usable, on top of the 10% selection rate the
+    # transferred prior already imposes.
+    return indices or [1, 2, 3, 4, 5, 6]
 
 
 if __name__ == "__main__":
