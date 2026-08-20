@@ -172,3 +172,30 @@ def test_integer_multiclass_target_is_not_treated_as_regression():
 
     y = pd.Series(np.tile(np.arange(12), 100))          # 12 distinct, integer
     assert type_of_target(y) == "multiclass"
+
+
+def test_pool_is_restricted_to_classification_datasets():
+    """The corpus feeds their CLASSIFICATION meta-learner; 57% of the library is regression.
+
+    Sampling blind spent well over half of every build downloading and loading datasets only to
+    discover the target was continuous. Observed yield went from 40% to 77% once the pool was
+    filtered on NumberOfClasses.
+    """
+    import pandas as pd
+
+    feats = pd.read_csv(REPO / "data" / "openml" / "dataset_feats.csv", index_col=0)
+    assert "NumberOfClasses" in feats.columns, "metafeature table lost NumberOfClasses"
+    n_reg = int((feats["NumberOfClasses"] == 0).sum())
+    n_cls = int((feats["NumberOfClasses"] >= 2).sum())
+    assert n_reg > 0 and n_cls > 0
+    # the filter must actually remove a large share, or it is not doing its job
+    assert n_reg / len(feats) > 0.3, f"expected many regression rows, got {n_reg}/{len(feats)}"
+
+    src = (REPO / "scripts" / "build_adp_meta_corpus.py").read_text()
+    assert 'feats["NumberOfClasses"] >= 2' in src, "classification filter missing from choose_ids"
+
+
+def test_zero_scoring_round_stops_instead_of_retrying():
+    """A round that scores nothing fails for structural reasons; a second round repeats it."""
+    src = (REPO / "scripts" / "build_adp_meta_corpus.py").read_text()
+    assert "if gained == 0:" in src, "fail-fast on a zero-scoring round is missing"

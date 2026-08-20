@@ -192,6 +192,13 @@ def choose_ids(args, local_dirs=()) -> list:
         assert_disjoint(chosen, context="adp meta-corpus --ids")
         return chosen
     feats = pd.read_csv(REPO / "data" / "openml" / "dataset_feats.csv", index_col=0)
+    # Keep classification datasets only. The corpus feeds their CLASSIFICATION meta-learner, and
+    # 1466 of the library's 2560 rows (57%) are regression -- sampling blind spent well over half
+    # of every build discovering that per dataset, at a download and a load each.
+    if "NumberOfClasses" in feats.columns:
+        before = len(feats)
+        feats = feats[feats["NumberOfClasses"] >= 2]
+        print(f"[corpus] pool restricted to classification: {before} -> {len(feats)} datasets")
     pool = [normalize_id(i) for i in feats.index]
     pool = [i for i in pool if i not in EVAL_ID_SET]
     assert_disjoint(pool, context="adp meta-corpus candidate pool")
@@ -364,11 +371,20 @@ def main() -> int:
                                             "split_seeds": args.split_seeds},
                         )
                         by_cfg = {json.dumps(c, sort_keys=True): sc for c, sc in results}
+                        gained = 0
                         for slot, cfg in batch:
                             sc = by_cfg.get(json.dumps(cfg, sort_keys=True))
                             if sc is not None and np.isfinite(sc) and len(keep_slots) < k:
                                 keep_slots.append(slot)
                                 keep_scores.append(float(sc))
+                                gained += 1
+                        if gained == 0:
+                            # Nothing scored at all. The causes are structural, not random -- a
+                            # sparse/wide frame the proxy cannot reshape ("Shape of passed values
+                            # is (9, 1), indices imply (9, 1024)"), or one that needs
+                            # with_mean=False. Another identical round will fail identically, so
+                            # stop instead of paying for it twice.
+                            break
 
                     if len(keep_slots) < k:
                         raise RuntimeError(

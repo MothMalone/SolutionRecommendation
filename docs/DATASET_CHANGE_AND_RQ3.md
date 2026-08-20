@@ -628,3 +628,70 @@ the learned components are decorative).
 **Caveat to state:** the 0.076 figure is one dataset and four pipelines. The mechanism is structural
 — random init per call, visible in the code — so it does not depend on the dataset or the operator
 space, but the exact ratio would vary.
+
+### C.4 Why AutoDP does not terminate on large datasets
+
+AutoDP has two search modes, selected by whether a `runTime` budget is supplied.
+
+**With a budget** (`CLA_With_TimeBudget`) the loop is `while True: if elapsed > time_budget: break`.
+It always consumes the entire budget and never stops early, so a reported runtime is a
+configuration choice, not a property of the method.
+
+**Without one** (`CLA_Without_TimeBudget`) it stops after 20 *consecutive* iterations whose
+improvement falls below `Mingap = 0.001`, with no time bound whatsoever. Two independent sources
+of randomness keep that counter from reaching 20:
+
+| source | measured effect |
+|---|---|
+| `RandomForestClassifier()` constructed with no `random_state` (`Search_Space/classifier.py:90`) | re-scoring the SAME node on the same data with the same seeded CV split varies by **0.008**, i.e. **8x** `Mingap` |
+| `MultiHeadAttention` re-initialised per call inside `get_Estimate` | `best_child` descends a different path each iteration, so a *different* node is evaluated (signal/noise **0.076**, §C.2) |
+
+The convergence threshold is thus an order of magnitude finer than the method's own evaluation
+noise. On small data each iteration is milliseconds and the streak completes by luck; on
+15,000+ rows each iteration costs real model fits and the unbounded mode has no reliable stopping
+point. Observed: `378` (8,844 rows) and `722` (15,000 rows) were killed at a 3,600s cap and again
+at the retry, ~7,200s each.
+
+**Reporting:** always pass an explicit budget. Record datasets that exceed it as timeouts at a
+stated cap rather than omitting them -- non-termination at this data scale is a property of the
+method, not a harness failure.
+
+### C.5 The cost of transferring their prior (arm 1 without retraining)
+
+Running arm 1 without a retrained corpus reuses AutoDP's shipped `label.csv` for the task order
+and reaches our operators by aliasing. The search space really is ours -- verified, dataset 184
+selected `AR_encoding:onehot` and `AR_outlier_removal:zscore` -- but the *prior* was learned over
+a different vocabulary, and one family does not survive the mapping:
+
+- their family 5 is **deduplication** (`ED`/`AD`); our family 5 is **dimensionality reduction**
+  (`pca`/`svd`)
+- their own training pipelines skip deduplication in **97.8%** of cases (1955/2000 use `dup_null`)
+- so the transferred prior selects our `dimensionality_reduction` family in only **~10.2%** of
+  searches, while the other five families are selected normally
+
+This is a *wrong* prior rather than a missing one, and it biases the arm **toward ACORec**, whose
+ACO searches all six families on every run. Disclose it, or remove it by retraining the corpus
+(`scripts/build_adp_meta_corpus.py`) or by passing `--adp-family-order all`, which supplies all six
+families in ACORec's canonical order with no prior transferred. Note that the neutral order is
+>3x slower per dataset, since the deeper tree costs more real evaluations per iteration.
+
+### C.6 Reading rows with low `test_coverage`
+
+AutoDP's outlier operators delete rows from the TEST split, so some rows have no prediction. Every
+row records both accountings:
+
+| field | meaning |
+|---|---|
+| `score` (`score_full`) | deleted test rows counted as wrong -- the comparable number |
+| `score_kept` | accuracy over only the rows it agreed to predict |
+| `test_coverage` | fraction of the test set surviving |
+
+Example, dataset 184 (18 classes, majority-class baseline 0.1676):
+
+```
+score 0.1121 | score_kept 0.1630 | test_coverage 0.688
+```
+
+31% of the test set was deleted, and on the rows it did predict the pipeline matched the
+majority-class baseline. Report `score_full` for comparison against methods that predict every
+row, and state `test_coverage` wherever it is below 1.0.
