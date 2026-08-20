@@ -35,6 +35,7 @@ from sklearn.preprocessing import (
     QuantileTransformer,
     RobustScaler,
     StandardScaler,
+    LabelEncoder,
 )
 
 
@@ -373,6 +374,12 @@ def evaluate_ctxpipe_sequence(
         maximum_cells=int(maximum_cells),
     )
     cv_folds = _safe_cv_folds(y_train, max_cv_folds)
+    # TPOT 1.x expects classification targets encoded as contiguous integers
+    # starting at zero. OpenML snapshots often retain labels such as 1..K,
+    # -1/1, or sparse numeric codes; fit the encoder on the training target and
+    # map TPOT predictions back before scoring on the original labels.
+    target_encoder = LabelEncoder()
+    y_train_encoded = target_encoder.fit_transform(y_train.to_numpy())
     if estimator_factory is None or search_space_factory is None:
         default_estimator, default_search_space = _default_tpot_components()
         estimator_factory = estimator_factory or default_estimator
@@ -403,8 +410,9 @@ def evaluate_ctxpipe_sequence(
         initial_population_size=int(population_size),
     )
     started = time.perf_counter()
-    model.fit(train_processed.to_numpy(), y_train.to_numpy())
-    prediction = model.predict(test_processed.to_numpy())
+    model.fit(train_processed.to_numpy(), y_train_encoded)
+    prediction_encoded = np.asarray(model.predict(test_processed.to_numpy())).astype(int)
+    prediction = target_encoder.inverse_transform(prediction_encoded)
     fit_seconds = float(time.perf_counter() - started)
     result = {
         "status": "ok",
@@ -431,6 +439,7 @@ def evaluate_ctxpipe_sequence(
         "operator_trace": trace,
         "tpot_space": "classifiers",
         "tpot_preprocessing": False,
+        "target_label_encoding": "LabelEncoder_fit_on_train_inverse_before_scoring",
         "cv_folds": int(cv_folds),
         "max_time_mins": int(max_time_mins),
         "max_eval_time_mins": int(max_eval_time_mins),

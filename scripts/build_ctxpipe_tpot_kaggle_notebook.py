@@ -50,6 +50,8 @@ cells = [
           outer train 60% only and transforming outer test 20%;
         - TPOT CV uses only the processed outer train 60%, never the validation or test;
         - final accuracy is computed once on the untouched outer test 20%.
+        - classification targets are LabelEncoded for TPOT and inverse-transformed
+          before the outer-test metric, so sparse OpenML labels are handled correctly.
 
         The six checkpoint files shipped by the official repository are byte-identical
         to `data/ctxpipe-3linear/ctxpipe-3linear` in the local research workspace.
@@ -587,6 +589,7 @@ cells = [
                     "accuracy": evaluation.get("accuracy"),
                     "balanced_accuracy": evaluation.get("balanced_accuracy"),
                     "f1_macro": evaluation.get("f1_macro"),
+                    "target_label_encoding": evaluation.get("target_label_encoding"),
                     "error": evaluation.get("error", recommendation.get("error")),
                 }
             )

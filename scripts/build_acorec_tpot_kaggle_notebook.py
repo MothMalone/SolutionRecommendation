@@ -45,6 +45,8 @@ cells = [
         Therefore the reported classification accuracy is computed only from TPOT's
         predictions on the fixed outer 20% test split. TPOT never evolves another
         preprocessing pipeline on top of ACORec and does not reuse ACO's validation rows.
+        Classification targets are LabelEncoded for TPOT and inverse-transformed
+        before scoring, which is required for OpenML labels that are not 0..K-1.
         """
     ),
     code(
@@ -291,6 +293,7 @@ cells = [
                 "validation_reused_by_tpot": result.get("validation_reused_by_tpot"),
                 "test_rows": result.get("test_rows"),
                 "tpot_preprocessing": result.get("tpot_preprocessing"),
+                "target_label_encoding": result.get("target_label_encoding"),
             })
         summary = pd.DataFrame(rows)
         summary_path = OUTPUT_DIR / "acorec_tpot_summary.csv"

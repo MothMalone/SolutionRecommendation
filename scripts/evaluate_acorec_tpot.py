@@ -28,6 +28,7 @@ from sklearn.metrics import (
     mean_squared_error,
     r2_score,
 )
+from sklearn.preprocessing import LabelEncoder
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -134,6 +135,14 @@ def evaluate_recommendation(
     train_matrix = _numeric_matrix(X_train_processed, "training")
     test_matrix = _numeric_matrix(X_test_processed, "test")
     cv_folds = _safe_cv_folds(y_train_processed, task_type, max_cv_folds)
+    target_encoder = None
+    y_train_for_tpot = y_train_processed.to_numpy()
+    if task_type == "classification":
+        # TPOT 1.x requires contiguous integer labels. The repository loader
+        # deliberately preserves OpenML target values, which may be sparse or
+        # negative; decode predictions again before computing test metrics.
+        target_encoder = LabelEncoder()
+        y_train_for_tpot = target_encoder.fit_transform(y_train_processed.to_numpy())
 
     if estimator_factory is None or search_space_factory is None:
         default_estimator, default_search_space = _default_tpot_components(task_type)
@@ -170,8 +179,10 @@ def evaluate_recommendation(
     )
 
     started = time.perf_counter()
-    model.fit(train_matrix, y_train_processed.to_numpy())
+    model.fit(train_matrix, y_train_for_tpot)
     prediction = model.predict(test_matrix)
+    if target_encoder is not None:
+        prediction = target_encoder.inverse_transform(np.asarray(prediction).astype(int))
     fit_seconds = float(time.perf_counter() - started)
 
     result: Dict[str, Any] = {
@@ -198,6 +209,10 @@ def evaluate_recommendation(
         "test_fraction": 0.2,
         "tpot_space": group,
         "tpot_preprocessing": False,
+        "target_label_encoding": (
+            "LabelEncoder_fit_on_train_inverse_before_scoring"
+            if target_encoder is not None else "not_applicable"
+        ),
         "cv_folds": int(cv_folds),
         "max_time_mins": int(max_time_mins),
         "max_eval_time_mins": int(max_eval_time_mins),
