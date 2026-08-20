@@ -377,3 +377,7 @@ docs/ANALYSIS.md
 docs/BASELINES_TODO.md
 docs/IMPROVEMENTS.md
 docs/PLAN.md
+# AutoDP meta-corpus: the CSVs and fingerprint ARE committed (they are the artifact every
+# shard notebook reads). The per-dataset cache and progress log are local build scratch.
+data/adp_ourops_corpus/datasets/
+data/adp_ourops_corpus/progress.jsonl
