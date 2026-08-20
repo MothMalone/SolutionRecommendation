@@ -71,3 +71,35 @@ def test_describe_frame_ignores_target_column():
     mod = _mod()
     df = pd.DataFrame({"a": [1.0, 2.0], "target": ["yes", "no"]})
     assert mod.describe_frame(df, "target")["has_categorical"] is False
+
+
+def test_time_budget_stops_starting_new_datasets(tmp_path, monkeypatch):
+    """A 12h Kaggle session must be able to bound the build; overrunning loses everything."""
+    mod = _mod()
+    import argparse
+
+    # Two ids, a budget already exhausted -> nothing should be attempted.
+    argv = ["--out-dir", str(tmp_path / "c"), "--ids", "2,29",
+            "--time-budget", "0.0001", "--local-dir", str(REPO / "data" / "eval_datasets")]
+    monkeypatch.setattr("sys.argv", ["build_adp_meta_corpus.py"] + argv)
+    rc = mod.main()
+    # No dataset finished, so no CSVs are written and it reports that rather than crashing.
+    assert rc == 1
+    assert not (tmp_path / "c" / "label.csv").exists()
+
+
+def test_score_max_rows_does_not_shrink_the_cached_frame(tmp_path):
+    """Metafeature #1 is row count. Subsampling for scoring must not reach the cached CSV."""
+    mod = _mod()
+    import pandas as pd
+    import numpy as np
+
+    rng = np.random.RandomState(0)
+    big = pd.DataFrame(rng.randn(3000, 4), columns=list("abcd"))
+    big["target"] = rng.randint(0, 2, 3000)
+    src = tmp_path / "datasets"
+    src.mkdir()
+    big.to_csv(src / "999.csv", index=False)
+
+    loaded = mod.load_table("999", [src], "target")
+    assert len(loaded) == 3000, "load_table must return the full frame; subsampling is scoring-only"

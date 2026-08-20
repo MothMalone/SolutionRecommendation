@@ -209,8 +209,19 @@ def main() -> int:
     ap.add_argument("--min-distinct-scores", type=int, default=3,
                     help="drop a dataset whose sampled pipelines produce fewer distinct scores "
                          "than this; it cannot teach a task order.")
-    ap.add_argument("--max-sample-rounds", type=int, default=4,
-                    help="oversampling rounds allowed to reach --pipelines-per-dataset valid scores")
+    ap.add_argument("--max-sample-rounds", type=int, default=2,
+                    help="oversampling rounds allowed to reach --pipelines-per-dataset valid "
+                         "scores. Each round costs a full batch of proxy fits, and failures are "
+                         "what trigger it -- onehot on a high-cardinality column can widen a frame "
+                         "to hundreds of features, after which outlier removal deletes every row. "
+                         "Two rounds bounds the damage; a dataset that still cannot fill its block "
+                         "is recorded as a failure rather than chased.")
+    ap.add_argument("--score-max-rows", type=int, default=1500,
+                    help="subsample to at most this many rows for the PROXY SCORING only; "
+                         "metafeatures still come from the full cached frame. 0 disables.")
+    ap.add_argument("--time-budget", type=float, default=0.0,
+                    help="stop starting new datasets after this many seconds and assemble what "
+                         "finished. Use it to fit the build inside a fixed session.")
     ap.add_argument("--allow-download", action="store_true",
                     help="Sample from the whole library and fetch missing tables from OpenML. "
                          "Off by default: selection is restricted to <id>.csv already on disk, "
@@ -259,15 +270,28 @@ def main() -> int:
         todo = [d for d in ids if d not in done]
         print(f"[corpus] {len(ids)} datasets selected, {len(done)} already done, {len(todo)} to run")
 
+        budget_t0 = time.time()
         with progress.open("a") as fh:
             for i, ds in enumerate(todo, 1):
+                if args.time_budget and (time.time() - budget_t0) > args.time_budget:
+                    print(f"[corpus] time budget of {args.time_budget:.0f}s reached after "
+                          f"{i - 1} dataset(s); assembling what completed. The corpus is smaller "
+                          f"than requested but valid -- rerun with a larger --time-budget to grow it.")
+                    break
                 t0 = time.time()
                 try:
                     df = load_table(ds, local_dirs, args.target_column)
                     df.to_csv(cache / f"{ds}.csv", index=False)
 
                     rng = random.Random(f"{args.seed}:{ds}")
-                    shape = describe_frame(df, args.target_column)
+                    # Score on a subsample when the frame is large. Metafeatures are computed
+                    # later from the CACHED FULL csv, so row count -- their metafeature #1 -- stays
+                    # honest; only the proxy fit is cheapened. Without this a single 4000x60
+                    # dataset costs ~390s and a 12h session cannot hold both the corpus and the arm.
+                    scoring_df = df
+                    if args.score_max_rows and len(df) > args.score_max_rows:
+                        scoring_df = df.sample(n=args.score_max_rows, random_state=args.seed)
+                    shape = describe_frame(scoring_df, args.target_column)
                     k = args.pipelines_per_dataset
 
                     # Oversample and keep the first k that actually score. A rejected pipeline is
@@ -279,7 +303,7 @@ def main() -> int:
                         want = k - len(keep_slots)
                         batch = [sample_pipeline(rng, **shape) for _ in range(want * 2)]
                         _, _, results, _ = evaluate_candidates_simple(
-                            df, args.target_column, [c for _, c in batch],
+                            scoring_df, args.target_column, [c for _, c in batch],
                             proxy_settings={"model": "logreg",
                                             "split_seeds": args.split_seeds},
                         )
