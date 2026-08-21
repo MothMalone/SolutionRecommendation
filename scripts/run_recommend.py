@@ -799,6 +799,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "comparison only. Any number produced this way is contaminated and not reportable."
         ),
     )
+    parser.add_argument(
+        "--holdout-ids",
+        default="",
+        help=(
+            "Extra dataset ids (comma/space separated) to remove from the reference library "
+            "IN ADDITION to the eval IDs. Required whenever the run evaluates on datasets that "
+            "are not in EVAL_IDS -- the AutoDP cross-comparison arms run on THEIR ten datasets, "
+            "five of which are performance-matrix columns, so without this ACORec retrieves the "
+            "target dataset's own best pipeline. scripts/run_arms.py passes it automatically."
+        ),
+    )
     return parser
 
 
@@ -1282,11 +1293,26 @@ def main() -> None:
         )
         perf_ref, meta_ref = perf, meta
     else:
-        perf_ref, meta_ref, holdout_report = holdout_reference(perf, meta, verbose=args.verbose)
+        # --holdout-ids extends the holdout for arms that evaluate on a dataset list other than
+        # EVAL_IDS (the AutoDP cross-comparison runs on THEIR ten datasets, five of which are
+        # columns of the shipped performance matrix and none of which are eval IDs).
+        extra_holdout = [t for t in str(args.holdout_ids or "").replace(",", " ").split() if t]
+        perf_ref, meta_ref, holdout_report = holdout_reference(
+            perf, meta, verbose=args.verbose, extra_ids=extra_holdout
+        )
+        if extra_holdout:
+            print(
+                f"[leakage-holdout] --holdout-ids added {len(set(holdout_report['extra_ids_requested']))} "
+                f"id(s); {len(holdout_report['extra_perf_cols_dropped'])} were perf columns "
+                f"{holdout_report['extra_perf_cols_dropped']} and "
+                f"{len(holdout_report['extra_meta_rows_dropped'])} were metafeature rows "
+                f"{holdout_report['extra_meta_rows_dropped']}."
+            )
         if args.verbose:
             print(
-                f"[leakage-holdout] reference now disjoint from {len(EVAL_IDS)} eval IDs: "
-                f"perf {holdout_report['perf_cols_before']}->{holdout_report['perf_cols_after']} cols, "
+                f"[leakage-holdout] reference now disjoint from {len(EVAL_IDS)} eval IDs"
+                + (f" + {len(extra_holdout)} --holdout-ids" if extra_holdout else "")
+                + f": perf {holdout_report['perf_cols_before']}->{holdout_report['perf_cols_after']} cols, "
                 f"meta {holdout_report['meta_rows_before']}->{holdout_report['meta_rows_after']} rows."
             )
 

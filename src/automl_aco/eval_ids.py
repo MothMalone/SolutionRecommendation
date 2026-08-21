@@ -139,13 +139,31 @@ def is_eval_id(val: Any) -> bool:
     return normalize_id(val) in EVAL_ID_SET
 
 
-def assert_disjoint(ids: Iterable[Any], *, context: str = "reference set") -> None:
-    """Raise if any eval ID appears in ``ids``. Use before every fit boundary."""
-    contaminated = sorted({normalize_id(x) for x in ids} & EVAL_ID_SET)
+def normalize_ids(ids: Iterable[Any]) -> "frozenset[str]":
+    """Normalize an iterable of dataset identifiers to a set of bare integer strings."""
+    return frozenset(normalize_id(x) for x in ids if normalize_id(x))
+
+
+def assert_disjoint(
+    ids: Iterable[Any],
+    *,
+    context: str = "reference set",
+    extra_ids: Iterable[Any] = (),
+) -> None:
+    """Raise if any held-out ID appears in ``ids``. Use before every fit boundary.
+
+    ``extra_ids`` extends the forbidden set beyond ``EVAL_IDS``. It exists for the
+    cross-comparison arms that evaluate on a *different* dataset list (AutoDP's own ten,
+    ``run_arms.THEIR_DATASETS``): those ids are not in ``EVAL_IDS``, so the default holdout
+    does not touch them, yet five of them are columns of the shipped performance matrix.
+    Without this, ACORec retrieves the target dataset's own best pipeline.
+    """
+    forbidden = EVAL_ID_SET | normalize_ids(extra_ids)
+    contaminated = sorted({normalize_id(x) for x in ids} & forbidden)
     if contaminated:
         raise AssertionError(
-            f"LEAKAGE: {len(contaminated)} evaluation ID(s) found in {context}: "
-            f"{contaminated}. Eval datasets must be held out of every fit/normalize/train/"
+            f"LEAKAGE: {len(contaminated)} held-out ID(s) found in {context}: "
+            f"{contaminated}. Held-out datasets must be excluded from every fit/normalize/train/"
             f"neighbor step. Run holdout_reference() before constructing the recommender."
         )
 
@@ -155,30 +173,44 @@ def holdout_reference(
     metafeatures_df: pd.DataFrame,
     *,
     verbose: bool = False,
+    extra_ids: Iterable[Any] = (),
 ) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Return copies of (perf, meta) with all 30 eval IDs removed.
+    """Return copies of (perf, meta) with all 30 eval IDs -- plus ``extra_ids`` -- removed.
 
-    - ``performance_matrix``: pipelines (rows) x datasets (columns). Eval-ID columns dropped.
-    - ``metafeatures_df``: datasets (rows) x metafeatures (columns). Eval-ID rows dropped.
+    - ``performance_matrix``: pipelines (rows) x datasets (columns). Held-out columns dropped.
+    - ``metafeatures_df``: datasets (rows) x metafeatures (columns). Held-out rows dropped.
 
     The returned frames are for *constructing the recommender* (training, normalization,
     neighbor pool). Callers should retain the ORIGINAL full metafeatures table for target-row
     lookup of the dataset under evaluation.
+
+    ``extra_ids`` is for arms whose evaluation set is not ``EVAL_IDS`` -- see ``assert_disjoint``.
     """
-    perf_drop = [c for c in performance_matrix.columns if normalize_id(c) in EVAL_ID_SET]
-    meta_drop = [i for i in metafeatures_df.index if normalize_id(i) in EVAL_ID_SET]
+    extra = normalize_ids(extra_ids)
+    forbidden = EVAL_ID_SET | extra
+
+    perf_drop = [c for c in performance_matrix.columns if normalize_id(c) in forbidden]
+    meta_drop = [i for i in metafeatures_df.index if normalize_id(i) in forbidden]
 
     perf_clean = performance_matrix.drop(columns=perf_drop, errors="ignore").copy()
     meta_clean = metafeatures_df.drop(index=meta_drop, errors="ignore").copy()
 
-    # Post-condition: the cleaned reference is disjoint from EVAL_IDS.
-    assert_disjoint(perf_clean.columns, context="performance_matrix columns after holdout")
-    assert_disjoint(meta_clean.index, context="metafeatures index after holdout")
+    # Post-condition: the cleaned reference is disjoint from every held-out id.
+    assert_disjoint(perf_clean.columns, context="performance_matrix columns after holdout",
+                    extra_ids=extra)
+    assert_disjoint(meta_clean.index, context="metafeatures index after holdout", extra_ids=extra)
 
+    dropped_perf = sorted({normalize_id(c) for c in perf_drop})
+    dropped_meta = sorted({normalize_id(i) for i in meta_drop})
     report = {
         "eval_ids_total": len(EVAL_IDS),
-        "perf_cols_dropped": sorted({normalize_id(c) for c in perf_drop}),
-        "meta_rows_dropped": sorted({normalize_id(i) for i in meta_drop}),
+        "extra_ids_requested": sorted(extra),
+        "perf_cols_dropped": dropped_perf,
+        "meta_rows_dropped": dropped_meta,
+        # Broken out so a run log shows what the arm-specific holdout actually caught, rather
+        # than burying it in the eval-ID total.
+        "extra_perf_cols_dropped": sorted(set(dropped_perf) & extra),
+        "extra_meta_rows_dropped": sorted(set(dropped_meta) & extra),
         "perf_cols_before": int(performance_matrix.shape[1]),
         "perf_cols_after": int(perf_clean.shape[1]),
         "meta_rows_before": int(metafeatures_df.shape[0]),
@@ -186,9 +218,16 @@ def holdout_reference(
     }
     if verbose:
         print(
-            f"[leakage-holdout] dropped {len(report['perf_cols_dropped'])} eval cols from perf "
+            f"[leakage-holdout] dropped {len(report['perf_cols_dropped'])} held-out cols from perf "
             f"({report['perf_cols_before']}->{report['perf_cols_after']}), "
-            f"{len(report['meta_rows_dropped'])} eval rows from metafeatures "
+            f"{len(report['meta_rows_dropped'])} held-out rows from metafeatures "
             f"({report['meta_rows_before']}->{report['meta_rows_after']})."
         )
+        if extra:
+            print(
+                f"[leakage-holdout] of those, {len(report['extra_perf_cols_dropped'])} perf col(s) "
+                f"{report['extra_perf_cols_dropped']} and "
+                f"{len(report['extra_meta_rows_dropped'])} meta row(s) "
+                f"{report['extra_meta_rows_dropped']} came from --holdout-ids."
+            )
     return perf_clean, meta_clean, report

@@ -62,8 +62,18 @@ OUR_DATASETS = list(EVAL_IDS)
 #
 # !! UNVERIFIED !! These were read off the paper and have NOT been confirmed against the OpenML
 # API. Several are OCR-risky (8335 / 43723 / 42493). Verify every id before reporting any arm-2
-# number, and check the overlap against the 901-dataset reference library -- 184 and 31 are known
-# to appear in both, and any overlap must be held out of the library for arm 2 to be leak-free.
+# number.
+#
+# LEAKAGE: these are NOT in EVAL_IDS, so holdout_reference() does not touch them by default --
+# yet six of the ten are in the shipped reference library:
+#
+#     performance-matrix columns: 1461, 1590, 184, 31, 40701           (5/10)
+#     metafeature rows:           the same five, plus 40945            (6/10)
+#
+# 184 and 31 used to be protected because they were in EVAL_IDS_LEGACY_23; the eval set moved to
+# 30 different ids and that protection silently lapsed. Every ACORec arm on `theirs` data
+# therefore passes --holdout-ids (see acorec_cmd) so the recommender cannot retrieve the target
+# dataset's own best pipeline.
 THEIR_DATASETS = [
     "42493", "43723", "8335", "40945", "1461", "31", "42178", "184", "40701", "1590",
 ]
@@ -140,7 +150,8 @@ ACOREC_REF_FLAGS = [
 ]
 
 
-def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args) -> list:
+def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args,
+               data: str = "ours") -> list:
     cmd = [
         sys.executable, str(REPO / "scripts" / "run_recommend.py"),
         "--dataset-source", "csv",
@@ -156,6 +167,11 @@ def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args) -
         "--seed", str(args.seed),
         "--output-dir", str(workdir),
     ]
+    # Arms on THEIR data evaluate on ids that are not in EVAL_IDS, so the default holdout leaves
+    # six of the ten inside the reference library. Hold out the whole list, not just the dataset
+    # being run: the neighbour pool and the Siamese see all of them.
+    if data == "theirs":
+        cmd += ["--holdout-ids", ",".join(THEIR_DATASETS)]
     if args.acorec_config == "ref":
         cmd += ACOREC_REF_FLAGS
     else:
@@ -423,7 +439,7 @@ def main() -> int:
                 print(f"     SKIP: {csv_path} not found")
                 continue
             workdir = scratch / f"{args.arm}_{ds}"
-            cmd = acorec_cmd(ds, csv_path, spec["ops"], workdir, args)
+            cmd = acorec_cmd(ds, csv_path, spec["ops"], workdir, args, data=spec["data"])
             rc = subprocess.run(cmd, cwd=REPO).returncode
             row.update(read_acorec_result(workdir) if rc == 0 else
                        {"status": "failed", "returncode": rc})

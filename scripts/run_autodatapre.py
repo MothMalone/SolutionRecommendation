@@ -15,12 +15,16 @@ with AutoGluon, which is the same thing we do to our own pipelines.
 
 Two protocols, because ``AutoDP.Classifier(df, ...)`` has no fit/transform split:
 
-  native  Faithful to the published API: the MCTS searches over the FULL dataset, so our 20% test
-          rows are visible to the search (its internal scorer holds out its own unseeded random
-          20%). Transductive, and generous to AutoDP.
-  fair    The search sees ONLY our 80% train+val. The winning operator chain is then applied to
-          {train: our 80%, test: our 20%} using AutoDP's OWN operator classes, so our test rows
-          never inform the search. This is the protocol our method is held to.
+  fair    THE REPORTED PATH, and the default. Their MCTS scores candidate pipelines on OUR seed-42
+          0.6 train / 0.2 val, and their evaluation layer is moved onto ours by
+          ``scripts/autodp_protocol.py`` -- see that module for the full list and for the line
+          between what is moved and what stays theirs. The winning chain is then applied to
+          {train: our 80%, test: our 20%}. Our test rows reach neither the search's scoring dict
+          nor its family-order prior. This is the protocol our own method is held to.
+  native  NOT REPORTED. A literal reproduction of the published API, deliberately left unpatched:
+          the MCTS searches over the FULL dataset and its internal scorer holds out its own
+          UNSEEDED random 20%, so our test rows are visible to the search. Kept only so the
+          deviation is inspectable.
 
 Faithfulness notes (each one is a deliberate, documented deviation):
   * ``AutoDP.Classifier`` does not return the winning pipeline, so native mode replicates its body
@@ -30,7 +34,10 @@ Faithfulness notes (each one is a deliberate, documented deviation):
   * AutoDP's operators transform train and test INDEPENDENTLY (e.g. ``ZS`` z-scores test with
     test's own mean/std) and several DELETE ROWS from the test split (``DROP``, ``ZSB``/``IQR``/
     ``LOF``, ``ED``/``AD``). Both behaviours are theirs and are preserved; stage 3 reports test
-    coverage so the effect is visible rather than silently inflating their score.
+    coverage so the effect is visible rather than silently inflating their score. The ONE
+    exception is ``CBE``, which consumed the labels of the rows it was encoding -- that is
+    protocol, not operator semantics, and ``autodp_protocol.install_leakfree_cbe`` refits it on
+    the train block only.
   * ``read_dataset`` runs LabelEncoder on the target, which destroys continuous targets on
     regression datasets. We keep that inside the search (it is their signal) but stage 3 re-attaches
     the ORIGINAL y by row index, so the reported R2 means what it says.
@@ -67,6 +74,9 @@ sys.path.insert(0, os.path.join(_REPO, "src"))
 
 # Reused verbatim so the row split is bit-identical to the one our own evaluation uses.
 from automl_aco.data.splits import split_train_val_test  # noqa: E402
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import autodp_protocol  # noqa: E402  (moves their evaluation layer onto ours)
 
 HELPER_COLS = ("New_ID", "row")  # scratch columns AutoDP's dedup operators leave behind
 
@@ -118,20 +128,36 @@ def _apply_pipeline(dataset: dict, order, mctsdata) -> None:
             mctsdata.choose_outlier(dataset, op)
 
 
-def _search(df_search: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS):
-    """Run AutoDP's MCTS on ``df_search`` and return (its internal dataset dict, pipeline, curves).
+def _search(df_search: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS,
+            dataset=None, df_metafeatures: pd.DataFrame = None):
+    """Run AutoDP's MCTS and return (its internal dataset dict, pipeline, curves).
 
     ``runtime=None`` selects AutoDP's default: run until its own convergence rule fires (20
     consecutive iterations improving by less than 0.001).
+
+    Two frames, chosen independently, because MCTS uses them for different things:
+
+    * ``dataset`` -- the {train,target,test,target_test} dict the search SCORES on. When the caller
+      supplies one (``_run_fair``), it is our seed-42 0.6 train / 0.2 val, and their unseeded
+      ``read_dataset`` is bypassed entirely. MCTS never calls ``read_dataset`` itself -- the dict is
+      a parameter -- so no patching is involved. ``dataset=None`` falls back to their behaviour and
+      is only reachable from the unreported ``native`` path.
+    * ``df_metafeatures`` -- passed as their ``df`` argument, whose ONLY use is
+      ``get_CLA_meta_task_order(df)``, the metafeature family-order prior. We hand it the FULL
+      frame: ACORec reads its query metafeatures from a precomputed full-dataset table, so
+      full-frame metafeatures on both sides is the symmetric choice. Restricting AutoDP to
+      train+val here would be an asymmetry in OUR favour.
     """
     df_search = df_search.copy()
-    dataset = mctsdata.read_dataset(df_search, target)  # their unseeded internal 80/20 + LabelEncoder
+    if dataset is None:
+        dataset = mctsdata.read_dataset(df_search, target)  # their unseeded internal 80/20
+    df_mf = df_search if df_metafeatures is None else df_metafeatures.copy()
     if task == "classification":
         fn = MCTS.CLA_With_TimeBudget if runtime else MCTS.CLA_Without_TimeBudget
-        args = (df_search, dataset, runtime, target) if runtime else (df_search, dataset, target)
+        args = (df_mf, dataset, runtime, target) if runtime else (df_mf, dataset, target)
     else:
         fn = MCTS.REG_With_TimeBudget if runtime else MCTS.REG_Without_TimeBudget
-        args = (df_search, dataset, runtime, target) if runtime else (df_search, dataset, target)
+        args = (df_mf, dataset, runtime, target) if runtime else (df_mf, dataset, target)
     t0 = time.time()
     times, scores, pipeline = fn(*args)
     # Stage markers: when the wall-clock cap kills this process, the last line in the log says
@@ -143,8 +169,15 @@ def _search(df_search: pd.DataFrame, target: str, task: str, runtime, mctsdata, 
     return dataset, list(pipeline), list(times), list(scores)
 
 
-def _run_native(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS):
-    """Published-API protocol: search AND prepare on the full dataset."""
+def _run_native(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS, seed: int = 42):
+    """Published-API protocol: search AND prepare on the full dataset.
+
+    NOT A REPORTED PATH. Kept only as a literal reproduction of what their released API does, so
+    the deviation is inspectable. It is deliberately left UNPATCHED -- their unseeded
+    ``read_dataset`` still runs here, and its internal "test" is drawn from the full frame and so
+    contains our held-out rows. Giving it our split would produce a protocol nobody published and
+    nobody asked for; use ``--mode fair``, which is the default, for every number that is reported.
+    """
     from autodatapre.Pipeline_Generation.MCTS import merge_datasets
 
     dataset, pipeline, times, scores = _search(df, target, task, runtime, mctsdata, MCTS)
@@ -168,26 +201,42 @@ def _run_native(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCT
     return out, pipeline, times, scores, status
 
 
-def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS):
-    """Leak-free protocol: search on our 80%, then apply the winner to our 80%/20% with their ops."""
+def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS, seed: int = 42):
+    """Leak-free protocol, on OUR split.
+
+    The search scores on our 0.6 train / 0.2 val (``autodp_protocol.build_search_dataset``); the
+    winning chain is then applied to {train+val 80%, test 20%}. Our test rows reach neither the
+    search's scoring dict nor its family-order prior.
+
+    This replaces their ``read_dataset``, whose ``train_test_split(X, Y, test_size=0.2)`` carried
+    no ``random_state``: the search signal was a different random 20% on every run, so the same
+    dataset and seed could return different pipelines.
+    """
     from sklearn.preprocessing import LabelEncoder
 
-    tr, val, te = _split_positions(len(df))
+    tr, val, te = _split_positions(len(df), seed=seed)
     trainval = np.concatenate([tr, val])  # same order evaluation.py uses when fit_include_val=True
 
-    dataset, pipeline, times, scores = _search(df.iloc[trainval], target, task, runtime, mctsdata, MCTS)
-    del dataset  # searched only to obtain the pipeline; its frames are their internal sub-split
+    search_dataset = autodp_protocol.build_search_dataset(df, target, tr, val)
+    dataset, pipeline, times, scores = _search(
+        df.iloc[trainval], target, task, runtime, mctsdata, MCTS,
+        dataset=search_dataset, df_metafeatures=df,
+    )
+    del dataset  # searched only to obtain the pipeline; its frames are train/val, not train/test
 
-    # Their search ran on a LabelEncoder'd target, so the apply step gets the same encoding for the
-    # operators that read labels (feature selection). Stage 3 re-attaches the original y regardless.
+    # The apply step reuses the same LabelEncoding the search ran under, so the operators that read
+    # labels see a consistent target. Stage 3 re-attaches the original y regardless.
     y_enc = pd.Series(LabelEncoder().fit_transform(df[target]), index=df.index, name=target)
     feats = df.drop(columns=[target])
     d = {
         "train": feats.iloc[trainval].copy(),
         "target": y_enc.iloc[trainval].to_frame(),
         "test": feats.iloc[te].copy(),
+        # Real held-out labels, and their CBE would fit on them -- autodp_protocol's leak-free CBE
+        # (installed in _worker) fits on the train block only, which is what makes this safe.
         "target_test": y_enc.iloc[te].to_frame(),
     }
+    autodp_protocol.assert_dict_aligned(d)
 
     status = "ok"
     try:
@@ -240,13 +289,22 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
     from autodatapre.Pipeline_Generation import MCTS_DATA as mctsdata
     from autodatapre.Pipeline_Generation import MCTS
 
+    # Move their EVALUATION layer onto ours, leaving their search untouched. `native` is the
+    # literal published API and is deliberately excluded (see _run_native's docstring).
+    exc_counter = autodp_protocol.ExceptionCounter()
+    if mode == "fair":
+        autodp_protocol.install_leakfree_cbe(verbose=True)
+        autodp_protocol.install_scorer_patches(seed=seed, verbose=True)
+        exc_counter.install(verbose=True)
+
     df = pd.read_csv(csv_path)
     task = _task_type(df[target])
     n_rows_in = len(df)
 
     t0 = time.time()
     runner = _run_native if mode == "native" else _run_fair
-    prepared, pipeline, times, scores, status = runner(df, target, task, runtime, mctsdata, MCTS)
+    prepared, pipeline, times, scores, status = runner(df, target, task, runtime, mctsdata, MCTS,
+                                                       seed=seed)
     elapsed = time.time() - t0
 
     os.makedirs(out_dir, exist_ok=True)
@@ -265,6 +323,13 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
         "converged_default_budget": runtime is None,
         "search_seconds": round(elapsed, 2),
         "seed": seed,
+        # The protocol fields. A number without these cannot be traced to what produced it.
+        "search_split": (autodp_protocol.SEARCH_SPLIT_TAG if mode == "fair"
+                         else "theirs-unseeded-80/20-of-full-frame"),
+        "metafeature_frame": "full" if mode == "fair" else "full",
+        "internal_scorer_seed": seed if mode == "fair" else None,
+        "leakfree_cbe": mode == "fair",
+        **exc_counter.report(),
         "pipeline": pipeline,
         "search_curve_times": times,
         "search_curve_scores": scores,
