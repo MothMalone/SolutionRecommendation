@@ -202,14 +202,15 @@ def test_adp_meta_corpus_excludes_eval_ids():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    class _Args:
-        ids = ""
-        n_datasets = 500
-        seed = 42
-        shard = ""
-        allow_download = True      # exercise the full library pool, not just what is on disk
+    # Drive the real parser so this test always sees the real defaults. A stub class had to
+    # restate every default and went stale the moment a flag was added.
+    args = mod.build_parser().parse_args([
+        "--out-dir", "/tmp/unused-corpus-selection-only",
+        "--n-datasets", "500",
+        "--allow-download",        # exercise the full library pool, not just what is on disk
+    ])
 
-    chosen = mod.choose_ids(_Args())
+    chosen = mod.choose_ids(args)
     assert chosen, "corpus selection returned nothing"
     leaked = [d for d in chosen if normalize_id(d) in EVAL_ID_SET]
     assert not leaked, f"eval datasets leaked into the AutoDP meta-corpus: {leaked}"
@@ -226,13 +227,12 @@ def test_adp_meta_corpus_rejects_eval_ids_passed_explicitly():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    class _Args:
-        ids = "1066,2,29"          # 1066 is an eval dataset
-        n_datasets = 10
-        seed = 42
-        shard = ""
-        allow_download = True
+    args = mod.build_parser().parse_args([
+        "--out-dir", "/tmp/unused-corpus-selection-only",
+        "--ids", "1066,2,29",      # 1066 is an eval dataset
+        "--allow-download",
+    ])
 
     with pytest.raises(Exception) as excinfo:
-        mod.choose_ids(_Args())
+        mod.choose_ids(args)
     assert "1066" in str(excinfo.value) or "eval" in str(excinfo.value).lower()

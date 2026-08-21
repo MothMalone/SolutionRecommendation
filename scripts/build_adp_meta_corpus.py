@@ -242,7 +242,15 @@ def choose_ids(args, local_dirs=()) -> list:
     return chosen
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Single source of truth for the flags AND their defaults.
+
+    Split out of main() so tests can drive choose_ids() through the real parser instead of a
+    hand-written stub object. A stub duplicates every default, and it drifted: --max-features
+    was added to the parser and not to the stub, so test_adp_meta_corpus_excludes_eval_ids --
+    the test that guards eval datasets out of the meta-corpus -- failed on AttributeError
+    rather than on anything it was written to check.
+    """
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out-dir", required=True)
@@ -291,7 +299,11 @@ def main() -> int:
                     help="additional corpus dir(s) whose progress.jsonl and datasets/ to fold in. "
                          "Repeatable. Use when shards ran in separate notebooks, each having "
                          "written its own progress.jsonl.")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
