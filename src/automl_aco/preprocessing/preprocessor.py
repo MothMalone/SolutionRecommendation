@@ -69,6 +69,9 @@ class Preprocessor:
         return str(spec)
 
     def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None):
+        # positions (into X as passed here) of the rows that survive row-dropping steps;
+        # None means nothing was dropped. See _apply_keep_mask.
+        self.kept_positions_ = None
         if y is not None and len(X) != len(y):
             raise ValueError("X and y must have the same length")
 
@@ -201,6 +204,15 @@ class Preprocessor:
         self.row_drop_log_.append(
             {"dropped": n_before - int(mask.sum()), "kept": int(mask.sum()), "ignored": False}
         )
+        # Record WHICH rows survived, as positions into the frame this Preprocessor was fitted on.
+        # The reset_index below keeps X and y aligned with each other but erases row identity, and
+        # callers that must map a prepared row back to its source row (scripts/autodp_our_space.py
+        # -> __adp_row__ -> eval_autodatapre) cannot reconstruct it from the returned index: some
+        # operators hand back a subset of the input labels, others a fresh 0..m-1 range. Without
+        # this, labels were attached to the wrong feature rows and accuracy fell to chance.
+        _pos = np.flatnonzero(np.asarray(mask))
+        self.kept_positions_ = _pos if getattr(self, "kept_positions_", None) is None \
+            else np.asarray(self.kept_positions_)[_pos]
         if X_num is not None:
             X_num = X_num.loc[mask].reset_index(drop=True)
         if X_cat is not None:
@@ -416,13 +428,12 @@ class Preprocessor:
         else:
             mask = pd.Series(True, index=X_num.index)
 
-        X_num = X_num.loc[mask].reset_index(drop=True)
-        if X_cat is not None:
-            X_cat = X_cat.loc[mask].reset_index(drop=True)
-        if y is not None:
-            y = y.loc[mask].reset_index(drop=True)
-
-        return X_num, X_cat, y
+        # Route through the single tracked drop path. This branch used to drop rows inline and
+        # bypass _apply_keep_mask, so row_drop_log_ stayed empty and, more seriously, nothing
+        # recorded WHICH rows survived. Callers that must map a prepared row back to its source
+        # row could not, and attached labels to the wrong features -- chance accuracy on
+        # run_or_walk with every feature and 97.8% of rows present.
+        return self._apply_keep_mask(mask, X_num, X_cat, y)
 
     def _fit_outlier_cleaning(self, X_num, X_cat):
         method = self.config.get("outlier_cleaning", "none")

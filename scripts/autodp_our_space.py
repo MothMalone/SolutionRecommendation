@@ -53,6 +53,7 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -115,23 +116,60 @@ def _apply_step(dataset: dict, step: str, op: str) -> None:
     y_tr = dataset["target"]
     y_series = y_tr.iloc[:, 0] if isinstance(y_tr, pd.DataFrame) else y_tr
 
+    # ORIGINAL row positions. read_dataset splits with train_test_split, which keeps the source
+    # index, so these ARE positions in the input file. run_autodatapre writes them out as
+    # __adp_row__ and eval_autodatapre uses them to attach each prepared row to its true label.
+    # Renumbering here (the old reset_index(drop=True)) silently broke that link the moment any
+    # operator dropped a row: prepared row k stopped being source row k, labels were matched to
+    # the wrong features, and the classifier collapsed to chance -- 0.4944 on binary run_or_walk
+    # with 97.8% of rows and all 6 features intact. Arm 0 was unaffected because AutoDP's own
+    # operators keep their index and never reach this adapter.
+    orig_index = np.asarray(X_tr.index)
+
     res = pre.fit_transform(X_tr.reset_index(drop=True), y_series.reset_index(drop=True))
     if isinstance(res, tuple):
         X_tr_p, y_tr_p = res
     else:
         X_tr_p, y_tr_p = res, y_series.reset_index(drop=True)
 
-    # Keep index and target aligned: their classifiers do dataset['target'].loc[X.index].
+    # Ask the Preprocessor which rows survived. Its returned INDEX cannot be trusted for this:
+    # some operators hand back a subset of the input labels, others a fresh 0..m-1 range (lof did
+    # exactly that -- 2885 rows with max index 2884 out of 3200 input rows), so reading identity
+    # off the index silently mismatched every label.
+    survivors = getattr(pre, "kept_positions_", None)
+    survivors = (np.arange(len(X_tr_p)) if survivors is None
+                 else np.asarray(survivors, dtype=int))
+    if len(survivors) != len(X_tr_p):        # defensive: never guess at a mapping
+        raise RuntimeError(
+            f"row-identity tracking failed for {step}:{op} -- Preprocessor reported "
+            f"{len(survivors)} survivors but returned {len(X_tr_p)} rows")
+    kept_index = orig_index[survivors]
+
+    # When fit_transform returns only X, y is still the FULL column while X has lost rows --
+    # subset it by the same survivors or every label shifts up by the number dropped.
+    y_arr = np.asarray(y_tr_p)
+    if len(y_arr) != len(survivors):
+        y_arr = y_arr[survivors]
     X_tr_p = X_tr_p.reset_index(drop=True)
-    y_tr_p = pd.Series(y_tr_p).reset_index(drop=True)
+    X_tr_p.index = kept_index
+    y_tr_p = pd.Series(y_arr, index=kept_index)   # target.loc[X.index] must work
     dataset["train"] = X_tr_p
     dataset["target"] = y_tr_p.to_frame(name=(y_tr.columns[0] if isinstance(y_tr, pd.DataFrame) else "target"))
 
     if not isinstance(dataset["test"], dict) and dataset["test"] is not None:
-        X_te_p = pre.transform(dataset["test"].reset_index(drop=True)).reset_index(drop=True)
+        X_te = dataset["test"]
+        te_index = np.asarray(X_te.index)
+        X_te_p = pre.transform(X_te.reset_index(drop=True))
+        te_survivors = np.asarray(X_te_p.index, dtype=int)
+        te_kept = te_index[te_survivors]
+        X_te_p = X_te_p.reset_index(drop=True)
+        X_te_p.index = te_kept
         dataset["test"] = X_te_p
         y_te = dataset["target_test"]
-        y_te_s = (y_te.iloc[:, 0] if isinstance(y_te, pd.DataFrame) else y_te).reset_index(drop=True)
+        y_te_s = (y_te.iloc[:, 0] if isinstance(y_te, pd.DataFrame) else y_te)
+        y_te_s = pd.Series(np.asarray(y_te_s))
+        y_te_s = y_te_s.iloc[te_survivors] if len(y_te_s) == len(te_index) else y_te_s
+        y_te_s.index = te_kept
         dataset["target_test"] = y_te_s.to_frame(
             name=(y_te.columns[0] if isinstance(y_te, pd.DataFrame) else "target"))
 
