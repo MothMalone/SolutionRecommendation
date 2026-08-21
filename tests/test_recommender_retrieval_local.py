@@ -62,6 +62,7 @@ def test_retrieval_local_protects_nearest_neighbor_incumbent(monkeypatch):
         candidate_configs,
         time_limit_per_model=300,
         autogluon_profile="best_quality",
+        **_kwargs,          # the real evaluator keeps gaining optional kwargs
     ):
         autogluon_candidates.extend([dict(cfg) for cfg in candidate_configs])
         results = []
