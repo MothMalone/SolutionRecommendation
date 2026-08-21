@@ -129,9 +129,31 @@ def search_pipelines_with_optimizer(
     cfg_cache: Dict[Tuple[Tuple[str, Any], ...], Dict[str, Any]] = {}
     history: List[Dict[str, Any]] = []
 
+    # `cache` is keyed by configuration, so len(cache) counts DISTINCT configs evaluated and can
+    # never exceed the size of the search space. Every loop below is driven by that count, so a
+    # sample_budget larger than the space made them spin forever: the caller asks for 12 draws
+    # from a 9-point space and the loop never reaches 12. Cap the budget at what exists.
+    space_size = 1
+    for _step in step_order:
+        space_size *= max(1, len(options[_step]))
+    budget = max(0, min(int(sample_budget), int(space_size)))
+
+    # Second, independent stall source: a configuration whose evaluation fails is never cached
+    # (see _evaluate_one), so it is redrawn indefinitely. If every remaining config in the space
+    # fails, the cap above is unreachable and the loop still hangs. Bound the real evaluation
+    # work too. Only cache MISSES count -- cache hits are free, and greedy/beam revisit
+    # neighbours constantly, so counting hits would cut those searches short.
+    attempts = {"n": 0}
+    max_attempts = max(50, 25 * budget)
+
+    def budget_left() -> bool:
+        return len(cache) < budget and attempts["n"] < max_attempts
+
     def eval_cfg(cfg: Dict[str, Any]) -> Optional[float]:
-        score = _evaluate_one(cfg, evaluate_fn, cache, step_order)
         key = _cfg_key(cfg, step_order)
+        if key not in cache:
+            attempts["n"] += 1
+        score = _evaluate_one(cfg, evaluate_fn, cache, step_order)
         if score is not None and key not in cfg_cache:
             cfg_cache[key] = dict(cfg)
             _append_history(history, len(cache), max(cache.values()) if cache else None)
@@ -143,7 +165,7 @@ def search_pipelines_with_optimizer(
         return ranked
 
     def random_until_budget() -> None:
-        while len(cache) < sample_budget:
+        while budget_left():
             cfg = _random_cfg(options, rng)
             eval_cfg(cfg)
 
@@ -152,7 +174,7 @@ def search_pipelines_with_optimizer(
 
     elif optimizer == "exhaustive":
         all_combos = int(np.prod([len(options[s]) for s in step_order], dtype=np.int64))
-        if all_combos <= sample_budget:
+        if all_combos <= budget:
             for values in product(*[options[s] for s in step_order]):
                 cfg = {s: v for s, v in zip(step_order, values)}
                 eval_cfg(cfg)
@@ -166,7 +188,7 @@ def search_pipelines_with_optimizer(
         if cur_score is None:
             cur_score = -np.inf
         temp = 1.0
-        while len(cache) < sample_budget:
+        while budget_left():
             nxt = _neighbor_cfg(cur, options, rng)
             nxt_score = eval_cfg(nxt)
             if nxt_score is None:
@@ -183,13 +205,13 @@ def search_pipelines_with_optimizer(
         cur_score = eval_cfg(cur)
         if cur_score is None:
             cur_score = -np.inf
-        while len(cache) < sample_budget:
+        while budget_left():
             improved = False
             best_neighbor = cur
             best_neighbor_score = cur_score
             for step in step_order:
                 for val in options[step]:
-                    if len(cache) >= sample_budget:
+                    if not budget_left():
                         break
                     if val == cur[step]:
                         continue
@@ -200,7 +222,7 @@ def search_pipelines_with_optimizer(
                         best_neighbor = cand
                         best_neighbor_score = sc
                         improved = True
-                if len(cache) >= sample_budget:
+                if not budget_left():
                     break
             if improved:
                 cur = best_neighbor
@@ -211,19 +233,19 @@ def search_pipelines_with_optimizer(
                 cur_score = sc if sc is not None else cur_score
 
     elif optimizer == "ga":
-        pop_size = min(20, max(4, sample_budget // 5))
+        pop_size = min(20, max(4, budget // 5))
         population: List[Tuple[Dict[str, Any], float]] = []
-        while len(population) < pop_size and len(cache) < sample_budget:
+        while len(population) < pop_size and budget_left():
             cfg = _random_unseen_cfg(options, step_order, rng, cache) or _random_cfg(options, rng)
             sc = eval_cfg(cfg)
             if sc is not None:
                 population.append((cfg, sc))
 
-        while len(cache) < sample_budget and population:
+        while budget_left() and population:
             population.sort(key=lambda x: x[1], reverse=True)
             survivors = population[: max(2, pop_size // 2)]
             children: List[Tuple[Dict[str, Any], float]] = []
-            while len(children) + len(survivors) < pop_size and len(cache) < sample_budget:
+            while len(children) + len(survivors) < pop_size and budget_left():
                 p1 = survivors[int(rng.randint(0, len(survivors)))][0]
                 p2 = survivors[int(rng.randint(0, len(survivors)))][0]
                 child = {}
@@ -237,15 +259,15 @@ def search_pipelines_with_optimizer(
                     children.append((child, sc))
             population = survivors + children
 
-        if len(cache) < sample_budget:
+        if budget_left():
             random_until_budget()
 
     elif optimizer == "beam":
-        beam_width = min(12, max(4, sample_budget // 10))
+        beam_width = min(12, max(4, budget // 10))
         beam: List[Tuple[Dict[str, Any], float]] = []
 
         # Warm start the beam with random unique seeds.
-        while len(beam) < beam_width and len(cache) < sample_budget:
+        while len(beam) < beam_width and budget_left():
             cfg = _random_unseen_cfg(options, step_order, rng, cache)
             if cfg is None:
                 break
@@ -253,12 +275,12 @@ def search_pipelines_with_optimizer(
             if sc is not None:
                 beam.append((cfg, sc))
 
-        while len(cache) < sample_budget and beam:
+        while budget_left() and beam:
             neighborhood: List[Tuple[Dict[str, Any], float]] = []
             for cfg, _sc in beam:
                 for step in step_order:
                     for val in options[step]:
-                        if len(cache) >= sample_budget:
+                        if not budget_left():
                             break
                         if cfg.get(step) == val:
                             continue
@@ -267,7 +289,7 @@ def search_pipelines_with_optimizer(
                         sc = eval_cfg(cand)
                         if sc is not None:
                             neighborhood.append((cand, sc))
-                    if len(cache) >= sample_budget:
+                    if not budget_left():
                         break
 
             if not neighborhood:
@@ -294,14 +316,17 @@ def search_pipelines_with_optimizer(
                     break
             beam = next_beam
 
-        if len(cache) < sample_budget:
+        if budget_left():
             random_until_budget()
 
     elif optimizer == "tpe":
         # Lightweight categorical TPE-style search:
         # model P(x|good) vs P(x|bad) with count statistics and sample by likelihood ratio.
-        n_init = min(max(10, sample_budget // 10), sample_budget)
-        while len(cache) < n_init:
+        n_init = min(max(10, budget // 10), budget)
+        # budget_left() as well as n_init: _random_unseen_cfg keeps finding fresh configs in a
+        # large space, so if every evaluation fails the cache never grows and this warm-up alone
+        # spins forever.
+        while len(cache) < n_init and budget_left():
             cfg = _random_unseen_cfg(options, step_order, rng, cache)
             if cfg is None:
                 break
@@ -342,7 +367,7 @@ def search_pipelines_with_optimizer(
                 score += log(max(pg, 1e-12)) - log(max(pb, 1e-12))
             return score
 
-        while len(cache) < sample_budget:
+        while budget_left():
             if len(cache) < 2:
                 cfg = _random_unseen_cfg(options, step_order, rng, cache)
                 if cfg is None:
@@ -393,7 +418,7 @@ def search_pipelines_with_optimizer(
                     cfg[step] = vals[int(rng.randint(0, len(vals)))]
             return cfg
 
-        while len(cache) < sample_budget:
+        while budget_left():
             node = root
             # Selection
             while not node.untried and node.children:
