@@ -101,3 +101,35 @@ def test_features_and_labels_stay_aligned_after_dropping():
         pytest.skip("nothing dropped or marker not preserved")
     np.testing.assert_array_equal(np.asarray(Xp["__id__"], dtype=int),
                                   np.asarray(yp, dtype=int))
+
+
+def test_empty_keep_mask_is_a_no_op_not_an_empty_frame():
+    """A mask that keeps zero rows leaves the frame untouched, and says so in row_drop_log_.
+
+    This is the ONE behavioural difference between the inline drop that _fit_outlier_removal used
+    before a24b8e7 and the _apply_keep_mask path it routes through now. The inline path handed
+    back a 0-row training frame; _apply_keep_mask records ignored:True and returns the input.
+
+    It is not hypothetical, and it is not confined to the adapter arms. On ACORec's own 23
+    evaluation datasets it fires 8 times under ACORec's own operators -- zscore on 1066, 378, 381,
+    382, 993 and 1164, iqr on 1164 -- all wide frames, where requiring every column to be within
+    threshold excludes every row. Before: 0 rows out. After: all rows out, operator inert.
+
+    The AutoDP-coded operators (ZSB/IQR/LOF) already took this path, so their behaviour is
+    unchanged; this made ACORec's operators consistent with them.
+    """
+    from automl_aco.preprocessing.preprocessor import Preprocessor
+
+    # Every row is an outlier on at least one column, so `(z < thr).all(axis=1)` keeps nothing.
+    n = 40
+    X = pd.DataFrame(np.eye(n) * 50.0, columns=[f"c{i}" for i in range(n)])
+    y = pd.Series(np.arange(n) % 2)
+
+    pre = Preprocessor(_cfg(outlier_removal="zscore"), step_order=["outlier_removal"])
+    res = pre.fit_transform(X.copy(), y.copy())
+    Xp = res[0] if isinstance(res, tuple) else res
+
+    log = [r for r in (pre.row_drop_log_ or []) if r.get("ignored")]
+    assert log, "an empty keep-mask must be recorded as ignored, not applied silently"
+    assert len(Xp) == n, "the operator must be inert, not empty the training frame"
+    assert pre.kept_positions_ is None, "nothing was dropped, so there is no survivor mapping"
