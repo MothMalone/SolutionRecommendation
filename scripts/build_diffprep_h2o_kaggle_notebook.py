@@ -111,8 +111,21 @@ cells[3] = _code(
     if not (SOLUTION_DIR / ".git").exists():
         subprocess.run(["git", "clone", "--branch", "feature/acorec-autodp-space", "--single-branch", "https://github.com/MothMalone/SolutionRecommendation.git", str(SOLUTION_DIR)], check=True)
     solution_commit = subprocess.check_output(["git", "-C", str(SOLUTION_DIR), "rev-parse", "HEAD"], text=True).strip()
+    # Guard against a stale Kaggle clone/cache and import by absolute path.
+    evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
+    if not evaluator_path.exists():
+        from urllib.request import urlopen
+        evaluator_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_url = (
+            "https://raw.githubusercontent.com/MothMalone/"
+            "SolutionRecommendation/feature/acorec-autodp-space/"
+            "scripts/h2o_evaluator.py"
+        )
+        evaluator_path.write_bytes(urlopen(raw_url, timeout=60).read())
     sys.path.insert(0, str(SOLUTION_DIR / "scripts"))
     sys.path.insert(0, str(SOLUTION_DIR / "src"))
+    import importlib
+    importlib.invalidate_caches()
     from h2o_evaluator import evaluate_h2o_frames
     from automl_aco.data.loaders import load_gitlab_openml_dataset
     from automl_aco.eval_ids import EVAL_IDS

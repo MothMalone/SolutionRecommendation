@@ -103,8 +103,22 @@ cells = [
         BRANCH = "feature/acorec-autodp-space"
         if not (SOLUTION_DIR / ".git").exists():
             subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(SOLUTION_DIR)], check=True)
+        # Guard against a stale Kaggle clone/cache: load the evaluator by its
+        # absolute repository path, and fetch the pinned file only if absent.
+        evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
+        if not evaluator_path.exists():
+            from urllib.request import urlopen
+            evaluator_path.parent.mkdir(parents=True, exist_ok=True)
+            raw_url = (
+                "https://raw.githubusercontent.com/MothMalone/"
+                "SolutionRecommendation/feature/acorec-autodp-space/"
+                "scripts/h2o_evaluator.py"
+            )
+            evaluator_path.write_bytes(urlopen(raw_url, timeout=60).read())
         sys.path.insert(0, str(SOLUTION_DIR / "src"))
         sys.path.insert(0, str(SOLUTION_DIR / "scripts"))
+        import importlib
+        importlib.invalidate_caches()
         from automl_aco.data.loaders import load_gitlab_openml_dataset
         from automl_aco.data.splits import split_train_val_test
         from automl_aco.eval_ids import EVAL_DATASETS
