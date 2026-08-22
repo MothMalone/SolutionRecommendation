@@ -108,20 +108,20 @@ cells[3] = _code(
         subprocess.run(["git", "clone", "--branch", "kaggle-experiments", "--single-branch", "https://github.com/dangvu53/DiffPrep.git", str(REPO_DIR)], check=True)
     subprocess.run(["git", "-C", str(REPO_DIR), "switch", "kaggle-experiments"], check=True)
     commit = subprocess.check_output(["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], text=True).strip()
-    if not (SOLUTION_DIR / ".git").exists():
+    if (SOLUTION_DIR / ".git").exists():
+        subprocess.run(["git", "-C", str(SOLUTION_DIR), "fetch", "origin", "feature/acorec-autodp-space"], check=True)
+        subprocess.run(["git", "-C", str(SOLUTION_DIR), "switch", "feature/acorec-autodp-space"], check=True)
+        subprocess.run(["git", "-C", str(SOLUTION_DIR), "pull", "--ff-only", "origin", "feature/acorec-autodp-space"], check=True)
+    else:
         subprocess.run(["git", "clone", "--branch", "feature/acorec-autodp-space", "--single-branch", "https://github.com/MothMalone/SolutionRecommendation.git", str(SOLUTION_DIR)], check=True)
     solution_commit = subprocess.check_output(["git", "-C", str(SOLUTION_DIR), "rev-parse", "HEAD"], text=True).strip()
-    # Guard against a stale Kaggle clone/cache and import by absolute path.
+    # Guard against an old notebook/session cache before a long run.
     evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
-    if not evaluator_path.exists():
-        from urllib.request import urlopen
-        evaluator_path.parent.mkdir(parents=True, exist_ok=True)
-        raw_url = (
-            "https://raw.githubusercontent.com/MothMalone/"
-            "SolutionRecommendation/feature/acorec-autodp-space/"
-            "scripts/h2o_evaluator.py"
+    evaluator_source = evaluator_path.read_text(encoding="utf-8")
+    if "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source:
+        raise RuntimeError(
+            "Stale H2O evaluator detected. Restart the Kaggle session and rerun this clone/install cell."
         )
-        evaluator_path.write_bytes(urlopen(raw_url, timeout=60).read())
     sys.path.insert(0, str(SOLUTION_DIR / "scripts"))
     sys.path.insert(0, str(SOLUTION_DIR / "src"))
     import importlib

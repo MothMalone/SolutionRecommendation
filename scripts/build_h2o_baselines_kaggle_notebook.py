@@ -101,20 +101,19 @@ cells = [
         """
         REPO_URL = "https://github.com/MothMalone/SolutionRecommendation.git"
         BRANCH = "feature/acorec-autodp-space"
-        if not (SOLUTION_DIR / ".git").exists():
+        if (SOLUTION_DIR / ".git").exists():
+            subprocess.run(["git", "-C", str(SOLUTION_DIR), "fetch", "origin", BRANCH], check=True)
+            subprocess.run(["git", "-C", str(SOLUTION_DIR), "switch", BRANCH], check=True)
+            subprocess.run(["git", "-C", str(SOLUTION_DIR), "pull", "--ff-only", "origin", BRANCH], check=True)
+        else:
             subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(SOLUTION_DIR)], check=True)
-        # Guard against a stale Kaggle clone/cache: load the evaluator by its
-        # absolute repository path, and fetch the pinned file only if absent.
+        # Guard against an old notebook/session cache before a long run.
         evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
-        if not evaluator_path.exists():
-            from urllib.request import urlopen
-            evaluator_path.parent.mkdir(parents=True, exist_ok=True)
-            raw_url = (
-                "https://raw.githubusercontent.com/MothMalone/"
-                "SolutionRecommendation/feature/acorec-autodp-space/"
-                "scripts/h2o_evaluator.py"
+        evaluator_source = evaluator_path.read_text(encoding="utf-8")
+        if "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source:
+            raise RuntimeError(
+                "Stale H2O evaluator detected. Restart the Kaggle session and rerun this clone/install cell."
             )
-            evaluator_path.write_bytes(urlopen(raw_url, timeout=60).read())
         sys.path.insert(0, str(SOLUTION_DIR / "src"))
         sys.path.insert(0, str(SOLUTION_DIR / "scripts"))
         import importlib

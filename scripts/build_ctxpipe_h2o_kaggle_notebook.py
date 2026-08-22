@@ -93,6 +93,12 @@ cells[1] = code(
         "print('health',numpy.__version__,pandas.__version__,sklearn.__version__,"
         "torch.__version__,h2o.__version__,transformers.__version__)",
     ], check=True)
+    evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
+    evaluator_source = evaluator_path.read_text(encoding="utf-8")
+    if "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source:
+        raise RuntimeError(
+            "Stale H2O evaluator detected. Restart the Kaggle session and rerun this clone/install cell."
+        )
     print("Solution commit:", subprocess.check_output(["git", "-C", str(SOLUTION_DIR), "rev-parse", "--short", "HEAD"], text=True).strip())
     print("CtxPipe commit:", subprocess.check_output(["git", "-C", str(CTXPIPE_DIR), "rev-parse", "HEAD"], text=True).strip())
     """
