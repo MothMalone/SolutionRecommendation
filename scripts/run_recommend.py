@@ -42,6 +42,7 @@ from automl_aco.data.loaders import (
     load_dummy_dataset,
     load_csv_dataset,
 )
+from automl_aco.data.splits import split_train_val_test
 from automl_aco.data.metafeatures import extract_enhanced_metafeatures
 from automl_aco.eval_ids import EVAL_IDS, holdout_reference
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
@@ -104,6 +105,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset-csv", required=False, help="Path to dataset CSV (csv source only)")
     parser.add_argument("--target-column", default="target", help="Target column name")
     parser.add_argument("--dataset-id", required=False, help="Dataset id for metafeature lookup")
+    parser.add_argument(
+        "--recommend-on-train-val",
+        action="store_true",
+        help=(
+            "Restrict recommendation/search to the externally fixed train+validation 80%%. "
+            "The outer test rows are never passed to ACO/metafeatures/evaluators."
+        ),
+    )
+    parser.add_argument(
+        "--recommend-split-seed",
+        type=int,
+        default=42,
+        help="Seed for the external 60/20/20 split when --recommend-on-train-val is enabled.",
+    )
     parser.add_argument(
         "--dataset-ids",
         nargs="+",
@@ -1830,14 +1845,39 @@ def main() -> None:
 
             X = dataset["X"]
             y = dataset["y"]
+            # The default historical behavior passes the full table to the
+            # recommender. For a leak-free experiment, explicitly construct
+            # the outer split first and give ACO/metafeatures only train+val.
+            if args.recommend_on_train_val:
+                (
+                    X_train_outer,
+                    y_train_outer,
+                    X_val_outer,
+                    y_val_outer,
+                    X_test_outer,
+                    y_test_outer,
+                ) = split_train_val_test(X, y, seed=int(args.recommend_split_seed))
+                X_for_search = pd.concat(
+                    [X_train_outer, X_val_outer], axis=0, ignore_index=True
+                )
+                y_for_search = pd.concat(
+                    [y_train_outer, y_val_outer], axis=0, ignore_index=True
+                )
+                dataset_for_search = dict(dataset)
+                dataset_for_search["X"] = X_for_search
+                dataset_for_search["y"] = y_for_search
+            else:
+                X_for_search = X
+                y_for_search = y
+                dataset_for_search = dataset
             run_options, run_profile_note = _build_run_options(dataset_id)
-            run_options, run_option_notes = _adapt_options_to_dataset(run_options, X)
+            run_options, run_option_notes = _adapt_options_to_dataset(run_options, X_for_search)
             if run_profile_note:
                 print(f"  Applied profile: {run_profile_note}")
             for note in run_option_notes:
                 print(f"  Auto option guard: {note}")
-            test_dataset_df = X.copy()
-            test_dataset_df["target"] = y
+            test_dataset_df = X_for_search.copy()
+            test_dataset_df["target"] = y_for_search
 
             if args.baseline_only != "off":
                 from automl_aco.search.evaluation import evaluate_candidates_autogluon
@@ -1899,7 +1939,7 @@ def main() -> None:
                     # Transfer-only pipeline: best pipeline of the nearest reference dataset (learned
                     # metric, query excluded). Reported alongside no_preprocessing for a clean swap
                     # decision; both fit on the same split so the comparison is apples-to-apples.
-                    def _bl_mf(_df, _dataset=dataset):
+                    def _bl_mf(_df, _dataset=dataset_for_search):
                         return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
                     ns_cfg, ns_row, ns_neighbors = recommender.retrieval_no_search_pipeline(
                         new_dataset=test_dataset_df,
@@ -1987,7 +2027,7 @@ def main() -> None:
                                       "elapsed_seconds": time.perf_counter() - run_start})
                 continue
 
-            def _mf_func(_df, _dataset=dataset):
+            def _mf_func(_df, _dataset=dataset_for_search):
                 return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
 
             recommendation = recommender.recommend(
@@ -2122,6 +2162,13 @@ def main() -> None:
         rec_path = os.path.join(run_output_dir, "recommendation.json")
         recommendation["dataset_id"] = dataset_id
         recommendation["operator_space"] = str(args.operator_space)
+        recommendation["recommendation_protocol"] = {
+            "recommend_on_train_val": bool(args.recommend_on_train_val),
+            "recommend_split_seed": int(args.recommend_split_seed),
+            "test_used_during_search": False if args.recommend_on_train_val else None,
+            "search_rows": int(len(y_for_search)),
+            "outer_test_rows": int(len(y_test_outer)) if args.recommend_on_train_val else None,
+        }
         recommendation["reference_assets"] = {
             "performance_matrix": str(performance_matrix_path),
             "pipeline_configs": str(pipeline_configs_path),

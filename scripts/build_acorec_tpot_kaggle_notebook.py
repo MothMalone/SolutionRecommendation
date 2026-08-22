@@ -37,14 +37,15 @@ cells = [
         operator space with its original performance matrix and proxy evaluator. Its
         frozen top-1 preprocessing pipeline is then evaluated by TPOT with:
 
-        - fixed seed-42 60% train / 20% ACO-search validation / 20% outer test;
+        - ACORec receives only the fixed seed-42 outer train+validation 80%;
+          TPOT then fits on the 60% train portion and uses the untouched 20% test;
         - `preprocessing=False`;
         - estimator-only `classifiers` or `regressors` search space;
         - accuracy for classification and R² for regression.
 
         Therefore the reported classification accuracy is computed only from TPOT's
         predictions on the fixed outer 20% test split. TPOT never evolves another
-        preprocessing pipeline on top of ACORec and does not reuse ACO's validation rows.
+        preprocessing pipeline on top of ACORec or sees the outer test during search.
         Classification targets are LabelEncoded for TPOT and inverse-transformed
         before scoring, which is required for OpenML labels that are not 0..K-1.
         """
@@ -203,6 +204,8 @@ cells = [
             "--output-dir", str(OUTPUT_DIR),
             "--skip-aco-plot",
             "--no-autogluon",
+            "--recommend-on-train-val",
+            "--recommend-split-seed", str(TPOT_SPLIT_SEED),
             "--verbose",
         ]
         if RUN_MODE == "smoke":

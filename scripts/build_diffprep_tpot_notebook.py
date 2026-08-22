@@ -50,11 +50,11 @@ cells = [
         - 30 datasets are divided into five Kaggle shards of six datasets;
         - results are checkpointed after every dataset.
 
-        The exact dataset snapshots/derived labels committed in the DiffPrep fork
-        are reused, matching the previous AutoGluon reproduction (for example,
-        `house_prices` uses its binary `SalePrice>150k` target). GitLab/DataGit is
-        only a fallback for a numeric OpenML dataset absent from the fork. Enable
-        Internet for the Git clone and any fallback download.
+        Every DiffPrep input is now materialized through the same canonical
+        ACORec loader used by the other methods. This applies the same target
+        coercion, rare-class filtering, row order, and 100k cap before DiffPrep
+        creates its own fitted pipeline. The fork's original data is used only
+        as the frozen Google (100000) fallback.
         """
     ),
     code(
@@ -72,6 +72,7 @@ cells = [
         import math
         import os
         import pickle
+        import shutil
         import subprocess
         import sys
         import time
@@ -155,6 +156,70 @@ cells = [
             ["git", "rev-parse", "HEAD"], cwd=REPO_DIR, text=True
         ).strip()
         print("DiffPrep commit:", commit)
+
+        SOLUTION_DIR = TEMP_ROOT / "SolutionRecommendation"
+        if not (SOLUTION_DIR / ".git").exists():
+            subprocess.run(
+                [
+                    "git", "clone", "--branch", "feature/acorec-autodp-space",
+                    "--single-branch", "https://github.com/MothMalone/SolutionRecommendation.git",
+                    str(SOLUTION_DIR),
+                ],
+                check=True,
+            )
+        sys.path.insert(0, str(SOLUTION_DIR / "src"))
+        from automl_aco.data.loaders import load_gitlab_openml_dataset
+        from automl_aco.eval_ids import EVAL_IDS
+
+        # The upstream trainer evaluates X_test every epoch and passes it into
+        # pipeline initialization. Patch that behavior in this reproduction:
+        # DiffPrep may use train/validation only; outer test is reserved for TPOT.
+        def patch_exact(path, old, new):
+            path = Path(path)
+            source = path.read_text(encoding="utf-8")
+            if old in source:
+                path.write_text(source.replace(old, new), encoding="utf-8")
+            elif new not in source:
+                raise RuntimeError(f"DiffPrep leakage patch target not found: {path}")
+
+        for pipeline_name in ("diffprep_fix_pipeline.py", "diffprep_flex_pipeline.py"):
+            pipeline_path = REPO_DIR / "pipeline" / pipeline_name
+            patch_exact(
+                pipeline_path,
+                "return df.isnull().values.sum() > 0",
+                "return df is not None and df.isnull().values.sum() > 0",
+            )
+            patch_exact(
+                pipeline_path,
+                '        first_transformer.pre_cache(X_test, "test")',
+                '        if X_test is not None:' + chr(92) + 'n            first_transformer.pre_cache(X_test, "test")',
+            )
+        patch_exact(
+            REPO_DIR / "experiment" / "diffprep_experiment.py",
+            "prep_pipeline.init_parameters(X_train, X_val, X_test)",
+            "prep_pipeline.init_parameters(X_train, X_val, None)",
+        )
+        patch_exact(
+            REPO_DIR / "experiment" / "diffprep_experiment.py",
+            "result, best_model = diff_prep.fit(X_train, y_train, X_val, y_val, X_test, y_test)",
+            "result, best_model = diff_prep.fit(X_train, y_train, X_val, y_val, None, None)",
+        )
+        patch_exact(
+            REPO_DIR / "trainer" / "diffprep_trainer.py",
+            "            test_loss, test_acc = self.evaluate(X_test, y_test, X_type='test', max_only=False)",
+            "            if X_test is None or y_test is None:" + chr(92) + "n                test_loss, test_acc = float('nan'), float('nan')" + chr(92) + "n            else:" + chr(92) + "n                test_loss, test_acc = self.evaluate(X_test, y_test, X_type='test', max_only=False)",
+        )
+        patch_exact(
+            REPO_DIR / "extract_and_save_pipeline.py",
+            "prep_pipeline.init_parameters(X_train, X_val, X_test)",
+            "prep_pipeline.init_parameters(X_train, X_val, None)",
+        )
+        patch_exact(
+            REPO_DIR / "extract_and_save_pipeline.py",
+            "'original_test_acc': result['best_test_acc'],",
+            "'original_test_acc': None,",
+        )
+        print("Patched DiffPrep: no outer-test access during pipeline search")
 
         # Ensure repository modules are importable when unpickling the learned pipeline.
         os.chdir(REPO_DIR)
@@ -334,20 +399,33 @@ cells = [
             dataset_dir = REPO_DIR / "data" / dataset_key
             data_path = dataset_dir / "data.csv"
             info_path = dataset_dir / "info.json"
-            if data_path.exists() and info_path.exists():
-                info = json.loads(info_path.read_text(encoding="utf-8"))
-                info.setdefault("source", "diffprep_fork_snapshot")
-                return dataset_key, info
-
-            frame, target, original_rows, backend = load_raw_dataset(spec)
-            if target not in frame.columns:
-                raise KeyError(f"Target {target!r} is absent from dataset {spec['name']}")
-            frame = frame.loc[~frame[target].isna()].reset_index(drop=True)
-            frame = frame.dropna(axis=1, how="all")
-            if target not in frame.columns or len(frame) < 20 or frame.shape[1] < 2:
+            # Use the same canonical loader as ACORec/CtxPipe. Existing
+            # snapshots are overwritten so rare-class filtering, row order,
+            # target encoding, and sample caps cannot diverge.
+            if spec.get("source") == "kaggle_csv":
+                canonical_csv = CACHE_DIR / f"{int(spec['dataset_id'])}.csv"
+                source_google = REPO_DIR / "data" / dataset_key / "data.csv"
+                if not canonical_csv.exists() and source_google.exists():
+                    shutil.copyfile(source_google, canonical_csv)
+            dataset = load_gitlab_openml_dataset(
+                int(spec["dataset_id"]),
+                cache_dir=str(CACHE_DIR),
+                test_dataset_ids=[int(value) for value in EVAL_IDS],
+                verbose=True,
+                max_samples_if_test=MAX_SAMPLES,
+            )
+            if dataset is None:
+                raise RuntimeError(f"Canonical loader could not load {spec['name']}")
+            frame = pd.DataFrame(dataset["X"]).copy()
+            frame["target"] = pd.Series(dataset["y"]).reset_index(drop=True)
+            original_rows = int(dataset.get("original_rows", len(frame)))
+            backend = str(dataset.get("download_backend", "canonical_loader"))
+            if len(frame) < 20 or frame.shape[1] < 2:
                 raise ValueError(f"Insufficient usable data: {frame.shape}")
 
-            # Keep DiffPrep semantics: its build_data() label-encodes every target.
+            # DiffPrep's build_data() label-encodes every target; canonical
+            # loader emits contiguous integer labels, so this is idempotent.
+            target = "target"
             dataset_dir.mkdir(parents=True, exist_ok=True)
             frame.to_csv(data_path, index=False)
             info = {
@@ -360,7 +438,8 @@ cells = [
                 "raw_features": int(frame.shape[1] - 1),
             }
             info_path.write_text(json.dumps(info, indent=2), encoding="utf-8")
-            print(f"Materialized {spec['name']}: {frame.shape}, source={backend}")
+            print(f"Canonical DiffPrep input {spec['name']}: {frame.shape}, source={backend}")
+            del dataset
             del frame
             gc.collect()
             return dataset_key, info
@@ -388,6 +467,9 @@ cells = [
         def transform_with_diffprep(pipeline, split):
             if not pipeline.is_fitted:
                 pipeline.fit(split["X_train"])
+            # Test rows are cached only now, after the DiffPrep search is over.
+            if "test" not in pipeline.pipeline[0].cache:
+                pipeline.pipeline[0].pre_cache(split["X_test"], "test")
             transformed = {}
             with torch.no_grad():
                 for part, x_type in (("train", "train"), ("val", "val"), ("test", "test")):
@@ -568,6 +650,7 @@ cells = [
                     "evaluator": "TPOTClassifier",
                     "split_seed": SPLIT_SEED,
                     "train_seed": TRAIN_SEED,
+                    "diffprep_test_seen_during_search": False,
                     "diffprep_commit": commit,
                     "total_seconds": float(time.time() - started),
                     "error_type": type(error).__name__,
