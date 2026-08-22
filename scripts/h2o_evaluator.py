@@ -75,13 +75,26 @@ def _prediction_from_frame(h2o_frame: Any) -> np.ndarray:
     return prediction.iloc[:, 0].to_numpy()
 
 
+def _classification_labels(values: Any) -> np.ndarray:
+    """Compare H2O factor predictions and targets using one stable dtype.
+
+    H2O may return a binary factor prediction as numeric ``0``/``1`` even
+    when its factor domain originated from the string labels ``"0"``/``"1"``.
+    sklearn deliberately rejects mixed label types, so canonicalize both
+    arrays only at metric-computation time.
+    """
+    return pd.Series(values).astype(str).to_numpy()
+
+
 def _metric_from_model(model: Any, validation_frame: Any, task_type: str) -> float:
     performance = model.model_performance(validation_frame)
     if task_type == "classification":
         # Accuracy is not always the leaderboard's default metric in H2O, so
         # compute it explicitly for every candidate model on validation.
-        pred = _prediction_from_frame(model.predict(validation_frame))
-        actual = validation_frame["__target__"].as_data_frame(use_pandas=True).iloc[:, 0].to_numpy()
+        pred = _classification_labels(_prediction_from_frame(model.predict(validation_frame)))
+        actual = _classification_labels(
+            validation_frame["__target__"].as_data_frame(use_pandas=True).iloc[:, 0].to_numpy()
+        )
         return float(accuracy_score(actual, pred))
     value = performance.r2()
     return float(value) if value is not None and np.isfinite(value) else float("-inf")
@@ -227,6 +240,7 @@ def evaluate_h2o_frames(
         "model_scores_validation": model_scores,
     }
     if task_type == "classification":
+        test_prediction = _classification_labels(test_prediction)
         result.update(
             {
                 "accuracy": float(accuracy_score(test_target, test_prediction)),

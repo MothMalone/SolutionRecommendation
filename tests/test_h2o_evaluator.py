@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from sklearn.metrics import accuracy_score
 
 def _load_evaluator_module():
     source = Path(__file__).resolve().parents[1] / "scripts" / "h2o_evaluator.py"
@@ -29,3 +30,14 @@ def test_h2o_init_uses_only_current_client_arguments():
     evaluator._init_h2o(FakeH2O(), nthreads=1, max_mem_size="6G")
 
     assert calls == [{"nthreads": 1, "max_mem_size": "6G"}, "remove_all"]
+
+
+def test_h2o_classification_metric_normalizes_numeric_factor_predictions():
+    """H2O may emit 0/1 while the uploaded factor target is '0'/'1'."""
+    evaluator = _load_evaluator_module()
+    actual = evaluator._classification_labels(["0", "1", "0", "1"])
+    predicted = evaluator._classification_labels([0, 1, 0, 1])
+
+    assert actual.dtype.kind in {"U", "O"}
+    assert predicted.dtype.kind in {"U", "O"}
+    assert accuracy_score(actual, predicted) == 1.0
