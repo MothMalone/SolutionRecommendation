@@ -151,7 +151,7 @@ cells[3] = _code(
         patch_exact(
             pipeline_path,
             '        first_transformer.pre_cache(X_test, "test")',
-            '        if X_test is not None:' + chr(92) + 'n            first_transformer.pre_cache(X_test, "test")',
+            '        if X_test is not None:\\n            first_transformer.pre_cache(X_test, "test")',
         )
     patch_exact(
         REPO_DIR / "experiment" / "diffprep_experiment.py",
@@ -166,7 +166,7 @@ cells[3] = _code(
     patch_exact(
         REPO_DIR / "trainer" / "diffprep_trainer.py",
         "            test_loss, test_acc = self.evaluate(X_test, y_test, X_type='test', max_only=False)",
-        "            if X_test is None or y_test is None:" + chr(92) + "n                test_loss, test_acc = float('nan'), float('nan')" + chr(92) + "n            else:" + chr(92) + "n                test_loss, test_acc = self.evaluate(X_test, y_test, X_type='test', max_only=False)",
+        "            if X_test is None or y_test is None:\\n                test_loss, test_acc = float('nan'), float('nan')\\n            else:\\n                test_loss, test_acc = self.evaluate(X_test, y_test, X_type='test', max_only=False)",
     )
     patch_exact(
         REPO_DIR / "extract_and_save_pipeline.py",
