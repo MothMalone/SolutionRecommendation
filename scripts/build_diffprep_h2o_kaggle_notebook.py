@@ -106,7 +106,14 @@ cells[3] = _code(
     # H2O evaluator utility.
     if not (REPO_DIR / ".git").exists():
         subprocess.run(["git", "clone", "--branch", "kaggle-experiments", "--single-branch", "https://github.com/dangvu53/DiffPrep.git", str(REPO_DIR)], check=True)
-    subprocess.run(["git", "-C", str(REPO_DIR), "switch", "kaggle-experiments"], check=True)
+    else:
+        # A previous run may have left the leakage patch (or a failed patch)
+        # in this disposable Kaggle checkout. Restore the exact fork before
+        # applying the current patch below.
+        subprocess.run(["git", "-C", str(REPO_DIR), "fetch", "origin", "kaggle-experiments"], check=True)
+        subprocess.run(["git", "-C", str(REPO_DIR), "switch", "kaggle-experiments"], check=True)
+        subprocess.run(["git", "-C", str(REPO_DIR), "reset", "--hard", "origin/kaggle-experiments"], check=True)
+        subprocess.run(["git", "-C", str(REPO_DIR), "clean", "-fd"], check=True)
     commit = subprocess.check_output(["git", "-C", str(REPO_DIR), "rev-parse", "HEAD"], text=True).strip()
     if (SOLUTION_DIR / ".git").exists():
         subprocess.run(["git", "-C", str(SOLUTION_DIR), "fetch", "origin", "feature/acorec-autodp-space"], check=True)
