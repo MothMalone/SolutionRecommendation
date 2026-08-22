@@ -46,6 +46,14 @@ def _shutdown_h2o(h2o: Any) -> None:
         gc.collect()
 
 
+def _init_h2o(h2o: Any, *, nthreads: int, max_mem_size: str) -> None:
+    """Start H2O with arguments supported by the pinned 3.46.x client."""
+    # H2O 3.46.x removed the legacy ``silent`` keyword from ``h2o.init``.
+    # Passing it through raises H2OTypeError before the JVM starts.
+    h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size))
+    h2o.remove_all()
+
+
 def _as_frame(value: Any, *, columns: Optional[list[str]] = None) -> pd.DataFrame:
     if isinstance(value, pd.DataFrame):
         frame = value.copy()
@@ -126,11 +134,7 @@ def evaluate_h2o_frames(
     if task_type not in {"classification", "regression"}:
         raise ValueError(f"Unsupported task_type: {task_type!r}")
     h2o, H2OAutoML = _load_h2o()
-    # H2O 3.46.x removed the legacy ``silent`` keyword from ``h2o.init``.
-    # Logging is controlled by the caller/environment; passing it through now
-    # raises H2OTypeError before the JVM starts.
-    h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size))
-    h2o.remove_all()
+    _init_h2o(h2o, nthreads=nthreads, max_mem_size=max_mem_size)
 
     train_x = _as_frame(X_train)
     val_x = _as_frame(X_val, columns=list(train_x.columns))

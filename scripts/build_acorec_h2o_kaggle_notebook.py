@@ -56,6 +56,12 @@ cells[1] = _code(
         subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(REPO_DIR)], check=True)
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", "h2o==3.46.0.11", "pyarrow>=15", "requests"], check=True)
     subprocess.run([sys.executable, "-c", "import h2o; print('H2O:', h2o.__version__)"], check=True)
+    evaluator_path = REPO_DIR / "scripts" / "h2o_evaluator.py"
+    evaluator_source = evaluator_path.read_text(encoding="utf-8")
+    if "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source:
+        raise RuntimeError(
+            "Stale H2O evaluator detected. Restart the Kaggle session and rerun this clone/install cell."
+        )
     os.chdir(REPO_DIR)
     print("Repo commit:", subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip())
     """
