@@ -54,7 +54,7 @@ cells[1] = _code(
         subprocess.run(["git", "-C", str(REPO_DIR), "pull", "--ff-only", "origin", BRANCH], check=True)
     else:
         subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(REPO_DIR)], check=True)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "h2o>=3.46.0.11", "pyarrow>=15", "requests"], check=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "h2o==3.46.0.11", "pyarrow>=15", "requests"], check=True)
     subprocess.run([sys.executable, "-c", "import h2o; print('H2O:', h2o.__version__)"], check=True)
     os.chdir(REPO_DIR)
     print("Repo commit:", subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip())

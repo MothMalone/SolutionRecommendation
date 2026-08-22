@@ -126,7 +126,10 @@ def evaluate_h2o_frames(
     if task_type not in {"classification", "regression"}:
         raise ValueError(f"Unsupported task_type: {task_type!r}")
     h2o, H2OAutoML = _load_h2o()
-    h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)
+    # H2O 3.46.x removed the legacy ``silent`` keyword from ``h2o.init``.
+    # Logging is controlled by the caller/environment; passing it through now
+    # raises H2OTypeError before the JVM starts.
+    h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size))
     h2o.remove_all()
 
     train_x = _as_frame(X_train)

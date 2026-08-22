@@ -51,7 +51,7 @@ cells = [
     ),
     code(
         """
-        %pip install -q "h2o>=3.46.0.11" "pyarrow>=15" "requests"
+        %pip install -q "h2o==3.46.0.11" "pyarrow>=15" "requests"
         """
     ),
     code(

@@ -41,7 +41,7 @@ cells[0] = _markdown(
 cells[1] = _code(
     """
     # Install DiffPrep dependencies and H2O; TPOT is not used here.
-    %pip install -q "h2o>=3.46.0.11" "impyute>=0.0.8" "pyarrow>=15" "requests"
+    %pip install -q "h2o==3.46.0.11" "impyute>=0.0.8" "pyarrow>=15" "requests"
     """
 )
 cells[2] = _code(
