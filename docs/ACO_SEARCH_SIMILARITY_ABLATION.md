@@ -5,6 +5,18 @@ remain unchanged. The fixed manifest is `data/openml/meta_dev18.json`; it is
 disjoint from paper test30 and AutoDP-60. Every query dataset is removed from the
 performance matrix, metafeatures, metric training, and heuristic transfer.
 
+For a fast diagnostic of retrieval quality and information loss during Eq-7
+aggregation, run:
+
+```bash
+python scripts/audit_similarity_transfer.py \
+  --output-dir outputs/similarity_transfer_audit
+```
+
+It reports behavioral top-k overlap, effective neighbor count, operator-quality
+correlation, recombination expansion, and the initial probability mass retained
+on the exact transferred pipelines.
+
 ## 1. Rank similarity models offline
 
 Run the 18 leave-one-dataset-out folds (the example uses one Kaggle shard):
