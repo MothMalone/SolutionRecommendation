@@ -121,6 +121,10 @@ def evaluate_autogluon_split(
             "tuning_data": val_data,
             "time_limit": int(time_limit),
             "presets": str(presets),
+            # best_quality uses bagged models. Keep the shared outer
+            # validation split as an explicit holdout for model selection.
+            # AutoGluon 1.5 rejects tuning_data in bagged mode otherwise.
+            "use_bag_holdout": True,
             "raise_on_no_models_fitted": False,
         }
         if feature_generator == "identity":
