@@ -166,9 +166,9 @@ def diffprep() -> list[dict]:
     end = clone.index("# The upstream trainer evaluates X_test", start)
     guard = '''# Guard against a stale AutoGluon evaluator in the cloned checkout.
 evaluator_path = SOLUTION_DIR / "scripts" / "autogluon_evaluator.py"
-    if not evaluator_path.exists():
-        raise RuntimeError("Remote checkout is stale: scripts/autogluon_evaluator.py is missing. Push the AutoGluon scripts to feature/acorec-autodp-space, then restart this Kaggle session.")
-    evaluator_source = evaluator_path.read_text(encoding="utf-8")
+if not evaluator_path.exists():
+    raise RuntimeError("Remote checkout is stale: scripts/autogluon_evaluator.py is missing. Push the AutoGluon scripts to feature/acorec-autodp-space, then restart this Kaggle session.")
+evaluator_source = evaluator_path.read_text(encoding="utf-8")
 if "def evaluate_autogluon_split" not in evaluator_source or "IdentityFeatureGenerator" not in evaluator_source:
     raise RuntimeError("Stale AutoGluon evaluator detected; restart the Kaggle session and rerun this cell.")
 sys.path.insert(0, str(SOLUTION_DIR / "scripts"))
@@ -250,9 +250,9 @@ def ctxpipe() -> list[dict]:
     start = setup.index("evaluator_path =")
     end = setup.index('print("Solution commit:', start)
     setup = setup[:start] + '''evaluator_path = SOLUTION_DIR / "scripts" / "autogluon_evaluator.py"
-    if not evaluator_path.exists():
-        raise RuntimeError("Remote checkout is stale: scripts/autogluon_evaluator.py is missing. Push the AutoGluon scripts to feature/acorec-autodp-space, then restart this Kaggle session.")
-    evaluator_source = evaluator_path.read_text(encoding="utf-8")
+if not evaluator_path.exists():
+    raise RuntimeError("Remote checkout is stale: scripts/autogluon_evaluator.py is missing. Push the AutoGluon scripts to feature/acorec-autodp-space, then restart this Kaggle session.")
+evaluator_source = evaluator_path.read_text(encoding="utf-8")
 if "def evaluate_autogluon_split" not in evaluator_source or "IdentityFeatureGenerator" not in evaluator_source:
     raise RuntimeError("Stale AutoGluon evaluator detected; restart the Kaggle session and rerun setup.")
 ''' + setup[end:]
