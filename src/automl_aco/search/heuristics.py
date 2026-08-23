@@ -244,9 +244,12 @@ def aggregate_operator_heuristics(
     transfer_candidates: Sequence[Mapping[str, Any]],
     pipeline_configs: Sequence[Mapping[str, Any]],
     options: Mapping[str, Sequence[str]],
-) -> Dict[str, np.ndarray]:
+    unobserved_operator_score: Optional[float] = None,
+    return_observed_mask: bool = False,
+) -> Dict[str, np.ndarray] | Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     cfg_map = {str(cfg["name"]): cfg for cfg in pipeline_configs if "name" in cfg}
     raw_eta: Dict[str, np.ndarray] = {}
+    observed_masks: Dict[str, np.ndarray] = {}
 
     for step, operators in options.items():
         step_values = np.full(len(operators), np.nan, dtype=float)
@@ -274,15 +277,32 @@ def aggregate_operator_heuristics(
             if denominator > EPS:
                 step_values[idx] = numerator / denominator
 
-        observed = step_values[np.isfinite(step_values)]
+        observed_mask = np.isfinite(step_values)
+        observed = step_values[observed_mask]
         if observed.size > 0:
-            # Missing operators fall back to this step's weakest observed signal.
-            fallback = float(np.min(observed))
+            # The default preserves historical behavior. The opt-in score is deliberately
+            # kept separate from normalization so an unsupported operator can retain a useful
+            # exploration weight after the per-step eta transform.
+            fallback = (
+                float(unobserved_operator_score)
+                if unobserved_operator_score is not None
+                and np.isfinite(float(unobserved_operator_score))
+                else float(np.min(observed))
+            )
             step_values[~np.isfinite(step_values)] = fallback
         else:
-            step_values[:] = 1.0
+            step_values[:] = (
+                float(unobserved_operator_score)
+                if unobserved_operator_score is not None
+                and np.isfinite(float(unobserved_operator_score))
+                else 1.0
+            )
 
         raw_eta[step] = step_values
+        if return_observed_mask:
+            observed_masks[step] = observed_mask
+    if return_observed_mask:
+        return raw_eta, observed_masks
     return raw_eta
 
 
@@ -474,7 +494,12 @@ def blend_eta_with_prior(
     return normalize_eta_with_floor(out, eta_floor=eta_floor)
 
 
-def normalize_eta_with_floor(raw_eta: Mapping[str, np.ndarray], eta_floor: float = 0.05) -> Dict[str, np.ndarray]:
+def normalize_eta_with_floor(
+    raw_eta: Mapping[str, np.ndarray],
+    eta_floor: float = 0.05,
+    unobserved_masks: Optional[Mapping[str, np.ndarray]] = None,
+    unobserved_eta: Optional[float] = None,
+) -> Dict[str, np.ndarray]:
     floor = float(eta_floor)
     if not np.isfinite(floor):
         floor = 0.05
@@ -505,12 +530,26 @@ def normalize_eta_with_floor(raw_eta: Mapping[str, np.ndarray], eta_floor: float
 
         if not np.isfinite(norm).all():
             norm[~np.isfinite(norm)] = max(floor, EPS)
+        if unobserved_masks is not None and unobserved_eta is not None:
+            mask = np.asarray(unobserved_masks.get(step, []), dtype=bool)
+            if mask.shape == norm.shape and np.isfinite(float(unobserved_eta)):
+                norm[~mask] = np.clip(float(unobserved_eta), floor, 1.0)
         normalized[step] = norm
     return normalized
 
 
-def initialize_aco_with_transferred_eta(raw_eta: Mapping[str, np.ndarray], eta_floor: float = 0.05) -> Dict[str, np.ndarray]:
-    return normalize_eta_with_floor(raw_eta=raw_eta, eta_floor=eta_floor)
+def initialize_aco_with_transferred_eta(
+    raw_eta: Mapping[str, np.ndarray],
+    eta_floor: float = 0.05,
+    unobserved_masks: Optional[Mapping[str, np.ndarray]] = None,
+    unobserved_eta: Optional[float] = None,
+) -> Dict[str, np.ndarray]:
+    return normalize_eta_with_floor(
+        raw_eta=raw_eta,
+        eta_floor=eta_floor,
+        unobserved_masks=unobserved_masks,
+        unobserved_eta=unobserved_eta,
+    )
 
 
 def _compute_aco_heuristic_legacy(
@@ -722,6 +761,7 @@ def compute_aco_heuristic(
     heuristic_transfer_method: str = "weighted_topk_topl",
     score_direction: str = "higher_is_better",
     query_dataset_id: Optional[Any] = None,
+    unobserved_operator_score: Optional[float] = None,
     verbose: bool = False,
 ) -> Dict[str, np.ndarray]:
     method = str(heuristic_transfer_method).strip().lower()
@@ -809,12 +849,24 @@ def compute_aco_heuristic(
         similarity_weights=similarity_weights,
         score_direction=score_direction,
     )
-    raw_eta = aggregate_operator_heuristics(
+    aggregate_result = aggregate_operator_heuristics(
         transfer_candidates=transfer_candidates,
         pipeline_configs=pipeline_configs,
         options=options,
+        unobserved_operator_score=unobserved_operator_score,
+        return_observed_mask=unobserved_operator_score is not None,
     )
-    normalized_eta = initialize_aco_with_transferred_eta(raw_eta=raw_eta, eta_floor=eta_floor)
+    if unobserved_operator_score is not None:
+        raw_eta, observed_masks = aggregate_result
+    else:
+        raw_eta = aggregate_result
+        observed_masks = None
+    normalized_eta = initialize_aco_with_transferred_eta(
+        raw_eta=raw_eta,
+        eta_floor=eta_floor,
+        unobserved_masks=observed_masks,
+        unobserved_eta=unobserved_operator_score,
+    )
 
     _emit_phase2_logs(
         verbose=verbose,

@@ -176,6 +176,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Positive floor for per-step eta normalization",
     )
     parser.add_argument(
+        "--unobserved-operator-score",
+        type=float,
+        default=None,
+        help=(
+            "Opt-in eta score for operators absent from transferred pipelines. "
+            "When set (e.g. 0.7), preserve this score after normalization to improve exploration."
+        ),
+    )
+    parser.add_argument(
         "--score-direction",
         choices=["higher_is_better", "lower_is_better"],
         default="higher_is_better",
@@ -1852,6 +1861,7 @@ def main() -> None:
             f"transfer_method={args.heuristic_transfer_method}, "
             f"sim_temperature={float(args.heuristic_similarity_temperature)}, "
             f"eta_floor={float(args.heuristic_eta_floor)}, "
+            f"unobserved_operator_score={args.unobserved_operator_score}, "
             f"top_k_pheromone={int(args.top_k_pheromone)}, "
             f"weight_method={args.aco_weight_method}, "
             f"markov_order={int(args.aco_markov_order)}, "
@@ -2161,6 +2171,11 @@ def main() -> None:
                     "heuristic_transfer_method": str(args.heuristic_transfer_method),
                     "heuristic_similarity_temperature": float(args.heuristic_similarity_temperature),
                     "heuristic_eta_floor": float(args.heuristic_eta_floor),
+                    "unobserved_operator_score": (
+                        None
+                        if args.unobserved_operator_score is None
+                        else float(args.unobserved_operator_score)
+                    ),
                     "score_direction": str(args.score_direction),
                     "require_autogluon": bool(args.require_autogluon),
                     "query_dataset_id": dataset_id,
@@ -2265,6 +2280,11 @@ def main() -> None:
             "heuristic_transfer_method": str(args.heuristic_transfer_method),
             "heuristic_similarity_temperature": float(args.heuristic_similarity_temperature),
             "heuristic_eta_floor": float(args.heuristic_eta_floor),
+            "unobserved_operator_score": (
+                None
+                if args.unobserved_operator_score is None
+                else float(args.unobserved_operator_score)
+            ),
             "score_direction": str(args.score_direction),
             "require_autogluon": bool(args.require_autogluon),
             "autogluon_profile": str(args.autogluon_profile),

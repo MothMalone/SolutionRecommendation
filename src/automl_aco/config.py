@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional
 from collections import OrderedDict
 
 # Domain model ordering (from project description)
@@ -225,6 +225,7 @@ class ACOParams:
     heuristic_top_l: int = 3
     heuristic_similarity_temperature: float = 1.0
     heuristic_eta_floor: float = 0.05
+    unobserved_operator_score: Optional[float] = None
     score_direction: str = "higher_is_better"
     time_limit_per_model: int = 120
     local_search: bool = False

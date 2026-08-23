@@ -157,6 +157,35 @@ def test_positive_floor_normalization_is_finite_and_nonzero():
     assert np.allclose(normalized["scaling"], np.ones_like(normalized["scaling"]))
 
 
+def test_unobserved_operator_score_is_preserved_after_normalization():
+    options = {"imputation": ["none", "mean", "median"]}
+    configs = [
+        {"name": "p1", "imputation": "none"},
+        {"name": "p2", "imputation": "mean"},
+    ]
+    candidates = [
+        {"pipeline": "p1", "candidate_weight": 0.5, "relative_pipeline_quality": 1.0},
+        {"pipeline": "p2", "candidate_weight": 0.5, "relative_pipeline_quality": 0.5},
+    ]
+    raw, observed = aggregate_operator_heuristics(
+        candidates,
+        configs,
+        options,
+        unobserved_operator_score=0.7,
+        return_observed_mask=True,
+    )
+    assert np.allclose(raw["imputation"], [1.0, 0.5, 0.7])
+    assert observed["imputation"].tolist() == [True, True, False]
+    normalized = normalize_eta_with_floor(
+        raw,
+        eta_floor=0.05,
+        unobserved_masks=observed,
+        unobserved_eta=0.7,
+    )
+    assert np.isclose(normalized["imputation"][2], 0.7)
+    assert normalized["imputation"][2] > normalized["imputation"][1]
+
+
 def test_compute_aco_heuristic_self_exclusion_changes_neighbor_choice():
     performance_matrix = pd.DataFrame(
         [[0.95, 0.55], [0.20, 0.90], [0.80, 0.10]],

@@ -288,6 +288,7 @@ class MetaPipelineRecommender:
         top_l: int = 3,
         similarity_temperature: float = 1.0,
         eta_floor: float = 0.05,
+        unobserved_operator_score: Optional[float] = None,
         heuristic_transfer_method: str = "weighted_topk_topl",
         score_direction: str = "higher_is_better",
         query_dataset_id: Optional[Any] = None,
@@ -309,6 +310,7 @@ class MetaPipelineRecommender:
             top_l=top_l,
             similarity_temperature=similarity_temperature,
             eta_floor=eta_floor,
+            unobserved_operator_score=unobserved_operator_score,
             heuristic_transfer_method=heuristic_transfer_method,
             score_direction=score_direction,
             query_dataset_id=query_dataset_id,
@@ -370,6 +372,7 @@ class MetaPipelineRecommender:
         exploration_initial_epsilon: float = 0.05,
         exploration_step: float = 0.05,
         exploration_max_epsilon: float = 0.30,
+        unobserved_operator_score: Optional[float] = None,
     ):
         if no_warm_start:
             # RQ2 heuristic-transfer ablation: replace the transferred heuristic with a UNIFORM
@@ -399,6 +402,7 @@ class MetaPipelineRecommender:
                 top_l=max(1, int(heuristic_top_l)),
                 similarity_temperature=float(heuristic_similarity_temperature),
                 eta_floor=float(heuristic_eta_floor),
+                unobserved_operator_score=unobserved_operator_score,
                 heuristic_transfer_method=str(heuristic_transfer_method),
                 score_direction=str(score_direction),
                 query_dataset_id=query_dataset_id,
@@ -583,6 +587,7 @@ class MetaPipelineRecommender:
         heuristic_top_l: int = 3,
         heuristic_similarity_temperature: float = 1.0,
         heuristic_eta_floor: float = 0.05,
+        unobserved_operator_score: Optional[float] = None,
         heuristic_transfer_method: str = "weighted_topk_topl",
         score_direction: str = "higher_is_better",
         query_dataset_id: Optional[Any] = None,
@@ -656,6 +661,7 @@ class MetaPipelineRecommender:
             top_l=max(1, int(heuristic_top_l)),
             similarity_temperature=float(heuristic_similarity_temperature),
             eta_floor=float(heuristic_eta_floor),
+            unobserved_operator_score=unobserved_operator_score,
             heuristic_transfer_method=str(heuristic_transfer_method),
             score_direction=str(score_direction),
             query_dataset_id=query_dataset_id,
@@ -1837,6 +1843,7 @@ class MetaPipelineRecommender:
                         aco_params.get("heuristic_similarity_temperature", 1.0)
                     ),
                     heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                    unobserved_operator_score=aco_params.get("unobserved_operator_score"),
                     heuristic_transfer_method=str(aco_params.get("heuristic_transfer_method", "weighted_topk_topl")),
                     score_direction=str(aco_params.get("score_direction", "higher_is_better")),
                     query_dataset_id=aco_params.get("query_dataset_id"),
@@ -1929,6 +1936,7 @@ class MetaPipelineRecommender:
                                 aco_params.get("heuristic_similarity_temperature", 1.0)
                             ),
                             heuristic_eta_floor=float(aco_params.get("heuristic_eta_floor", 0.05)),
+                            unobserved_operator_score=aco_params.get("unobserved_operator_score"),
                             heuristic_transfer_method=str(
                                 aco_params.get("heuristic_transfer_method", "weighted_topk_topl")
                             ),
