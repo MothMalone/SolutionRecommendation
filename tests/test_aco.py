@@ -248,3 +248,157 @@ def test_aco_early_stop_stops_history_growth():
 
     assert len(history) == 3
     assert [row.get("iteration") for row in history] == [1, 2, 3]
+
+
+def test_canonical_cache_matches_evaluator_enriched_configs():
+    options = {"imputation": ["none"], "scaling": ["none"]}
+    calls = []
+
+    def evaluate(configs):
+        calls.extend(configs)
+        results = []
+        for cfg in configs:
+            enriched = dict(cfg)
+            enriched["name"] = "generated"
+            enriched["step_order"] = list(options)
+            results.append((enriched, 1.0))
+        return results[0][0], 1.0, results, results.copy()
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=10,
+        n_iterations=5,
+        canonical_cache_keys=True,
+        deduplicate_iteration=True,
+        return_history=True,
+    )
+
+    assert len(calls) == 1
+    assert history[-1]["cumulative_evaluation_request_count"] == 1
+    assert history[-1]["cumulative_cached_draw_count"] == 40
+
+
+def test_same_iteration_deduplication_removes_repeated_requests():
+    options = {"imputation": ["none"], "scaling": ["none"]}
+    requested_batch_sizes = []
+
+    def evaluate(configs):
+        requested_batch_sizes.append(len(configs))
+        return _dummy_evaluate_factory(options)(configs)
+
+    search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=10,
+        n_iterations=1,
+        canonical_cache_keys=True,
+        deduplicate_iteration=True,
+    )
+
+    assert requested_batch_sizes == [1]
+
+
+def test_invalid_config_negative_cache_avoids_repeated_evaluation():
+    options = {"imputation": ["invalid"]}
+    requested_batch_sizes = []
+
+    def evaluate(configs):
+        requested_batch_sizes.append(len(configs))
+        return None, float("nan"), [], []
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=5,
+        n_iterations=4,
+        canonical_cache_keys=True,
+        deduplicate_iteration=True,
+        cache_invalid_configs=True,
+        return_history=True,
+    )
+
+    assert requested_batch_sizes == [1]
+    assert history[-1]["invalid_cache_size"] == 1
+    assert history[-1]["cumulative_invalid_cached_draw_count"] == 15
+
+
+def test_tie_aware_rank_reinforcement_gives_equal_weight_to_ties():
+    options = {"imputation": ["a", "b", "c"]}
+
+    def evaluate(configs):
+        results = [(dict(cfg), 0.5) for cfg in configs]
+        return results[0][0], 0.5, results, results.copy()
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=3,
+        n_iterations=1,
+        top_k_pheromone=3,
+        canonical_cache_keys=True,
+        deduplicate_iteration=True,
+        refill_unique_ants=True,
+        tie_aware_rank_weights=True,
+        return_history=True,
+        seed=2,
+    )
+
+    weights = history[0]["reinforcement_weights"]
+    assert len(weights) == 3
+    assert np.allclose(weights, np.repeat(1.0 / 3.0, 3))
+
+
+def test_zero_markov_weight_disables_conditional_pheromone_path():
+    options = {"imputation": ["none", "mean"], "scaling": ["none", "standard"]}
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=_dummy_evaluate_factory(options),
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=2,
+        n_iterations=1,
+        markov_order=2,
+        lambda_smooth=0.0,
+        return_history=True,
+    )
+
+    assert history[0]["conditional_pheromone_enabled"] is False
+
+
+def test_refill_unique_ants_preserves_unique_evaluation_budget():
+    options = {
+        "imputation": ["none", "mean", "median"],
+        "scaling": ["none", "standard", "robust"],
+    }
+    requested_batch_sizes = []
+
+    def evaluate(configs):
+        requested_batch_sizes.append(len(configs))
+        return _dummy_evaluate_factory(options)(configs)
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=5,
+        n_iterations=1,
+        canonical_cache_keys=True,
+        deduplicate_iteration=True,
+        refill_unique_ants=True,
+        return_history=True,
+        seed=4,
+    )
+
+    assert requested_batch_sizes == [5]
+    assert history[0]["evaluation_request_count"] == 5
+    assert history[0]["sampled_distinct_count"] == 5

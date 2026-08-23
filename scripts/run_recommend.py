@@ -302,6 +302,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--aco-search-fixes",
+        action="store_true",
+        help=(
+            "Enable the isolated A/B search-correctness bundle: canonical cache keys, "
+            "same-iteration deduplication, negative caching of invalid configs, and "
+            "tie-aware rank reinforcement. It does not enable Markov pheromones."
+        ),
+    )
+    parser.add_argument("--aco-canonical-cache", action="store_true")
+    parser.add_argument("--aco-deduplicate-iteration", action="store_true")
+    parser.add_argument("--aco-cache-invalid", action="store_true")
+    parser.add_argument("--aco-tie-aware-rank", action="store_true")
+    parser.add_argument(
+        "--aco-refill-unique-ants",
+        action="store_true",
+        help="Keep drawing until n_ants unseen configurations are found or the attempt cap is reached.",
+    )
+    parser.add_argument("--aco-max-sampling-attempt-multiplier", type=int, default=100)
+    parser.add_argument(
         "--openml-backend",
         choices=["auto", "openml", "gitlab"],
         default="auto",
@@ -2049,6 +2068,22 @@ def main() -> None:
                     "weight_method": str(args.aco_weight_method),
                     "markov_order": int(args.aco_markov_order),
                     "lambda_smooth": float(args.aco_lambda_smooth),
+                    "canonical_cache_keys": bool(
+                        args.aco_search_fixes or args.aco_canonical_cache
+                    ),
+                    "deduplicate_iteration": bool(
+                        args.aco_search_fixes or args.aco_deduplicate_iteration
+                    ),
+                    "cache_invalid_configs": bool(
+                        args.aco_search_fixes or args.aco_cache_invalid
+                    ),
+                    "tie_aware_rank_weights": bool(
+                        args.aco_search_fixes or args.aco_tie_aware_rank
+                    ),
+                    "refill_unique_ants": bool(args.aco_refill_unique_ants),
+                    "max_sampling_attempt_multiplier": int(
+                        args.aco_max_sampling_attempt_multiplier
+                    ),
                     "mmas_bounds": bool(args.aco_mmas_bounds),
                     "tau_min": args.aco_tau_min,
                     "tau_max": args.aco_tau_max,
@@ -2198,6 +2233,23 @@ def main() -> None:
             "weight_method": str(args.aco_weight_method),
             "markov_order": int(args.aco_markov_order),
             "lambda_smooth": float(args.aco_lambda_smooth),
+            "aco_search_fixes": bool(args.aco_search_fixes),
+            "canonical_cache_keys": bool(
+                args.aco_search_fixes or args.aco_canonical_cache
+            ),
+            "deduplicate_iteration": bool(
+                args.aco_search_fixes or args.aco_deduplicate_iteration
+            ),
+            "cache_invalid_configs": bool(
+                args.aco_search_fixes or args.aco_cache_invalid
+            ),
+            "tie_aware_rank_weights": bool(
+                args.aco_search_fixes or args.aco_tie_aware_rank
+            ),
+            "refill_unique_ants": bool(args.aco_refill_unique_ants),
+            "max_sampling_attempt_multiplier": int(
+                args.aco_max_sampling_attempt_multiplier
+            ),
             "interaction_prior_strength": float(args.interaction_prior_strength),
             "interaction_prior_floor": float(args.interaction_prior_floor),
             "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),

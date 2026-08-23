@@ -28,6 +28,20 @@ def _cfg_key(cfg: Dict[str, Any]) -> Tuple[Tuple[str, Any], ...]:
     return tuple(sorted((k, _freeze_value(v)) for k, v in cfg.items()))
 
 
+def _semantic_cfg_key(
+    cfg: Mapping[str, Any],
+    option_steps: Sequence[str],
+) -> Tuple[Tuple[str, Any], ...]:
+    """Key only the operator decisions that define an ACO search point.
+
+    Evaluators are allowed to attach metadata such as ``name`` and ``step_order``
+    to a copied config.  Those fields must not turn an already evaluated search
+    point into a cache miss.  Step ordering is fixed for one invocation of this
+    search function, so it is deliberately outside the within-run cache key.
+    """
+    return tuple((step, _freeze_value(cfg.get(step))) for step in option_steps)
+
+
 def compute_sampling_probabilities(
     pheromone: np.ndarray,
     eta_step: np.ndarray,
@@ -171,6 +185,12 @@ def search_pipelines_aco(
     tau_min: Optional[float] = None,
     tau_max: Optional[float] = None,
     tau_min_ratio: float = 0.05,
+    canonical_cache_keys: bool = False,
+    deduplicate_iteration: bool = False,
+    cache_invalid_configs: bool = False,
+    tie_aware_rank_weights: bool = False,
+    refill_unique_ants: bool = False,
+    max_sampling_attempt_multiplier: int = 100,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     if legacy_notebook_aco:
         # Match the old notebook exactly: it seeded and sampled from NumPy's
@@ -185,6 +205,11 @@ def search_pipelines_aco(
         rng = np.random.RandomState(seed)
 
     step_order = list(options.keys())
+
+    def config_key(cfg: Mapping[str, Any]) -> Tuple[Tuple[str, Any], ...]:
+        if canonical_cache_keys:
+            return _semantic_cfg_key(cfg, step_order)
+        return _cfg_key(dict(cfg))
     safe_eta: Dict[str, np.ndarray] = {}
     for step in step_order:
         raw_eta = np.asarray(eta[step], dtype=float)
@@ -247,9 +272,24 @@ def search_pipelines_aco(
 
     candidate_pipelines: List[Tuple[Dict[str, Any], float]] = []
     eval_cache: Dict[Tuple[Tuple[str, Any], ...], Tuple[Dict[str, Any], float]] = {}
+    invalid_cache: set[Tuple[Tuple[str, Any], ...]] = set()
     history: List[Dict[str, Any]] = []
     best_so_far: Optional[float] = None
     no_improve_rounds = 0
+    cumulative_draw_count = 0
+    cumulative_duplicate_draw_count = 0
+    cumulative_cached_draw_count = 0
+    cumulative_invalid_cached_draw_count = 0
+    cumulative_evaluation_request_count = 0
+    conditional_pheromone_enabled = bool(markov_order > 0 and float(lambda_smooth) > 0.0)
+    search_space_size = int(np.prod([len(options[step]) for step in step_order], dtype=np.int64))
+    if cache_invalid_configs and not canonical_cache_keys:
+        raise ValueError("cache_invalid_configs requires canonical_cache_keys=True")
+    if refill_unique_ants and not (canonical_cache_keys and deduplicate_iteration):
+        raise ValueError(
+            "refill_unique_ants requires canonical_cache_keys=True and "
+            "deduplicate_iteration=True"
+        )
 
     def sample_config() -> Dict[str, Any]:
         cfg: Dict[str, Any] = {}
@@ -262,7 +302,7 @@ def search_pipelines_aco(
                 interaction_priors=interaction_priors,
                 interaction_prior_strength=interaction_prior_strength,
             )
-            if len(path_history) >= markov_order:
+            if conditional_pheromone_enabled and len(path_history) >= markov_order:
                 context = tuple(path_history[-markov_order:])
                 k_pher = get_k_pheromone(step, context)
                 if legacy_notebook_aco:
@@ -304,11 +344,44 @@ def search_pipelines_aco(
 
     for iteration in range(n_iterations):
         sampled: List[Dict[str, Any]] = []
-        for _ in range(n_ants):
+        sampled_keys: set[Tuple[Tuple[str, Any], ...]] = set()
+        draw_count = 0
+        duplicate_draw_count = 0
+        cached_draw_count = 0
+        invalid_cached_draw_count = 0
+        target_draws = max(0, int(n_ants))
+        if refill_unique_ants:
+            known_keys = set(eval_cache).union(invalid_cache)
+            target_draws = min(target_draws, max(0, search_space_size - len(known_keys)))
+        max_attempts = target_draws
+        if refill_unique_ants:
+            max_attempts = max(target_draws, target_draws * max(1, int(max_sampling_attempt_multiplier)))
+
+        while draw_count < max_attempts:
+            if refill_unique_ants and len(sampled) >= target_draws:
+                break
+            if not refill_unique_ants and draw_count >= target_draws:
+                break
             cfg = sample_config()
-            key = _cfg_key(cfg)
-            if key not in eval_cache:
-                sampled.append(cfg)
+            draw_count += 1
+            key = config_key(cfg)
+            if key in eval_cache:
+                cached_draw_count += 1
+                continue
+            if cache_invalid_configs and key in invalid_cache:
+                invalid_cached_draw_count += 1
+                continue
+            if deduplicate_iteration and key in sampled_keys:
+                duplicate_draw_count += 1
+                continue
+            sampled.append(cfg)
+            sampled_keys.add(key)
+
+        cumulative_draw_count += draw_count
+        cumulative_duplicate_draw_count += duplicate_draw_count
+        cumulative_cached_draw_count += cached_draw_count
+        cumulative_invalid_cached_draw_count += invalid_cached_draw_count
+        cumulative_evaluation_request_count += len(sampled)
 
         if not sampled:
             carry_best = None
@@ -328,8 +401,21 @@ def search_pipelines_aco(
                     "iteration_mean_score": None,
                     "iteration_min_score": None,
                     "sampled_unique_count": 0,
+                    "sampled_distinct_count": 0,
                     "valid_count": 0,
                     "cache_size": len(eval_cache),
+                    "invalid_cache_size": len(invalid_cache),
+                    "draw_count": int(draw_count),
+                    "duplicate_draw_count": int(duplicate_draw_count),
+                    "cached_draw_count": int(cached_draw_count),
+                    "invalid_cached_draw_count": int(invalid_cached_draw_count),
+                    "evaluation_request_count": 0,
+                    "cumulative_draw_count": int(cumulative_draw_count),
+                    "cumulative_duplicate_draw_count": int(cumulative_duplicate_draw_count),
+                    "cumulative_cached_draw_count": int(cumulative_cached_draw_count),
+                    "cumulative_invalid_cached_draw_count": int(cumulative_invalid_cached_draw_count),
+                    "cumulative_evaluation_request_count": int(cumulative_evaluation_request_count),
+                    "conditional_pheromone_enabled": conditional_pheromone_enabled,
                     "global_improved": bool(improved),
                     "global_improvement": (
                         float(carry_best - previous_best)
@@ -371,6 +457,9 @@ def search_pipelines_aco(
             continue
 
         best_cfg, best_score, eval_results, unsorted_res = evaluate_fn(sampled)
+        valid_keys = {config_key(cfg) for cfg, _score in eval_results}
+        if cache_invalid_configs:
+            invalid_cache.update(key for key in sampled_keys if key not in valid_keys)
         if not eval_results:
             carry_best = None
             if eval_cache:
@@ -384,8 +473,21 @@ def search_pipelines_aco(
                     "iteration_mean_score": None,
                     "iteration_min_score": None,
                     "sampled_unique_count": len(sampled),
+                    "sampled_distinct_count": len(sampled_keys),
                     "valid_count": 0,
                     "cache_size": len(eval_cache),
+                    "invalid_cache_size": len(invalid_cache),
+                    "draw_count": int(draw_count),
+                    "duplicate_draw_count": int(duplicate_draw_count),
+                    "cached_draw_count": int(cached_draw_count),
+                    "invalid_cached_draw_count": int(invalid_cached_draw_count),
+                    "evaluation_request_count": int(len(sampled)),
+                    "cumulative_draw_count": int(cumulative_draw_count),
+                    "cumulative_duplicate_draw_count": int(cumulative_duplicate_draw_count),
+                    "cumulative_cached_draw_count": int(cumulative_cached_draw_count),
+                    "cumulative_invalid_cached_draw_count": int(cumulative_invalid_cached_draw_count),
+                    "cumulative_evaluation_request_count": int(cumulative_evaluation_request_count),
+                    "conditional_pheromone_enabled": conditional_pheromone_enabled,
                     "global_improved": False,
                     "global_improvement": 0.0 if carry_best is not None else None,
                     "no_improve_rounds": int(no_improve_rounds),
@@ -412,7 +514,7 @@ def search_pipelines_aco(
             continue
 
         for cfg, score in eval_results:
-            eval_cache[_cfg_key(cfg)] = (dict(cfg), float(score))
+            eval_cache[config_key(cfg)] = (dict(cfg), float(score))
 
         for step in pheromones:
             pheromones[step] *= (1 - evaporation)
@@ -435,6 +537,17 @@ def search_pipelines_aco(
             n = len(selected)
             rank_weights = np.arange(n, 0, -1)
             weights = rank_weights / rank_weights.sum()
+            if tie_aware_rank_weights and n > 1:
+                selected_scores = np.asarray([float(score) for _cfg, score in selected], dtype=float)
+                start = 0
+                while start < n:
+                    end = start + 1
+                    while end < n and np.isclose(
+                        selected_scores[end], selected_scores[start], atol=EPS, rtol=1e-9
+                    ):
+                        end += 1
+                    weights[start:end] = float(np.mean(weights[start:end]))
+                    start = end
         elif weight_method == "reciprocal":
             n = len(scores)
             weights = 1 / np.arange(1, n + 1)
@@ -453,7 +566,7 @@ def search_pipelines_aco(
             for step in step_order:
                 val_idx = options[step].index(cfg[step])
                 pheromones[step][val_idx] += weight
-                if len(path_context) >= markov_order:
+                if conditional_pheromone_enabled and len(path_context) >= markov_order:
                     context = tuple(path_context[-markov_order:])
                     k_pher = get_k_pheromone(step, context)
                     k_pher[val_idx] += weight
@@ -476,8 +589,26 @@ def search_pipelines_aco(
                 "iteration_mean_score": float(np.mean(iter_scores)) if iter_scores.size else None,
                 "iteration_min_score": float(np.min(iter_scores)) if iter_scores.size else None,
                 "sampled_unique_count": len(sampled),
+                "sampled_distinct_count": len(sampled_keys),
                 "valid_count": len(eval_results),
                 "cache_size": len(eval_cache),
+                "invalid_cache_size": len(invalid_cache),
+                "draw_count": int(draw_count),
+                "duplicate_draw_count": int(duplicate_draw_count),
+                "cached_draw_count": int(cached_draw_count),
+                "invalid_cached_draw_count": int(invalid_cached_draw_count),
+                "evaluation_request_count": int(len(sampled)),
+                "cumulative_draw_count": int(cumulative_draw_count),
+                "cumulative_duplicate_draw_count": int(cumulative_duplicate_draw_count),
+                "cumulative_cached_draw_count": int(cumulative_cached_draw_count),
+                "cumulative_invalid_cached_draw_count": int(cumulative_invalid_cached_draw_count),
+                "cumulative_evaluation_request_count": int(cumulative_evaluation_request_count),
+                "conditional_pheromone_enabled": conditional_pheromone_enabled,
+                "reinforced_count": int(len(selected)),
+                "reinforced_unique_score_count": int(len(np.unique(scores))),
+                "reinforcement_scores": [float(value) for value in scores.tolist()],
+                "reinforcement_weights": [float(value) for value in weights.tolist()],
+                "tie_aware_rank_weights": bool(tie_aware_rank_weights),
                 "global_improved": bool(improved_global),
                 "global_improvement": (
                     float(current_best - previous_best)
@@ -510,12 +641,27 @@ def search_pipelines_aco(
                 )
             break
         if verbose:
+            search_kind = f"k={markov_order}" if conditional_pheromone_enabled else "marginal"
             print(
                 f"ACO Iter {iteration+1}/{n_iterations} — "
-                f"best: {best_score:.4f} | k={markov_order}"
+                f"best: {best_score:.4f} | {search_kind} | "
+                f"draws={draw_count} eval_requests={len(sampled)} cache_hits={cached_draw_count} "
+                f"duplicates={duplicate_draw_count} invalid_hits={invalid_cached_draw_count}"
             )
         else:
-            logger.info("ACO Iter %s/%s - best: %.4f | k=%s", iteration + 1, n_iterations, best_score, markov_order)
+            search_kind = f"k={markov_order}" if conditional_pheromone_enabled else "marginal"
+            logger.info(
+                "ACO Iter %s/%s - best: %.4f | %s | draws=%s eval_requests=%s cache_hits=%s duplicates=%s invalid_hits=%s",
+                iteration + 1,
+                n_iterations,
+                best_score,
+                search_kind,
+                draw_count,
+                len(sampled),
+                cached_draw_count,
+                duplicate_draw_count,
+                invalid_cached_draw_count,
+            )
 
     unsorted_candidate_pipelines = candidate_pipelines.copy()
     candidate_pipelines.sort(key=lambda x: x[1], reverse=True)
@@ -532,7 +678,8 @@ def search_pipelines_aco(
 
     final.sort(key=lambda x: x[1], reverse=True)
     if verbose:
-        print("\n🏆 Top pipelines (k-order Markov ACO):")
+        label = "k-order Markov ACO" if conditional_pheromone_enabled else "marginal ACO"
+        print(f"\n🏆 Top pipelines ({label}):")
         for i, (cfg, sc) in enumerate(final[:n_pipelines]):
             print(f"  {i+1}. {cfg.get('name', 'Pipeline')} — score: {sc:.4f}")
     if return_history:

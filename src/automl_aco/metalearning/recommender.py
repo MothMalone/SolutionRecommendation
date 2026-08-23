@@ -356,6 +356,12 @@ class MetaPipelineRecommender:
         tau_min_ratio: float = 0.05,
         no_warm_start: bool = False,
         global_prior_weight: float = 0.0,
+        canonical_cache_keys: bool = False,
+        deduplicate_iteration: bool = False,
+        cache_invalid_configs: bool = False,
+        tie_aware_rank_weights: bool = False,
+        refill_unique_ants: bool = False,
+        max_sampling_attempt_multiplier: int = 100,
     ):
         if no_warm_start:
             # RQ2 heuristic-transfer ablation: replace the transferred heuristic with a UNIFORM
@@ -486,6 +492,12 @@ class MetaPipelineRecommender:
             tau_min=tau_min,
             tau_max=tau_max,
             tau_min_ratio=float(tau_min_ratio),
+            canonical_cache_keys=bool(canonical_cache_keys),
+            deduplicate_iteration=bool(deduplicate_iteration),
+            cache_invalid_configs=bool(cache_invalid_configs),
+            tie_aware_rank_weights=bool(tie_aware_rank_weights),
+            refill_unique_ants=bool(refill_unique_ants),
+            max_sampling_attempt_multiplier=int(max_sampling_attempt_multiplier),
         )
         if isinstance(result, tuple) and len(result) == 3:
             return result
@@ -1914,6 +1926,14 @@ class MetaPipelineRecommender:
                             early_stop_rounds=int(aco_params.get("early_stop_rounds", 0)),
                             min_improvement=float(aco_params.get("min_improvement", 0.0)),
                             legacy_notebook_aco=bool(aco_params.get("legacy_notebook_aco", False)),
+                            canonical_cache_keys=bool(aco_params.get("canonical_cache_keys", False)),
+                            deduplicate_iteration=bool(aco_params.get("deduplicate_iteration", False)),
+                            cache_invalid_configs=bool(aco_params.get("cache_invalid_configs", False)),
+                            tie_aware_rank_weights=bool(aco_params.get("tie_aware_rank_weights", False)),
+                            refill_unique_ants=bool(aco_params.get("refill_unique_ants", False)),
+                            max_sampling_attempt_multiplier=int(
+                                aco_params.get("max_sampling_attempt_multiplier", 100)
+                            ),
                         )
                     elif optimizer_name == "dqn":
                         aco_results, aco_unsorted_res, aco_history = self._search_pipelines_dqn(
