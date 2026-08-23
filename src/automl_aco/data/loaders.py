@@ -152,6 +152,12 @@ def _load_openml_dataset_direct_api(dataset_id: Any) -> Optional[Tuple[pd.DataFr
 
 GITLAB_OPENML_ROOT = "https://gitlab.com/data/d/openml"
 
+# Dataset 42932 (Avila) has no default target in its OpenML metadata.  Its
+# Parquet table stores the class in column ``10`` and retains two indicators
+# from its original provider split; those indicators must never be features.
+GITLAB_TARGET_OVERRIDES = {42932: "10"}
+GITLAB_IGNORE_COLUMN_OVERRIDES = {42932: {"train", "test"}}
+
 
 def _metadata_attributes(value: Any) -> list[str]:
     if value is None:
@@ -265,7 +271,10 @@ def load_gitlab_openml_dataset(
 
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         description = metadata.get("data_set_description", metadata)
-        targets = _metadata_attributes(description.get("default_target_attribute"))
+        targets = _metadata_attributes(
+            GITLAB_TARGET_OVERRIDES.get(did)
+            or description.get("default_target_attribute")
+        )
         if len(targets) != 1:
             raise ValueError(f"expected one target for dataset {did}, got {targets}")
 
@@ -277,6 +286,7 @@ def load_gitlab_openml_dataset(
         excluded = {target}
         excluded.update(_metadata_attributes(description.get("ignore_attribute")))
         excluded.update(_metadata_attributes(description.get("row_id_attribute")))
+        excluded.update(GITLAB_IGNORE_COLUMN_OVERRIDES.get(did, set()))
         features = [column for column in frame.columns if column not in excluded]
         force_task_type = (
             "regression"

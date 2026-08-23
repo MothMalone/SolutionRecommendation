@@ -62,6 +62,28 @@ def test_gitlab_loader_can_force_known_regression_task(tmp_path):
     assert loaded["y"].dtype.kind in "iufc"
 
 
+def test_gitlab_loader_uses_avila_target_and_drops_original_split_indicators(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "feature": range(12),
+            "10": ["A", "B"] * 6,
+            "train": [1, 0] * 6,
+            "test": [0, 1] * 6,
+        }
+    )
+    _write_cached_dataset(tmp_path, 42932, frame, {"data_set_description": {}})
+
+    loaded = load_gitlab_openml_dataset(
+        42932,
+        cache_dir=str(tmp_path),
+        test_dataset_ids=[42932],
+    )
+
+    assert loaded is not None
+    assert loaded["X"].columns.tolist() == ["feature"]
+    assert loaded["task_type"] == "classification"
+
+
 def test_gitlab_backend_prefers_synthetic_local_csv(tmp_path):
     dataset_id = 100000
     frame = pd.DataFrame(

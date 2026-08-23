@@ -86,6 +86,22 @@ def _classification_labels(values: Any) -> np.ndarray:
     return pd.Series(values).astype(str).to_numpy()
 
 
+def _categorical_feature_columns(frame: pd.DataFrame) -> list[str]:
+    """Return pandas categorical columns whose H2O type must be consistent."""
+    return [
+        str(column)
+        for column in frame.select_dtypes(include=["object", "category", "bool"]).columns
+    ]
+
+
+def _force_h2o_categorical_columns(frames: tuple[Any, ...], columns: list[str]) -> None:
+    """Prevent H2O from inferring different feature types per split."""
+    for frame in frames:
+        for column in columns:
+            if column in frame.names:
+                frame[column] = frame[column].asfactor()
+
+
 def _metric_from_model(model: Any, validation_frame: Any, task_type: str) -> float:
     performance = model.model_performance(validation_frame)
     if task_type == "classification":
@@ -175,6 +191,10 @@ def evaluate_h2o_frames(
     train_frame = h2o.H2OFrame(train_pd)
     val_frame = h2o.H2OFrame(val_pd)
     test_frame = h2o.H2OFrame(test_pd)
+    categorical_predictors = _categorical_feature_columns(train_x)
+    _force_h2o_categorical_columns(
+        (train_frame, val_frame, test_frame), categorical_predictors
+    )
     train_frame["__target__"] = train_frame["__target__"].asnumeric() if task_type == "regression" else train_frame["__target__"].asfactor()
     val_frame["__target__"] = val_frame["__target__"].asnumeric() if task_type == "regression" else val_frame["__target__"].asfactor()
     test_frame["__target__"] = test_frame["__target__"].asnumeric() if task_type == "regression" else test_frame["__target__"].asfactor()

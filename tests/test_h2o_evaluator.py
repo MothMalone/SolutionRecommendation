@@ -41,3 +41,38 @@ def test_h2o_classification_metric_normalizes_numeric_factor_predictions():
     assert actual.dtype.kind in {"U", "O"}
     assert predicted.dtype.kind in {"U", "O"}
     assert accuracy_score(actual, predicted) == 1.0
+
+
+def test_h2o_forces_categorical_predictors_for_every_split():
+    evaluator = _load_evaluator_module()
+    calls = []
+
+    class Column:
+        def __init__(self, frame_name, column_name):
+            self.frame_name = frame_name
+            self.column_name = column_name
+
+        def asfactor(self):
+            calls.append((self.frame_name, self.column_name))
+            return self
+
+    class Frame:
+        def __init__(self, name):
+            self.name = name
+            self.names = ["category", "number"]
+
+        def __getitem__(self, column):
+            return Column(self.name, column)
+
+        def __setitem__(self, column, value):
+            assert column == "category"
+
+    evaluator._force_h2o_categorical_columns(
+        (Frame("train"), Frame("validation"), Frame("test")), ["category"]
+    )
+
+    assert calls == [
+        ("train", "category"),
+        ("validation", "category"),
+        ("test", "category"),
+    ]

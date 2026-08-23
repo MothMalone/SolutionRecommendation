@@ -284,18 +284,31 @@ cells[6] = _code(
         return transformed
 
     def assert_split_alignment(raw_split, diffprep_split):
-        # The target sequence is a compact, deterministic row-order witness.
-        # It catches class filtering/sampling/order differences before H2O runs.
+        # DiffPrep globally label-encodes targets; canonical labels can be
+        # numeric but non-contiguous (for example Abalone ages).  Verify the
+        # row-order witness through a one-to-one raw-label -> DiffPrep-label
+        # mapping instead of comparing arbitrary integer code values.
         for part in ("train", "val", "test"):
             raw_y = np.asarray(raw_split[f"y_{part}"]).reshape(-1)
             diff_y = as_numpy(diffprep_split[f"y_{part}"]).reshape(-1)
-            raw_encoded = LabelEncoder().fit_transform(pd.Series(raw_y).astype(str))
-            diff_encoded = LabelEncoder().fit_transform(pd.Series(diff_y).astype(str))
-            if raw_encoded.shape != diff_encoded.shape or not np.array_equal(raw_encoded, diff_encoded):
+            if raw_y.shape != diff_y.shape:
                 raise RuntimeError(
                     f"DiffPrep split mismatch in {part}: "
                     f"canonical={raw_y.shape}, diffprep={diff_y.shape}"
                 )
+            raw_to_diff, diff_to_raw = {}, {}
+            for raw_label, diff_label in zip(raw_y, diff_y):
+                raw_key, diff_key = str(raw_label), str(diff_label)
+                if (
+                    (raw_key in raw_to_diff and raw_to_diff[raw_key] != diff_key)
+                    or (diff_key in diff_to_raw and diff_to_raw[diff_key] != raw_key)
+                ):
+                    raise RuntimeError(
+                        f"DiffPrep split mismatch in {part}: labels are not "
+                        "a consistent one-to-one encoding of the canonical row order"
+                    )
+                raw_to_diff[raw_key] = diff_key
+                diff_to_raw[diff_key] = raw_key
 
     def build_raw_split(dataset_key, data_info):
         # Create the same deterministic raw 60/20/20 split as the baseline.
