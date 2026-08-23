@@ -1,0 +1,35 @@
+{
+  "similarity": {
+    "cosine": ["--no-train-metric-inline"],
+    "rank_mse": ["--train-metric-inline", "--metric-similarity-target", "rank_cosine", "--metric-loss", "mse"],
+    "rank_pearson": ["--train-metric-inline", "--metric-similarity-target", "rank_cosine", "--metric-loss", "pearson"],
+    "zscore_pearson": ["--train-metric-inline", "--metric-similarity-target", "row_zscore_cosine", "--metric-loss", "pearson"],
+    "rank_listwise": ["--train-metric-inline", "--metric-similarity-target", "rank_cosine", "--metric-loss", "listwise_kl", "--metric-target-temperature", "0.1", "--metric-prediction-temperature", "0.1"]
+  },
+  "search": {
+    "global_control": ["--aco-update-policy", "global_elite", "--aco-exploration-policy", "none"],
+    "iteration_elite": ["--aco-update-policy", "iteration_elite", "--aco-exploration-policy", "none"],
+    "improvement_only": ["--aco-update-policy", "improvement_only", "--aco-exploration-policy", "none"],
+    "improvement_mmas": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-tau-min-ratio", "0.05", "--aco-exploration-policy", "none"],
+    "improvement_mmas_fixed": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-tau-min-ratio", "0.05", "--aco-exploration-policy", "fixed", "--aco-exploration-epsilon", "0.1"],
+    "improvement_mmas_stagnation": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-tau-min-ratio", "0.05", "--aco-exploration-policy", "stagnation", "--aco-exploration-initial-epsilon", "0.05", "--aco-exploration-step", "0.05", "--aco-exploration-max-epsilon", "0.30"],
+    "stagnation_beta05": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--beta", "0.5"],
+    "stagnation_beta10": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--beta", "1.0"],
+    "stagnation_beta20": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--beta", "2.0"],
+    "stagnation_evap10": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--evaporation", "0.1"],
+    "stagnation_evap20": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--evaporation", "0.2"],
+    "stagnation_evap40": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--evaporation", "0.4"],
+    "stagnation_topk1": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--top-k-pheromone", "1"],
+    "stagnation_topk3": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--top-k-pheromone", "3"],
+    "stagnation_topk5": ["--aco-update-policy", "improvement_only", "--aco-mmas-bounds", "--aco-exploration-policy", "stagnation", "--top-k-pheromone", "5"]
+  },
+  "screening": {
+    "aco_seeds": [42, 43, 44],
+    "tpot_seed": 1,
+    "n_ants": 10,
+    "n_iterations": 10,
+    "tpot_minutes": 1,
+    "confirmation_tpot_minutes": 5,
+    "refill_unique_ants": false
+  }
+}

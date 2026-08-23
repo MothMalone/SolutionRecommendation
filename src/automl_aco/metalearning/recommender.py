@@ -203,6 +203,8 @@ class MetaPipelineRecommender:
             metric_objective=kwargs.get("metric_objective", "embedding_cosine"),
             metric_loss=kwargs.get("metric_loss", "mse"),
             weight_decay=kwargs.get("weight_decay", 0.0),
+            target_temperature=kwargs.get("target_temperature", 0.1),
+            prediction_temperature=kwargs.get("prediction_temperature", 0.1),
         )
         self.embedder = model.embedder
         self.projector = model.projector
@@ -362,6 +364,12 @@ class MetaPipelineRecommender:
         tie_aware_rank_weights: bool = False,
         refill_unique_ants: bool = False,
         max_sampling_attempt_multiplier: int = 100,
+        update_policy: str = "global_elite",
+        exploration_policy: str = "none",
+        exploration_epsilon: float = 0.1,
+        exploration_initial_epsilon: float = 0.05,
+        exploration_step: float = 0.05,
+        exploration_max_epsilon: float = 0.30,
     ):
         if no_warm_start:
             # RQ2 heuristic-transfer ablation: replace the transferred heuristic with a UNIFORM
@@ -498,6 +506,12 @@ class MetaPipelineRecommender:
             tie_aware_rank_weights=bool(tie_aware_rank_weights),
             refill_unique_ants=bool(refill_unique_ants),
             max_sampling_attempt_multiplier=int(max_sampling_attempt_multiplier),
+            update_policy=str(update_policy),
+            exploration_policy=str(exploration_policy),
+            exploration_epsilon=float(exploration_epsilon),
+            exploration_initial_epsilon=float(exploration_initial_epsilon),
+            exploration_step=float(exploration_step),
+            exploration_max_epsilon=float(exploration_max_epsilon),
         )
         if isinstance(result, tuple) and len(result) == 3:
             return result
@@ -1933,6 +1947,16 @@ class MetaPipelineRecommender:
                             refill_unique_ants=bool(aco_params.get("refill_unique_ants", False)),
                             max_sampling_attempt_multiplier=int(
                                 aco_params.get("max_sampling_attempt_multiplier", 100)
+                            ),
+                            update_policy=str(aco_params.get("update_policy", "global_elite")),
+                            exploration_policy=str(aco_params.get("exploration_policy", "none")),
+                            exploration_epsilon=float(aco_params.get("exploration_epsilon", 0.1)),
+                            exploration_initial_epsilon=float(
+                                aco_params.get("exploration_initial_epsilon", 0.05)
+                            ),
+                            exploration_step=float(aco_params.get("exploration_step", 0.05)),
+                            exploration_max_epsilon=float(
+                                aco_params.get("exploration_max_epsilon", 0.30)
                             ),
                         )
                     elif optimizer_name == "dqn":

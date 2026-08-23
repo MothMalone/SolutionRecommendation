@@ -37,7 +37,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from automl_aco.data.loaders import load_gitlab_openml_dataset  # noqa: E402
-from automl_aco.data.splits import split_train_val_test  # noqa: E402
+from automl_aco.data.splits import split_fingerprints, split_train_val_test  # noqa: E402
 from automl_aco.eval_ids import EVAL_IDS  # noqa: E402
 from automl_aco.search.evaluation import _fit_pipeline, _make_preprocessor  # noqa: E402
 
@@ -112,9 +112,11 @@ def evaluate_recommendation(
     if task_type not in {"classification", "regression"}:
         raise ValueError(f"Unsupported task_type {task_type!r}")
 
-    X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(
+    split = split_train_val_test(
         X, y, seed=int(split_seed)
     )
+    split_digest = split_fingerprints(split)
+    X_train, y_train, X_val, y_val, X_test, y_test = split
     preprocessor = _make_preprocessor(dict(pipeline_config))
     X_train_processed, y_train_processed = _fit_pipeline(
         preprocessor,
@@ -198,6 +200,7 @@ def evaluate_recommendation(
         "r2": None,
         "rmse": None,
         "split_seed": int(split_seed),
+        "split_fingerprints": split_digest,
         "tpot_seed": int(tpot_seed),
         "train_rows_raw": int(len(X_train)),
         "train_rows_processed": int(train_matrix.shape[0]),

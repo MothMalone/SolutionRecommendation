@@ -2,9 +2,23 @@
 from __future__ import annotations
 
 from typing import Tuple
+import hashlib
 
 import numpy as np
 import pandas as pd
+
+
+def split_fingerprints(split: Tuple) -> dict[str, str]:
+    """Stable content fingerprints for the canonical train/validation/test parts."""
+    names = ("train", "validation", "test")
+    result: dict[str, str] = {}
+    for idx, name in enumerate(names):
+        X_part = pd.DataFrame(split[idx * 2]).copy().reset_index(drop=True)
+        X_part.columns = [str(column) for column in X_part.columns]
+        X_part["__split_target__"] = pd.Series(split[idx * 2 + 1]).reset_index(drop=True).astype(str)
+        values = pd.util.hash_pandas_object(X_part, index=False).to_numpy(dtype=np.uint64)
+        result[name] = hashlib.sha256(values.tobytes()).hexdigest()[:20]
+    return result
 
 
 def split_train_val_test(

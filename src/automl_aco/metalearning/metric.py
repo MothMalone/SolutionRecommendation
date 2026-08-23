@@ -27,7 +27,7 @@ SIMILARITY_TARGET_CHOICES = {
 
 SCORE_DIRECTION_CHOICES = {"higher_is_better", "lower_is_better"}
 METRIC_OBJECTIVE_CHOICES = {"embedding_cosine", "projector_product"}
-METRIC_LOSS_CHOICES = {"mse", "pearson"}
+METRIC_LOSS_CHOICES = {"mse", "pearson", "listwise_kl"}
 
 
 def _require_torch():
@@ -157,6 +157,8 @@ def train_siamese_regression_metric(
     metric_objective: str = "embedding_cosine",
     metric_loss: str = "mse",
     weight_decay: float = 0.0,
+    target_temperature: float = 0.1,
+    prediction_temperature: float = 0.1,
 ) -> MetricModel:
     torch = _require_torch()
     import torch.nn as nn
@@ -167,6 +169,12 @@ def train_siamese_regression_metric(
     loss_kind = str(metric_loss).strip().lower()
     if loss_kind not in METRIC_LOSS_CHOICES:
         raise ValueError(f"Unsupported metric_loss={metric_loss!r}. Expected one of {sorted(METRIC_LOSS_CHOICES)}.")
+    if loss_kind == "listwise_kl" and objective != "embedding_cosine":
+        raise ValueError("listwise_kl requires metric_objective='embedding_cosine'")
+    target_temp = float(target_temperature)
+    prediction_temp = float(prediction_temperature)
+    if target_temp <= 0.0 or prediction_temp <= 0.0:
+        raise ValueError("Listwise temperatures must be positive")
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -199,6 +207,8 @@ def train_siamese_regression_metric(
     )
 
     N, d = mf_scaled.shape
+    if N < 2:
+        raise ValueError("Metric training requires at least two datasets")
     pairs = [(i, j) for i in range(N) for j in range(i + 1, N)]
 
     embedder, projector = build_metric_models(d, hidden_dim, embed_dim)
@@ -224,19 +234,39 @@ def train_siamese_regression_metric(
     X_j = torch.tensor(np.array([mf_scaled[j] for _, j in pairs]), dtype=torch.float32)
     y_pairs = torch.tensor(np.array([S_perf[i, j] for i, j in pairs]), dtype=torch.float32).unsqueeze(1)
 
+    X_all = torch.tensor(mf_scaled, dtype=torch.float32)
+    target_similarity = torch.tensor(S_perf, dtype=torch.float32)
+    diagonal_mask = torch.eye(N, dtype=torch.bool)
+    target_logits = (target_similarity / target_temp).masked_fill(diagonal_mask, float("-inf"))
+    target_distribution = torch.softmax(target_logits, dim=1)
+
     for epoch in range(epochs):
-        emb_i = embedder(X_i)
-        emb_j = embedder(X_j)
-
-        emb_i = emb_i / (emb_i.norm(dim=1, keepdim=True) + 1e-8)
-        emb_j = emb_j / (emb_j.norm(dim=1, keepdim=True) + 1e-8)
-
-        if objective == "embedding_cosine":
-            pred = (emb_i * emb_j).sum(dim=1, keepdim=True)
+        if loss_kind == "listwise_kl":
+            embeddings = embedder(X_all)
+            embeddings = embeddings / (embeddings.norm(dim=1, keepdim=True) + 1e-8)
+            predicted_similarity = embeddings @ embeddings.T
+            predicted_logits = (predicted_similarity / prediction_temp).masked_fill(
+                diagonal_mask, float("-inf")
+            )
+            predicted_log_distribution = torch.log_softmax(predicted_logits, dim=1)
+            valid_pairs = ~diagonal_mask
+            cross_entropy = -(
+                target_distribution[valid_pairs] * predicted_log_distribution[valid_pairs]
+            ).reshape(N, N - 1).sum(dim=1)
+            loss = cross_entropy.mean()
         else:
-            x_pair = emb_i * emb_j
-            pred = projector(x_pair)
-        loss = _pearson_loss(pred, y_pairs) if loss_kind == "pearson" else loss_fn(pred, y_pairs)
+            emb_i = embedder(X_i)
+            emb_j = embedder(X_j)
+
+            emb_i = emb_i / (emb_i.norm(dim=1, keepdim=True) + 1e-8)
+            emb_j = emb_j / (emb_j.norm(dim=1, keepdim=True) + 1e-8)
+
+            if objective == "embedding_cosine":
+                pred = (emb_i * emb_j).sum(dim=1, keepdim=True)
+            else:
+                x_pair = emb_i * emb_j
+                pred = projector(x_pair)
+            loss = _pearson_loss(pred, y_pairs) if loss_kind == "pearson" else loss_fn(pred, y_pairs)
 
         optimizer.zero_grad()
         loss.backward()
@@ -252,6 +282,8 @@ def train_siamese_regression_metric(
         "metric_objective": objective,
         "metric_loss": loss_kind,
         "weight_decay": float(weight_decay),
+        "target_temperature": target_temp,
+        "prediction_temperature": prediction_temp,
     }
     return MetricModel(embedder=embedder, projector=projector, params=params)
 

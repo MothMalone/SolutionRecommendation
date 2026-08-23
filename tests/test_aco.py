@@ -5,6 +5,7 @@ from automl_aco.search.aco import (
     apply_interaction_prior,
     compute_legacy_mixed_sampling_probabilities,
     compute_sampling_probabilities,
+    mix_with_uniform_exploration,
     search_pipelines_aco,
 )
 from automl_aco.search.heuristics import build_pairwise_interaction_priors
@@ -402,3 +403,70 @@ def test_refill_unique_ants_preserves_unique_evaluation_budget():
     assert requested_batch_sizes == [5]
     assert history[0]["evaluation_request_count"] == 5
     assert history[0]["sampled_distinct_count"] == 5
+
+
+def test_uniform_exploration_mixture_is_normalized_and_floored():
+    mixed = mix_with_uniform_exploration(np.array([1.0, 0.0, 0.0]), epsilon=0.3)
+    assert np.isclose(mixed.sum(), 1.0)
+    assert np.allclose(mixed, np.array([0.8, 0.1, 0.1]))
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected_deposits"),
+    [
+        ("global_elite", [1, 1, 1]),
+        ("iteration_elite", [1, 1, 1]),
+        ("improvement_only", [1, 0, 0]),
+    ],
+)
+def test_aco_update_policies_control_reinforcement(policy, expected_deposits):
+    options = {"imputation": [f"v{i}" for i in range(10_000)]}
+
+    def evaluate(configs):
+        results = [(dict(cfg), 1.0) for cfg in configs]
+        return results[0][0], 1.0, results, results.copy()
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=1,
+        n_iterations=3,
+        top_k_pheromone=1,
+        update_policy=policy,
+        return_history=True,
+        seed=8,
+    )
+    assert [row["pheromone_deposit_count"] for row in history] == expected_deposits
+
+
+def test_stagnation_exploration_increases_then_resets_after_improvement():
+    options = {"imputation": [f"v{i}" for i in range(100)]}
+    calls = 0
+
+    def evaluate(configs):
+        nonlocal calls
+        calls += 1
+        score = 2.0 if calls == 3 else 1.0
+        results = [(dict(cfg), score) for cfg in configs]
+        return results[0][0], score, results, results.copy()
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=1,
+        n_iterations=4,
+        exploration_policy="stagnation",
+        exploration_initial_epsilon=0.05,
+        exploration_step=0.05,
+        exploration_max_epsilon=0.30,
+        return_history=True,
+        seed=11,
+    )
+    assert np.allclose(
+        [row["effective_epsilon"] for row in history],
+        [0.05, 0.05, 0.10, 0.05],
+    )

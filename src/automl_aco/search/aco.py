@@ -57,6 +57,22 @@ def compute_sampling_probabilities(
     return probs
 
 
+def mix_with_uniform_exploration(probabilities: np.ndarray, epsilon: float) -> np.ndarray:
+    """Mix a categorical distribution with a uniform exploration policy."""
+    probs = np.asarray(probabilities, dtype=float)
+    eps = float(epsilon)
+    if probs.ndim != 1 or probs.size == 0:
+        raise ValueError("probabilities must be a non-empty one-dimensional array")
+    if not np.isfinite(eps) or not 0.0 <= eps <= 1.0:
+        raise ValueError("epsilon must be finite and within [0, 1]")
+    probs = np.nan_to_num(probs, nan=0.0, posinf=0.0, neginf=0.0)
+    total = float(probs.sum())
+    probs = probs / total if total > 0.0 else np.ones(probs.size, dtype=float) / probs.size
+    uniform = np.ones(probs.size, dtype=float) / probs.size
+    mixed = (1.0 - eps) * probs + eps * uniform
+    return mixed / mixed.sum()
+
+
 def _normalized_entropy(probs: np.ndarray) -> float:
     """Shannon entropy of a selection distribution, normalized to [0,1] by log(n).
 
@@ -191,6 +207,12 @@ def search_pipelines_aco(
     tie_aware_rank_weights: bool = False,
     refill_unique_ants: bool = False,
     max_sampling_attempt_multiplier: int = 100,
+    update_policy: str = "global_elite",
+    exploration_policy: str = "none",
+    exploration_epsilon: float = 0.1,
+    exploration_initial_epsilon: float = 0.05,
+    exploration_step: float = 0.05,
+    exploration_max_epsilon: float = 0.30,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
     if legacy_notebook_aco:
         # Match the old notebook exactly: it seeded and sampled from NumPy's
@@ -243,12 +265,16 @@ def search_pipelines_aco(
 
     def _step_diagnostics() -> Dict[str, Any]:
         ent: Dict[str, float] = {}
+        raw_ent: Dict[str, float] = {}
         pher_min = np.inf
         pher_max = -np.inf
         saturated = 0
         total = 0
         for step in step_order:
             probs = compute_sampling_probabilities(pheromones[step], eta[step], alpha, beta)
+            raw_ent[step] = _normalized_entropy(probs)
+            if effective_epsilon > 0.0:
+                probs = mix_with_uniform_exploration(probs, effective_epsilon)
             ent[step] = _normalized_entropy(probs)
             ph = pheromones[step]
             pher_min = min(pher_min, float(ph.min()))
@@ -258,7 +284,9 @@ def search_pipelines_aco(
                 total += ph.size
         return {
             "step_entropy": ent,
+            "raw_step_entropy": raw_ent,
             "mean_entropy": float(np.mean(list(ent.values()))) if ent else None,
+            "raw_mean_entropy": float(np.mean(list(raw_ent.values()))) if raw_ent else None,
             "pheromone_min": None if not np.isfinite(pher_min) else pher_min,
             "pheromone_max": None if not np.isfinite(pher_max) else pher_max,
             "pheromone_saturation": (saturated / total) if total else None,
@@ -282,6 +310,21 @@ def search_pipelines_aco(
     cumulative_invalid_cached_draw_count = 0
     cumulative_evaluation_request_count = 0
     conditional_pheromone_enabled = bool(markov_order > 0 and float(lambda_smooth) > 0.0)
+    update_policy = str(update_policy).strip().lower()
+    exploration_policy = str(exploration_policy).strip().lower()
+    if update_policy not in {"global_elite", "iteration_elite", "improvement_only"}:
+        raise ValueError(f"Unsupported ACO update_policy={update_policy!r}")
+    if exploration_policy not in {"none", "fixed", "stagnation"}:
+        raise ValueError(f"Unsupported ACO exploration_policy={exploration_policy!r}")
+    for label, value in {
+        "exploration_epsilon": exploration_epsilon,
+        "exploration_initial_epsilon": exploration_initial_epsilon,
+        "exploration_step": exploration_step,
+        "exploration_max_epsilon": exploration_max_epsilon,
+    }.items():
+        if not np.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+            raise ValueError(f"{label} must be finite and within [0, 1]")
+    effective_epsilon = 0.0
     search_space_size = int(np.prod([len(options[step]) for step in step_order], dtype=np.int64))
     if cache_invalid_configs and not canonical_cache_keys:
         raise ValueError("cache_invalid_configs requires canonical_cache_keys=True")
@@ -333,6 +376,8 @@ def search_pipelines_aco(
                 probs = np.ones(len(options[step])) / len(options[step])
             else:
                 probs = probs / probs.sum()
+            if effective_epsilon > 0.0:
+                probs = mix_with_uniform_exploration(probs, effective_epsilon)
 
             if legacy_notebook_aco:
                 idx = np.random.choice(len(options[step]), p=probs)
@@ -343,6 +388,15 @@ def search_pipelines_aco(
         return cfg
 
     for iteration in range(n_iterations):
+        if exploration_policy == "fixed":
+            effective_epsilon = float(exploration_epsilon)
+        elif exploration_policy == "stagnation":
+            effective_epsilon = min(
+                float(exploration_max_epsilon),
+                float(exploration_initial_epsilon) + no_improve_rounds * float(exploration_step),
+            )
+        else:
+            effective_epsilon = 0.0
         sampled: List[Dict[str, Any]] = []
         sampled_keys: set[Tuple[Tuple[str, Any], ...]] = set()
         draw_count = 0
@@ -416,6 +470,10 @@ def search_pipelines_aco(
                     "cumulative_invalid_cached_draw_count": int(cumulative_invalid_cached_draw_count),
                     "cumulative_evaluation_request_count": int(cumulative_evaluation_request_count),
                     "conditional_pheromone_enabled": conditional_pheromone_enabled,
+                    "update_policy": update_policy,
+                    "exploration_policy": exploration_policy,
+                    "effective_epsilon": float(effective_epsilon),
+                    "pheromone_deposit_count": 0,
                     "global_improved": bool(improved),
                     "global_improvement": (
                         float(carry_best - previous_best)
@@ -423,7 +481,9 @@ def search_pipelines_aco(
                         else (0.0 if carry_best is not None else None)
                     ),
                     "no_improve_rounds": int(no_improve_rounds),
+                    "stagnation_count": int(0 if improved else no_improve_rounds + 1),
                     "status": "no_new_unique",
+                    **_step_diagnostics(),
                 }
             )
             logger.info(
@@ -488,10 +548,16 @@ def search_pipelines_aco(
                     "cumulative_invalid_cached_draw_count": int(cumulative_invalid_cached_draw_count),
                     "cumulative_evaluation_request_count": int(cumulative_evaluation_request_count),
                     "conditional_pheromone_enabled": conditional_pheromone_enabled,
+                    "update_policy": update_policy,
+                    "exploration_policy": exploration_policy,
+                    "effective_epsilon": float(effective_epsilon),
+                    "pheromone_deposit_count": 0,
                     "global_improved": False,
                     "global_improvement": 0.0 if carry_best is not None else None,
                     "no_improve_rounds": int(no_improve_rounds),
+                    "stagnation_count": int(no_improve_rounds + 1),
                     "status": "no_valid_evaluation",
+                    **_step_diagnostics(),
                 }
             )
             logger.info("ACO Iter %s/%s - No valid evaluation", iteration + 1, n_iterations)
@@ -523,11 +589,28 @@ def search_pipelines_aco(
 
         cached_results = [(cfg, sc) for cfg, sc in eval_cache.values()]
         cached_results.sort(key=lambda x: x[1], reverse=True)
+        iteration_results = [(dict(cfg), float(sc)) for cfg, sc in eval_results]
+        iteration_results.sort(key=lambda x: x[1], reverse=True)
+        current_best = float(cached_results[0][1])
+        previous_best = best_so_far
+        improved_global = previous_best is None or current_best > (previous_best + float(min_improvement))
 
-        selected = cached_results if use_all_iter_pipelines else cached_results[: min(top_k_pheromone, len(cached_results))]
+        if update_policy == "iteration_elite":
+            reinforcement_pool = iteration_results
+        elif update_policy == "improvement_only":
+            reinforcement_pool = iteration_results if improved_global else []
+        else:
+            reinforcement_pool = cached_results
+        selected = (
+            reinforcement_pool
+            if use_all_iter_pipelines
+            else reinforcement_pool[: min(top_k_pheromone, len(reinforcement_pool))]
+        )
         scores = np.array([sc for _, sc in selected])
 
-        if weight_method == "linear" and len(scores) > 1:
+        if len(scores) == 0:
+            weights = np.asarray([], dtype=float)
+        elif weight_method == "linear" and len(scores) > 1:
             weights = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8) + 1e-3
         elif weight_method == "exponential" and len(scores) > 1:
             scaled = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
@@ -576,9 +659,6 @@ def search_pipelines_aco(
         _clip_pheromones()
 
         candidate_pipelines.extend(unsorted_res)
-        current_best = float(max(sc for _cfg, sc in eval_cache.values()))
-        previous_best = best_so_far
-        improved_global = previous_best is None or current_best > (previous_best + float(min_improvement))
         iter_scores = np.asarray([float(sc) for _cfg, sc in eval_results], dtype=float)
         history.append(
             {
@@ -604,6 +684,10 @@ def search_pipelines_aco(
                 "cumulative_invalid_cached_draw_count": int(cumulative_invalid_cached_draw_count),
                 "cumulative_evaluation_request_count": int(cumulative_evaluation_request_count),
                 "conditional_pheromone_enabled": conditional_pheromone_enabled,
+                "update_policy": update_policy,
+                "exploration_policy": exploration_policy,
+                "effective_epsilon": float(effective_epsilon),
+                "pheromone_deposit_count": int(len(selected)),
                 "reinforced_count": int(len(selected)),
                 "reinforced_unique_score_count": int(len(np.unique(scores))),
                 "reinforcement_scores": [float(value) for value in scores.tolist()],
@@ -616,6 +700,7 @@ def search_pipelines_aco(
                     else 0.0
                 ),
                 "no_improve_rounds": int(no_improve_rounds),
+                "stagnation_count": int(0 if improved_global else no_improve_rounds + 1),
                 "status": "ok",
                 **_step_diagnostics(),
             }
@@ -646,12 +731,13 @@ def search_pipelines_aco(
                 f"ACO Iter {iteration+1}/{n_iterations} — "
                 f"best: {best_score:.4f} | {search_kind} | "
                 f"draws={draw_count} eval_requests={len(sampled)} cache_hits={cached_draw_count} "
-                f"duplicates={duplicate_draw_count} invalid_hits={invalid_cached_draw_count}"
+                f"duplicates={duplicate_draw_count} invalid_hits={invalid_cached_draw_count} "
+                f"update={update_policy} deposits={len(selected)} epsilon={effective_epsilon:.3f}"
             )
         else:
             search_kind = f"k={markov_order}" if conditional_pheromone_enabled else "marginal"
             logger.info(
-                "ACO Iter %s/%s - best: %.4f | %s | draws=%s eval_requests=%s cache_hits=%s duplicates=%s invalid_hits=%s",
+                "ACO Iter %s/%s - best: %.4f | %s | draws=%s eval_requests=%s cache_hits=%s duplicates=%s invalid_hits=%s update=%s deposits=%s epsilon=%.3f",
                 iteration + 1,
                 n_iterations,
                 best_score,
@@ -661,6 +747,9 @@ def search_pipelines_aco(
                 cached_draw_count,
                 duplicate_draw_count,
                 invalid_cached_draw_count,
+                update_policy,
+                len(selected),
+                effective_epsilon,
             )
 
     unsorted_candidate_pipelines = candidate_pipelines.copy()

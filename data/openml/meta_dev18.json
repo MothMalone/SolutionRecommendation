@@ -1,0 +1,20 @@
+{
+  "name": "acorec_meta_dev18_v1",
+  "seed": 42,
+  "selection": "Two datasets from each 3x3 NumberOfInstances x NumberOfFeatures bin",
+  "filters": {
+    "classification_only": true,
+    "min_instances": 100,
+    "max_instances": 100000,
+    "excluded_suites": ["paper_test30", "autodp60"]
+  },
+  "dataset_ids": [
+    965, 994, 1446, 922, 851, 1514,
+    914, 679, 22, 40497, 1116, 4134,
+    823, 843, 41169, 41168, 554, 1111
+  ],
+  "bins": {
+    "sample": ["100-999", "1000-9999", "10000-100000"],
+    "feature": ["2-19", "20-99", "100+"]
+  }
+}

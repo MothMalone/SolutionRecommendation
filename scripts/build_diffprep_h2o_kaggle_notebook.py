@@ -391,8 +391,13 @@ cells[7] = _code(
     SHARD_DATASETS = [DATASETS[int(i)] for i in positions[DATASET_SHARD_INDEX]]
     RUN_DATASETS = SHARD_DATASETS[:1] if RUN_MODE == "smoke" else SHARD_DATASETS
     for position, spec in enumerate(RUN_DATASETS, start=1):
-        dataset_key = spec.get("dataset_key", str(spec["dataset_id"]))
+        setting = "diffprep"
+        if (str(spec["dataset_id"]), setting) in completed:
+            print(f"SKIP successful: {spec['name']} / {setting}")
+            continue
+        print(f"[{position}/{len(RUN_DATASETS)}] {spec['name']} / {setting}")
         try:
+            dataset_key = spec.get("dataset_key", str(spec["dataset_id"]))
             dataset_key, data_info = materialize_for_diffprep(spec)
             subprocess.run([sys.executable, "main.py", "--dataset", dataset_key, "--method", METHOD, "--model", "log", "--split_seed", str(SPLIT_SEED), "--train_seed", str(TRAIN_SEED)], cwd=REPO_DIR, check=True)
             subprocess.run([sys.executable, "extract_and_save_pipeline.py", "--dataset", dataset_key, "--method", METHOD, "--split_seed", str(SPLIT_SEED)], cwd=REPO_DIR, check=True)
@@ -401,20 +406,14 @@ cells[7] = _code(
             transformed = transform_with_diffprep(pipeline, split)
             raw_split = build_raw_split(dataset_key, data_info)
             assert_split_alignment(raw_split, split)
-        setting = "diffprep"
-        if (str(spec["dataset_id"]), setting) in completed:
-            print(f"SKIP successful: {spec['name']} / {setting}")
-            continue
-        print(f"[{position}/{len(RUN_DATASETS)}] {spec['name']} / {setting}")
-        row = evaluate_setting(
-            setting, spec, dataset_key, split, data_info, transformed, metadata
-        )
-        upsert(rows, row)
-        print(f"H2O outer-test accuracy (DiffPrep): {row['accuracy']:.6f}")
-    except Exception as error:
-        traceback.print_exc()
-        if (str(spec["dataset_id"]), "diffprep") not in completed:
-            upsert(rows, {"dataset_id": int(spec["dataset_id"]), "dataset": spec["name"], "setting": "diffprep", "status": "failed", "error_type": type(error).__name__, "error": str(error)[:4000]})
+            row = evaluate_setting(
+                setting, spec, dataset_key, split, data_info, transformed, metadata
+            )
+            upsert(rows, row)
+            print(f"H2O outer-test accuracy (DiffPrep): {row['accuracy']:.6f}")
+        except Exception as error:
+            traceback.print_exc()
+            upsert(rows, {"dataset_id": int(spec["dataset_id"]), "dataset": spec["name"], "setting": setting, "status": "failed", "error_type": type(error).__name__, "error": str(error)[:4000]})
         finally:
             gc.collect()
     print("Saved:", RESULT_PATH)

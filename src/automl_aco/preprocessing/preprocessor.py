@@ -68,6 +68,18 @@ class Preprocessor:
             return default
         return str(spec)
 
+    @staticmethod
+    def _categorical_frame(X: pd.DataFrame, columns: List[str]) -> Optional[pd.DataFrame]:
+        if not columns:
+            return None
+        frame = X[columns].copy()
+        # sklearn SimpleImputer rejects boolean arrays for categorical strategies in recent
+        # releases. Object conversion preserves True/False as categories and is applied
+        # identically during fit and transform.
+        for column in frame.select_dtypes(include=["bool", "boolean"]).columns:
+            frame[column] = frame[column].astype(object)
+        return frame
+
     def fit_transform(self, X: pd.DataFrame, y: Optional[pd.Series] = None):
         if y is not None and len(X) != len(y):
             raise ValueError("X and y must have the same length")
@@ -79,7 +91,7 @@ class Preprocessor:
         self.cat_cols = X.select_dtypes(exclude=["number"]).columns.tolist()
 
         X_num = X[self.num_cols].copy() if self.num_cols else None
-        X_cat = X[self.cat_cols].copy() if self.cat_cols else None
+        X_cat = self._categorical_frame(X, self.cat_cols)
 
         for step in self.step_order:
             if step == "imputation":
@@ -125,7 +137,7 @@ class Preprocessor:
         X.columns = X.columns.astype(str)
 
         X_num = X[self.num_cols].copy() if self.num_cols else None
-        X_cat = X[self.cat_cols].copy() if self.cat_cols else None
+        X_cat = self._categorical_frame(X, self.cat_cols)
 
         for step in self.step_order:
             if step == "imputation":

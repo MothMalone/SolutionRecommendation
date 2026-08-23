@@ -16,7 +16,7 @@ This module is the single source of truth for those IDs plus two helpers:
 
 Leakage policy (decided with the user): a single shared, frozen Siamese is trained once. To
 keep that shared model genuinely leak-free without per-fold retraining, the reference used for
-training / normalization / neighbor retrieval excludes ALL 24 eval IDs. At inference the current
+training / normalization / neighbor retrieval excludes ALL 30 eval IDs. At inference the current
 query is additionally excluded via ``query_dataset_id`` (defense in depth).
 """
 from __future__ import annotations
@@ -192,3 +192,28 @@ def holdout_reference(
             f"({report['meta_rows_before']}->{report['meta_rows_after']})."
         )
     return perf_clean, meta_clean, report
+
+
+def holdout_ids(
+    performance_matrix: pd.DataFrame,
+    metafeatures_df: pd.DataFrame,
+    dataset_ids: Iterable[Any],
+) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Remove arbitrary query IDs from both reference views for LOO meta-validation."""
+    held_out = {normalize_id(value) for value in dataset_ids}
+    held_out.discard("")
+    perf_drop = [column for column in performance_matrix.columns if normalize_id(column) in held_out]
+    meta_drop = [index for index in metafeatures_df.index if normalize_id(index) in held_out]
+    perf_clean = performance_matrix.drop(columns=perf_drop, errors="ignore").copy()
+    meta_clean = metafeatures_df.drop(index=meta_drop, errors="ignore").copy()
+    remaining = {
+        normalize_id(value) for value in list(perf_clean.columns) + list(meta_clean.index)
+    }
+    leaked = sorted(held_out & remaining)
+    if leaked:
+        raise AssertionError(f"LOO reference holdout failed for IDs: {leaked}")
+    return perf_clean, meta_clean, {
+        "held_out_ids": sorted(held_out),
+        "perf_columns_removed": len(perf_drop),
+        "metafeature_rows_removed": len(meta_drop),
+    }

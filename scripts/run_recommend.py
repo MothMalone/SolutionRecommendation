@@ -44,7 +44,7 @@ from automl_aco.data.loaders import (
 )
 from automl_aco.data.splits import split_train_val_test
 from automl_aco.data.metafeatures import extract_enhanced_metafeatures
-from automl_aco.eval_ids import EVAL_IDS, holdout_reference
+from automl_aco.eval_ids import EVAL_IDS, holdout_ids, holdout_reference, normalize_id
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
 from automl_aco.preprocessing.autodp import (
     AUTODP_60_IDS,
@@ -320,6 +320,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Keep drawing until n_ants unseen configurations are found or the attempt cap is reached.",
     )
     parser.add_argument("--aco-max-sampling-attempt-multiplier", type=int, default=100)
+    parser.add_argument(
+        "--aco-update-policy",
+        choices=["global_elite", "iteration_elite", "improvement_only"],
+        default="global_elite",
+    )
+    parser.add_argument(
+        "--aco-exploration-policy",
+        choices=["none", "fixed", "stagnation"],
+        default="none",
+    )
+    parser.add_argument("--aco-exploration-epsilon", type=float, default=0.1)
+    parser.add_argument("--aco-exploration-initial-epsilon", type=float, default=0.05)
+    parser.add_argument("--aco-exploration-step", type=float, default=0.05)
+    parser.add_argument("--aco-exploration-max-epsilon", type=float, default=0.30)
     parser.add_argument(
         "--openml-backend",
         choices=["auto", "openml", "gitlab"],
@@ -678,7 +692,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric-lr", type=float, default=1e-3)
     parser.add_argument(
         "--metric-loss",
-        choices=["mse", "pearson"],
+        choices=["mse", "pearson", "listwise_kl"],
         default="mse",
         help=(
             "Siamese training loss. 'pearson' (1 - batch correlation) is collapse-resistant and "
@@ -687,6 +701,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--metric-weight-decay", type=float, default=0.0, help="Adam weight decay for the Siamese metric")
+    parser.add_argument("--metric-target-temperature", type=float, default=0.1)
+    parser.add_argument("--metric-prediction-temperature", type=float, default=0.1)
     parser.add_argument(
         "--metric-objective",
         choices=["embedding_cosine", "projector_product"],
@@ -859,6 +875,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "DANGER: do NOT remove the 24 evaluation IDs from the reference set before "
             "training/normalizing/neighbor retrieval. Reproduces the old leaky behavior for "
             "comparison only. Any number produced this way is contaminated and not reportable."
+        ),
+    )
+    parser.add_argument(
+        "--reference-holdout-ids",
+        nargs="*",
+        default=[],
+        help=(
+            "Additional dataset IDs removed from metric training and retrieval for "
+            "leave-one-dataset-out meta-validation."
         ),
     )
     return parser
@@ -1377,14 +1402,14 @@ def main() -> None:
         dataset_ids = [d for idx, d in enumerate(ordered) if idx % shard_n == (shard_i - 1)]
         print(f"[shard {shard_i}/{shard_n}] this session runs {len(dataset_ids)} datasets: {dataset_ids}")
 
-    # Leakage prevention: hold the 24 evaluation IDs out of the reference used to TRAIN /
+    # Leakage prevention: hold the 30 evaluation IDs out of the reference used to TRAIN /
     # NORMALIZE / RETRIEVE. `meta` (full table) is retained for target-row metafeature lookup,
     # since a new dataset's metafeatures are read from the same precomputed file. The current
     # query is additionally excluded at inference via aco_params["query_dataset_id"].
     holdout_report = None
     if args.disable_leakage_holdout:
         print(
-            "\n*** WARNING: --disable-leakage-holdout set. The 24 eval IDs remain in the "
+            "\n*** WARNING: --disable-leakage-holdout set. The 30 eval IDs remain in the "
             "reference set; results are CONTAMINATED and must not be reported. ***\n"
         )
         perf_ref, meta_ref = perf, meta
@@ -1395,6 +1420,18 @@ def main() -> None:
                 f"[leakage-holdout] reference now disjoint from {len(EVAL_IDS)} eval IDs: "
                 f"perf {holdout_report['perf_cols_before']}->{holdout_report['perf_cols_after']} cols, "
                 f"meta {holdout_report['meta_rows_before']}->{holdout_report['meta_rows_after']} rows."
+            )
+
+    extra_holdouts = {normalize_id(value) for value in args.reference_holdout_ids}
+    if extra_holdouts:
+        perf_ref, meta_ref, extra_holdout_report = holdout_ids(
+            perf_ref, meta_ref, extra_holdouts
+        )
+        if args.verbose:
+            print(
+                f"[meta-validation-holdout] removed IDs={sorted(extra_holdouts)} "
+                f"(perf_cols={extra_holdout_report['perf_columns_removed']}, "
+                f"meta_rows={extra_holdout_report['metafeature_rows_removed']})"
             )
 
     if is_autodp36:
@@ -1446,6 +1483,8 @@ def main() -> None:
             metric_objective=str(args.metric_objective),
             metric_loss=str(args.metric_loss),
             weight_decay=float(args.metric_weight_decay),
+            target_temperature=float(args.metric_target_temperature),
+            prediction_temperature=float(args.metric_prediction_temperature),
         )
         if args.save_trained_metric:
             saved_metric_path = recommender.save_metric(args.save_trained_metric)
@@ -2084,6 +2123,12 @@ def main() -> None:
                     "max_sampling_attempt_multiplier": int(
                         args.aco_max_sampling_attempt_multiplier
                     ),
+                    "update_policy": str(args.aco_update_policy),
+                    "exploration_policy": str(args.aco_exploration_policy),
+                    "exploration_epsilon": float(args.aco_exploration_epsilon),
+                    "exploration_initial_epsilon": float(args.aco_exploration_initial_epsilon),
+                    "exploration_step": float(args.aco_exploration_step),
+                    "exploration_max_epsilon": float(args.aco_exploration_max_epsilon),
                     "mmas_bounds": bool(args.aco_mmas_bounds),
                     "tau_min": args.aco_tau_min,
                     "tau_max": args.aco_tau_max,
@@ -2250,6 +2295,12 @@ def main() -> None:
             "max_sampling_attempt_multiplier": int(
                 args.aco_max_sampling_attempt_multiplier
             ),
+            "update_policy": str(args.aco_update_policy),
+            "exploration_policy": str(args.aco_exploration_policy),
+            "exploration_epsilon": float(args.aco_exploration_epsilon),
+            "exploration_initial_epsilon": float(args.aco_exploration_initial_epsilon),
+            "exploration_step": float(args.aco_exploration_step),
+            "exploration_max_epsilon": float(args.aco_exploration_max_epsilon),
             "interaction_prior_strength": float(args.interaction_prior_strength),
             "interaction_prior_floor": float(args.interaction_prior_floor),
             "protect_retrieval_incumbent": bool(args.protect_retrieval_incumbent),
@@ -2285,6 +2336,9 @@ def main() -> None:
             "metric_lr": float(args.metric_lr),
             "metric_objective": str(args.metric_objective),
             "metric_similarity_target": str(args.metric_similarity_target),
+            "metric_target_temperature": float(args.metric_target_temperature),
+            "metric_prediction_temperature": float(args.metric_prediction_temperature),
+            "reference_holdout_ids": sorted(extra_holdouts),
             "save_trained_metric": str(args.save_trained_metric) if args.save_trained_metric else None,
             "skip_aco_plot": bool(args.skip_aco_plot),
         }

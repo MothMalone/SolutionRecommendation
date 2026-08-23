@@ -2,7 +2,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from automl_aco.metalearning.metric import build_similarity_target_matrix
+from automl_aco.metalearning.metric import (
+    build_similarity_target_matrix,
+    train_siamese_regression_metric,
+)
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
 
 
@@ -94,3 +97,37 @@ def test_recommender_trains_metric_on_preprocessed_metafeatures():
     assert model.params["metafeature_preprocessing"] == "preprocessed_input"
     assert model.params["metric_objective"] == "embedding_cosine"
     assert recommender.metric_params["metafeature_preprocessing"] == "preprocessed_input"
+
+
+def test_listwise_kl_metric_trains_with_finite_embeddings():
+    torch = pytest.importorskip("torch")
+    meta = pd.DataFrame(
+        [[0.0, 0.0], [0.1, 0.0], [1.0, 1.0], [0.9, 1.0]],
+        index=["a", "b", "c", "d"],
+        columns=["m1", "m2"],
+    )
+    perf = pd.DataFrame(
+        {
+            "a": [0.9, 0.8, 0.1],
+            "b": [0.88, 0.79, 0.12],
+            "c": [0.1, 0.2, 0.9],
+            "d": [0.12, 0.18, 0.88],
+        },
+        index=["p1", "p2", "p3"],
+    )
+    model = train_siamese_regression_metric(
+        metafeatures_df=meta,
+        performance_matrix_imputed=perf,
+        hidden_dim=8,
+        embed_dim=4,
+        epochs=10,
+        seed=4,
+        metric_loss="listwise_kl",
+        metric_objective="embedding_cosine",
+    )
+    with torch.no_grad():
+        embeddings = model.embedder(torch.tensor(meta.to_numpy(), dtype=torch.float32))
+    assert torch.isfinite(embeddings).all()
+    assert all(torch.isfinite(parameter).all() for parameter in model.embedder.parameters())
+    assert model.params["metric_loss"] == "listwise_kl"
+    assert model.params["target_temperature"] == pytest.approx(0.1)
