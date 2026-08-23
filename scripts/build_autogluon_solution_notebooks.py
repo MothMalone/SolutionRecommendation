@@ -204,10 +204,15 @@ from automl_aco.eval_ids import EVAL_IDS
         print(f"[{position}/{len(RUN_DATASETS)}] {spec['name']} / diffprep")
         try:
             dataset_key = spec.get("dataset_key", str(spec["dataset_id"]))
-            dataset_key, _ = materialize_for_diffprep(spec)
-            subprocess.run([sys.executable, "main.py", "--dataset", dataset_key, "--method", METHOD, "--model", "log", "--split_seed", str(SPLIT_SEED), "--train_seed", str(TRAIN_SEED)], cwd=REPO_DIR, check=True)
-            subprocess.run([sys.executable, "extract_and_save_pipeline.py", "--dataset", dataset_key, "--method", METHOD, "--split_seed", str(SPLIT_SEED)], cwd=REPO_DIR, check=True)
-            subprocess.run([sys.executable, "extract_pipeline_config.py", "--dataset", dataset_key, "--method", METHOD], cwd=REPO_DIR, check=True)
+            saved_dir = REPO_DIR / "saved_pipelines" / METHOD / dataset_key
+            required_artifacts = (saved_dir / "pipeline.pkl", saved_dir / "data_splits.pkl")
+            if all(path.exists() for path in required_artifacts):
+                print("REUSE saved DiffPrep pipeline:", saved_dir)
+            else:
+                dataset_key, _ = materialize_for_diffprep(spec)
+                subprocess.run([sys.executable, "main.py", "--dataset", dataset_key, "--method", METHOD, "--model", "log", "--split_seed", str(SPLIT_SEED), "--train_seed", str(TRAIN_SEED)], cwd=REPO_DIR, check=True)
+                subprocess.run([sys.executable, "extract_and_save_pipeline.py", "--dataset", dataset_key, "--method", METHOD, "--split_seed", str(SPLIT_SEED)], cwd=REPO_DIR, check=True)
+                subprocess.run([sys.executable, "extract_pipeline_config.py", "--dataset", dataset_key, "--method", METHOD], cwd=REPO_DIR, check=True)
             command = [sys.executable, str(SOLUTION_DIR / "scripts/evaluate_diffprep_autogluon.py"), "--repo-dir", str(REPO_DIR), "--dataset-key", dataset_key, "--dataset-id", str(spec["dataset_id"]), "--dataset-name", spec["name"], "--method", METHOD, "--output-json", str(output_json), "--split-seed", str(SPLIT_SEED), "--train-seed", str(TRAIN_SEED), "--time-limit", str(AG_TIME_LIMIT), "--presets", AG_PRESETS]
             process = subprocess.run(command, cwd=SOLUTION_DIR, check=False)
             row = json.loads(output_json.read_text(encoding="utf-8")) if output_json.exists() else {"status": "failed", "error": f"exit code {process.returncode}"}
