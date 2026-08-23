@@ -1,4 +1,4 @@
-"""Build Kaggle notebook for No-preprocessing and DiffPrep + H2O."""
+"""Build Kaggle notebook for DiffPrep + H2O."""
 from __future__ import annotations
 
 import json
@@ -26,14 +26,14 @@ notebook = json.loads(TEMPLATE.read_text(encoding="utf-8"))
 cells = notebook["cells"]
 cells[0] = _markdown(
     """
-    # No preprocessing and DiffPrep + H2O AutoML
+    # DiffPrep + H2O AutoML
 
-    This notebook evaluates two settings on the exact 30-dataset ACORec test
-    suite. The first sends the raw split directly to H2O. The second runs the
-    original DiffPrep pipeline and sends its transformed data to H2O.
+    This notebook runs the original DiffPrep pipeline on the exact 30-dataset
+    ACORec test suite, then sends its transformed data to H2O. The separate
+    H2O-baselines notebook owns No Preprocessing and H2O Default results.
 
-    H2O target encoding is disabled in both settings. H2O still performs its
-    native categorical and missing-value handling inside individual models.
+    H2O target encoding is disabled. H2O still performs its native categorical
+    and missing-value handling inside individual models.
     The model is selected on validation and scored once on the outer test.
     Run five Save-Version jobs with `DATASET_SHARD_INDEX=0..4`.
     """
@@ -355,7 +355,7 @@ cells[6] = _code(
         result.update({
             "dataset_id": int(spec["dataset_id"]), "dataset": spec["name"],
             "dataset_key": dataset_key, "setting": setting,
-            "method": setting if setting == "no_preprocessing" else METHOD,
+            "method": METHOD,
             "source": data_info.get("source", "diffprep_fork_snapshot"),
             "original_rows": data_info.get("original_rows"),
             "used_rows": int(len(y_train) + len(y_val) + len(y_test)),
@@ -375,7 +375,8 @@ cells[6] = _code(
 )
 cells[7] = _code(
     """
-    RESULT_PATH = OUTPUT_DIR / f"h2o_no_preprocessing_diffprep_shard_{DATASET_SHARD_INDEX:02d}_of_{NUM_DATASET_SHARDS:02d}.csv"
+    # A dedicated output avoids mixing this method's rows with the baseline.
+    RESULT_PATH = OUTPUT_DIR / f"diffprep_h2o_shard_{DATASET_SHARD_INDEX:02d}_of_{NUM_DATASET_SHARDS:02d}.csv"
     def read_rows():
         return pd.read_csv(RESULT_PATH).to_dict("records") if RESULT_PATH.exists() else []
     def upsert(rows, row):
@@ -400,19 +401,20 @@ cells[7] = _code(
             transformed = transform_with_diffprep(pipeline, split)
             raw_split = build_raw_split(dataset_key, data_info)
             assert_split_alignment(raw_split, split)
-            for setting, current_split, data in (("no_preprocessing", raw_split, None), ("diffprep", split, transformed)):
-                if (str(spec["dataset_id"]), setting) in completed:
-                    print(f"SKIP successful: {spec['name']} / {setting}")
-                    continue
-                print(f"[{position}/{len(RUN_DATASETS)}] {spec['name']} / {setting}")
-                row = evaluate_setting(setting, spec, dataset_key, current_split, data_info, data, metadata if setting == "diffprep" else None)
-                upsert(rows, row)
-                print(f"H2O test accuracy: {row['accuracy']:.6f}")
-        except Exception as error:
-            traceback.print_exc()
-            for setting in ("no_preprocessing", "diffprep"):
-                if (str(spec["dataset_id"]), setting) not in completed:
-                    upsert(rows, {"dataset_id": int(spec["dataset_id"]), "dataset": spec["name"], "setting": setting, "status": "failed", "error_type": type(error).__name__, "error": str(error)[:4000]})
+        setting = "diffprep"
+        if (str(spec["dataset_id"]), setting) in completed:
+            print(f"SKIP successful: {spec['name']} / {setting}")
+            continue
+        print(f"[{position}/{len(RUN_DATASETS)}] {spec['name']} / {setting}")
+        row = evaluate_setting(
+            setting, spec, dataset_key, split, data_info, transformed, metadata
+        )
+        upsert(rows, row)
+        print(f"H2O outer-test accuracy (DiffPrep): {row['accuracy']:.6f}")
+    except Exception as error:
+        traceback.print_exc()
+        if (str(spec["dataset_id"]), "diffprep") not in completed:
+            upsert(rows, {"dataset_id": int(spec["dataset_id"]), "dataset": spec["name"], "setting": "diffprep", "status": "failed", "error_type": type(error).__name__, "error": str(error)[:4000]})
         finally:
             gc.collect()
     print("Saved:", RESULT_PATH)
@@ -423,9 +425,8 @@ cells[8] = _markdown(
     """
     ## Outputs
 
-    Download `h2o_no_preprocessing_diffprep_shard_XX_of_05.csv` from the Kaggle
-    output directory and concatenate the five shards. The `setting` column
-    distinguishes `no_preprocessing` and `diffprep`.
+    Download `diffprep_h2o_shard_XX_of_05.csv` from the Kaggle output directory
+    and concatenate the five shards. Every row has `setting="diffprep"`.
     """
 )
 
