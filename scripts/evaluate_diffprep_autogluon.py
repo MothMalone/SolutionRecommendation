@@ -40,6 +40,17 @@ def _load_saved_pipeline(repo_dir: Path, method: str, dataset_key: str):
     return pipeline, saved_split, metadata, directory
 
 
+def _add_diffprep_import_path(repo_dir: Path) -> Path:
+    """Expose the original DiffPrep checkout before unpickling its pipeline."""
+    resolved = repo_dir.resolve()
+    if not (resolved / "pipeline").is_dir():
+        raise FileNotFoundError(f"DiffPrep checkout has no pipeline package: {resolved}")
+    path = str(resolved)
+    if path not in sys.path:
+        sys.path.insert(0, path)
+    return resolved
+
+
 def _raw_split(repo_dir: Path, dataset_key: str, split_seed: int):
     frame = pd.read_csv(repo_dir / "data" / dataset_key / "data.csv")
     target = "target"
@@ -114,6 +125,7 @@ def main() -> int:
 
     started = time.perf_counter()
     try:
+        args.repo_dir = _add_diffprep_import_path(args.repo_dir)
         pipeline, saved_split, metadata, pipeline_dir = _load_saved_pipeline(
             args.repo_dir, args.method, args.dataset_key
         )
