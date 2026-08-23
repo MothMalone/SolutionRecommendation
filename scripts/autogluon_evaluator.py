@@ -32,10 +32,13 @@ def _load_components():
 
 
 def _infer_task(y: pd.Series, task_type: Optional[str]) -> tuple[str, str]:
-    if task_type in {"classification", "regression"}:
-        return task_type, "accuracy" if task_type == "classification" else "root_mean_squared_error"
-    if y.dtype.kind in "OUSb" or int(y.nunique(dropna=True)) <= 50:
-        return "classification", "accuracy"
+    n_classes = int(y.nunique(dropna=True))
+    if task_type == "regression":
+        return "regression", "root_mean_squared_error"
+    if task_type == "classification":
+        return ("binary" if n_classes <= 2 else "multiclass"), "accuracy"
+    if y.dtype.kind in "OUSb" or n_classes <= 50:
+        return ("binary" if n_classes <= 2 else "multiclass"), "accuracy"
     return "regression", "root_mean_squared_error"
 
 
@@ -86,7 +89,8 @@ def evaluate_autogluon_split(
     train_data = _frame(X_train, train_y, label)
     val_data = _frame(X_val, val_y, label)
     test_data = _frame(X_test, test_y, label)
-    resolved_task, eval_metric = _infer_task(train_y, task_type)
+    resolved_problem_type, eval_metric = _infer_task(train_y, task_type)
+    is_classification = resolved_problem_type in {"binary", "multiclass"}
 
     if path_root is None:
         temp_dir = Path(tempfile.mkdtemp(prefix="autogluon_eval_"))
@@ -94,7 +98,7 @@ def evaluate_autogluon_split(
     else:
         root = Path(path_root)
         root.mkdir(parents=True, exist_ok=True)
-        temp_dir = root / f"{resolved_task}_{os.getpid()}_{time.time_ns()}"
+        temp_dir = root / f"{resolved_problem_type}_{os.getpid()}_{time.time_ns()}"
         temp_dir.mkdir(parents=True, exist_ok=False)
         remove_dir = True
 
@@ -108,7 +112,7 @@ def evaluate_autogluon_split(
         predictor = TabularPredictor(
             label=label,
             path=str(temp_dir),
-            problem_type=resolved_task,
+            problem_type=resolved_problem_type,
             eval_metric=eval_metric,
             verbosity=int(verbosity),
         )
@@ -137,7 +141,7 @@ def evaluate_autogluon_split(
             predictor = TabularPredictor(
                 label=label,
                 path=str(retry_dir),
-                problem_type=resolved_task,
+                problem_type=resolved_problem_type,
                 eval_metric=eval_metric,
                 verbosity=int(verbosity),
             )
@@ -154,7 +158,7 @@ def evaluate_autogluon_split(
         val_prediction = predictor.predict(val_data.drop(columns=[label]))
         test_prediction = predictor.predict(test_data.drop(columns=[label]))
         prediction_seconds = float(time.perf_counter() - prediction_started)
-        if resolved_task == "classification":
+        if is_classification:
             val_score = float(accuracy_score(val_y, val_prediction))
             test_score = float(accuracy_score(test_y, test_prediction))
             result = {
@@ -177,8 +181,9 @@ def evaluate_autogluon_split(
             {
                 "status": "ok",
                 "evaluator": "AutoGluon.TabularPredictor",
-                "task_type": resolved_task,
-                "primary_metric": "accuracy" if resolved_task == "classification" else "r2",
+                "task_type": "classification" if is_classification else "regression",
+                "autogluon_problem_type": resolved_problem_type,
+                "primary_metric": "accuracy" if is_classification else "r2",
                 "feature_generator": feature_generator,
                 "autogluon_presets": str(presets),
                 "time_limit": int(time_limit),
