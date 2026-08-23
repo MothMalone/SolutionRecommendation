@@ -110,7 +110,14 @@ cells = [
         # Guard against an old notebook/session cache before a long run.
         evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
         evaluator_source = evaluator_path.read_text(encoding="utf-8")
-        if "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source:
+        required_evaluator_markers = (
+            "def _classification_labels",
+            "test_prediction = _classification_labels(test_prediction)",
+        )
+        if (
+            "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source
+            or not all(marker in evaluator_source for marker in required_evaluator_markers)
+        ):
             raise RuntimeError(
                 "Stale H2O evaluator detected. Restart the Kaggle session and rerun this clone/install cell."
             )
