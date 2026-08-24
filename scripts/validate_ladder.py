@@ -107,18 +107,38 @@ def train_shared_metric(holdout: list, args) -> str:
 
 
 def arm_flags(arm: str, args) -> list:
-    """The ONLY difference between the two arms. Everything else is shared by construction."""
-    if arm == "ref":
-        return ["--n-ants", str(args.ref_ants), "--n-iterations", str(args.ref_iters),
-                "--final-autogluon-topk", "1"]
-    return [
+    """The ONLY difference between arms. Everything else is shared by construction.
+
+    `ladder` changes TWO things at once -- the selection ladder (wider search, screening rung,
+    K=5) and the no-search arm's neighbour aggregation (5/1 instead of the hardcoded 1/1). The
+    first partial results made that a problem rather than a detail: on dataset 49 both arms
+    selected `no_search_retrieval` and still scored differently (0.8000 vs 0.8333), which ONLY
+    the aggregation change can explain. A `ladder - ref` delta therefore cannot be attributed.
+
+    `screen_only` and `retrieval_only` split it:
+
+        retrieval_only - ref   = the neighbour aggregation alone
+        screen_only    - ref   = the wider search + screening rung + K=5 alone
+        ladder         - ref   = both, and whether they add up
+    """
+    ladder_search = [
         "--n-ants", str(args.ladder_ants), "--n-iterations", str(args.ladder_iters),
         "--final-autogluon-topk", str(args.ladder_topk),
         "--screen-topk", str(args.screen_topk),
         "--screen-profile", args.screen_profile,
         "--screen-time-limit", str(args.screen_time_limit),
-        "--hybrid-no-search-neighbor-k", "5", "--hybrid-no-search-top-l", "1",
     ]
+    ref_search = ["--n-ants", str(args.ref_ants), "--n-iterations", str(args.ref_iters),
+                  "--final-autogluon-topk", "1"]
+    agg_5 = ["--hybrid-no-search-neighbor-k", "5", "--hybrid-no-search-top-l", "1"]
+    agg_1 = ["--hybrid-no-search-neighbor-k", "1", "--hybrid-no-search-top-l", "1"]
+
+    return {
+        "ref":            ref_search + agg_1,
+        "ladder":         ladder_search + agg_5,
+        "screen_only":    ladder_search + agg_1,
+        "retrieval_only": ref_search + agg_5,
+    }[arm]
 
 
 def run_one(arm: str, did: str, holdout: list, args, metric_path: str) -> dict:
@@ -186,52 +206,86 @@ def run_one(arm: str, did: str, holdout: list, args, metric_path: str) -> dict:
 
 
 def summarize(path: str) -> int:
+    import statistics as st
+    from collections import Counter
+
     rows = [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
     by = {}
     for r in rows:
         by.setdefault(str(r["dataset_id"]), {})[r["arm"]] = r
+    arms = [a for a in ("ref", "retrieval_only", "screen_only", "ladder")
+            if any(a in v for v in by.values())]
+    others = [a for a in arms if a != "ref"]
 
-    print(f"{'dataset':>9} | {'REF':>8} {'sel':>18} {'s':>6} | {'LADDER':>8} {'sel':>18} {'s':>6} | {'delta':>7}")
-    print("-" * 96)
-    deltas, wins, losses, ties = [], 0, 0, 0
+    hdr = f"{'dataset':>9} | {'ref':>8}"
+    for a in others:
+        hdr += f" | {a[:14]:>14} {'delta':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+
+    deltas = {a: [] for a in others}
     for did in sorted(by, key=lambda s: (len(s), s)):
-        a, b = by[did].get("ref"), by[did].get("ladder")
-        if not a or not b:
+        base = by[did].get("ref")
+        if not base or not isinstance(base.get("score"), float):
             continue
-        sa, sb = a.get("score"), b.get("score")
-        ta = f"{sa:.4f}" if isinstance(sa, float) else str(a.get("status"))
-        tb = f"{sb:.4f}" if isinstance(sb, float) else str(b.get("status"))
-        if isinstance(sa, float) and isinstance(sb, float):
-            d = sb - sa
-            deltas.append(d)
-            wins += d > 1e-9
-            losses += d < -1e-9
-            ties += abs(d) <= 1e-9
-            dt = f"{d:+.4f}"
-        else:
-            dt = "--"
-        print(f"{did:>9} | {ta:>8} {str(a.get('selected_candidate'))[:18]:>18} {a.get('seconds',0):>6.0f} "
-              f"| {tb:>8} {str(b.get('selected_candidate'))[:18]:>18} {b.get('seconds',0):>6.0f} | {dt:>7}")
+        line = f"{did:>9} | {base['score']:>8.4f}"
+        for a in others:
+            r = by[did].get(a)
+            if r and isinstance(r.get("score"), float):
+                d = r["score"] - base["score"]
+                deltas[a].append(d)
+                line += f" | {r['score']:>14.4f} {d:>+8.4f}"
+            else:
+                line += f" | {'--':>14} {'--':>8}"
+        print(line)
+    print("-" * len(hdr))
 
-    if deltas:
-        import statistics as st
-        mean = sum(deltas) / len(deltas)
-        print("-" * 96)
-        print(f"\nn={len(deltas)}  mean delta={mean:+.4f}  median={st.median(deltas):+.4f}")
-        print(f"ladder wins {wins}, loses {losses}, ties {ties}")
-        if len(deltas) > 1:
-            sd = st.stdev(deltas)
-            se = sd / (len(deltas) ** 0.5)
-            print(f"sd={sd:.4f}  se={se:.4f}  mean/se={mean/se if se else float('nan'):+.2f}")
-            print("\n(mean/se is a paired t-statistic. |t| < 2 on this many datasets means the "
-                  "difference is\n not separable from noise -- report it as such rather than as a win.)")
-        # Cost is half the claim: the ladder is only worth it if it stays inside the time budget.
-        ref_t = [by[d]["ref"].get("seconds", 0) for d in by if "ref" in by[d]]
-        lad_t = [by[d]["ladder"].get("seconds", 0) for d in by if "ladder" in by[d]]
-        if ref_t and lad_t:
-            print(f"\nmean runtime: REF {sum(ref_t)/len(ref_t):.0f}s  "
-                  f"LADDER {sum(lad_t)/len(lad_t):.0f}s  "
-                  f"({sum(lad_t)/max(sum(ref_t), 1e-9):.2f}x)")
+    print("\n=== paired deltas vs REF ===")
+    for a in others:
+        d = deltas[a]
+        if not d:
+            continue
+        mean = sum(d) / len(d)
+        w = sum(1 for x in d if x > 1e-9)
+        l = sum(1 for x in d if x < -1e-9)
+        t = len(d) - w - l
+        line = (f"  {a:15} n={len(d):<3} mean={mean:+.4f} median={st.median(d):+.4f} "
+                f"W/L/T={w}/{l}/{t}")
+        if len(d) > 1:
+            se = st.stdev(d) / (len(d) ** 0.5)
+            line += f"  t={mean/se if se else float('nan'):+.2f}"
+        print(line)
+    print("\n  (t is a paired t-statistic. |t| < 2 means the difference is NOT separable from "
+          "noise on\n   this many datasets -- report it that way rather than as a win.)")
+
+    if "ladder" in deltas and "screen_only" in deltas and "retrieval_only" in deltas:
+        ml = sum(deltas["ladder"]) / max(len(deltas["ladder"]), 1)
+        ms = sum(deltas["screen_only"]) / max(len(deltas["screen_only"]), 1)
+        mr = sum(deltas["retrieval_only"]) / max(len(deltas["retrieval_only"]), 1)
+        print(f"\n=== attribution ===")
+        print(f"  retrieval aggregation alone : {mr:+.4f}")
+        print(f"  search ladder alone         : {ms:+.4f}")
+        print(f"  both together               : {ml:+.4f}   (sum of parts {ms + mr:+.4f})")
+        if abs(ml) > 1e-9 and abs(mr) > abs(ml) * 0.6:
+            print("  -> most of the combined effect is the RETRIEVAL AGGREGATION, a one-line "
+                  "config change,\n     not the screening ladder that cost the extra runtime.")
+
+    print("\n=== runtime ===")
+    for a in arms:
+        ts = [by[d][a].get("seconds", 0) for d in by if a in by[d]]
+        rt = [by[d]["ref"].get("seconds", 0) for d in by if a in by[d] and "ref" in by[d]]
+        if ts:
+            ratio = sum(ts) / max(sum(rt), 1e-9) if rt else 1.0
+            print(f"  {a:15} mean={sum(ts)/len(ts):>6.0f}s   {ratio:.2f}x REF")
+
+    print("\n=== what the gate actually selected ===")
+    for a in arms:
+        c = Counter(by[d][a].get("selected_candidate") for d in by
+                    if a in by[d] and by[d][a].get("status") == "ok")
+        print(f"  {a:15} " + ", ".join(f"{k}={v}" for k, v in c.most_common()))
+    print("  (if 'aco' is rare, the SEARCH is not what is winning the gate -- the transfer arm "
+          "and\n   the floor are, and widening the search cannot help that.)")
+
     bad = [r for r in rows if r.get("status") == "ok" and r.get("eval_method") != "autogluon"]
     if bad:
         print(f"\n!! {len(bad)} row(s) are NOT AutoGluon scores "
