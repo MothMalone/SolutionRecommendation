@@ -192,14 +192,20 @@ def autodp_cmd(dataset_id: str, ops: str, out_dir: Path, args) -> list:
         "--modes", "native" if args.protocol == "native" else "fair",
         "--out", str(out_dir / f"adp_{dataset_id}.jsonl"),
         "--time-limit", str(args.time_limit),
+        "--cap-seconds", str(args.cap_seconds),
         # adp_bench's --data-dir is scratch for exported CSVs; the folder of ready-made <id>.csv
         # is --openml-local-folder, which is what --data-dir means on this side. Kaggle is
         # offline, so this is the only way it finds the data.
         "--openml-local-folder", str(args.data_dir),
         "--operator-space", ops if ops == "ours" else "theirs",
     ]
-    if ops == "ours" and getattr(args, "adp_meta_corpus", ""):
-        cmd += ["--adp-meta-corpus", str(args.adp_meta_corpus)]
+    # Default the retrained meta-learner corpus onto the ours-ops arms (verified disjoint from
+    # both EVAL_IDS and THEIR_DATASETS -- docs/ARMS.md Part 4). --adp-meta-corpus "" opts back out.
+    corpus = getattr(args, "adp_meta_corpus", None)
+    if ops == "ours" and corpus is None:
+        corpus = str(REPO / "data" / "adp_ourops_corpus")
+    if ops == "ours" and corpus:
+        cmd += ["--adp-meta-corpus", corpus]
     if args.extra:
         cmd += shlex.split(args.extra)
     if args.adp_extra:
@@ -291,8 +297,11 @@ def main() -> int:
     ap.add_argument("--summarize", default="",
                     help="glob of arm JSONL files; print a table and exit")
     ap.add_argument("--out", default="arms.jsonl")
-    ap.add_argument("--data-dir", default="test_data_local",
-                    help="directory holding <dataset_id>.csv")
+    ap.add_argument("--data-dir", default="data/eval_datasets",
+                    help="directory holding <dataset_id>.csv. Default holds all 30 EVAL_IDS "
+                         "(scripts/export_eval_datasets.py + export_diffprep_datasets.py); the old "
+                         "default, test_data_local/, only has the legacy 23 and is missing the 17 "
+                         "DiffPrep ids, which made every arm on those ids record missing_csv.")
     ap.add_argument("--target-column", default="target")
     ap.add_argument("--time-limit", type=int, default=300, help="AutoGluon seconds per fit")
     # REF budget (docs/EXPERIMENTS.md), not the old 10/10.
@@ -307,17 +316,27 @@ def main() -> int:
                     help="Extra flags for run_recommend.py only (ACORec arms).")
     ap.add_argument("--adp-extra", default="",
                     help="Extra flags for adp_bench.py only (AutoDP arms).")
-    ap.add_argument("--adp-meta-corpus", default="",
+    ap.add_argument("--adp-meta-corpus", default=None,
                     help="Corpus dir from scripts/build_adp_meta_corpus.py: retrains AutoDP's "
-                         "1-NN meta-learner over ACORec's operator space instead of aliasing.")
+                         "1-NN meta-learner over ACORec's operator space instead of aliasing. "
+                         "Default: data/adp_ourops_corpus for the ours-ops arms (verified disjoint "
+                         "from both EVAL_IDS and THEIR_DATASETS -- docs/ARMS.md Part 4). Pass "
+                         "--adp-meta-corpus '' to opt out and fall back to aliasing.")
     ap.add_argument("--ack-autodp-not-retrained", action="store_true",
-                    help="Required for arms running AutoDP over ACORec's operator space. "
-                         "Acknowledges that its meta-learner and value model are applied "
-                         "out-of-domain via operator-code aliasing rather than retrained.")
-    ap.add_argument("--protocol", choices=["native", "leakfree"], default="native",
-                    help="native (default) = AutoDP's published transductive protocol, and ACORec "
-                         "prepared the SAME way, so both see the same information. leakfree = "
-                         "fit-on-train for both.")
+                    help="Required for arms running AutoDP over ACORec's operator space if "
+                         "--adp-meta-corpus is explicitly cleared. Acknowledges that its "
+                         "meta-learner and value model are then applied out-of-domain via "
+                         "operator-code aliasing rather than retrained.")
+    ap.add_argument("--cap-seconds", type=float, default=900.0,
+                    help="AutoDP arms only: wall-clock search watchdog forwarded to adp_bench.py "
+                         "(its own default). Previously not forwarded at all, so every AutoDP arm "
+                         "silently ran at adp_bench's 900s default with no way to change it here.")
+    ap.add_argument("--protocol", choices=["native", "leakfree"], default="leakfree",
+                    help="leakfree (default) = fit-on-train discipline for both methods, and "
+                         "AutoDP's search scores on OUR seed-42 split rather than its own unseeded "
+                         "internal one (scripts/autodp_protocol.py). native = AutoDP's published "
+                         "transductive protocol, literally unpatched, kept only as a disclosure "
+                         "column -- NOT a reported number for either method.")
     ap.add_argument("--extra", default="", help="extra args passed through to the inner script")
     ap.add_argument("--scratch", default="",
                     help="scratch dir. Default: a temp dir OUTSIDE --out's folder, deleted as it "
@@ -391,8 +410,11 @@ def main() -> int:
     # for real (mctsdata.getAcc) and drop_unpromising prunes on those real scores alone.
     # See docs/DATASET_CHANGE_AND_RQ3.md.
     if spec["method"] == "autodp" and spec["ops"] == "ours":
-        if args.adp_meta_corpus:
-            corpus = Path(args.adp_meta_corpus)
+        # None (unset) defaults to the verified corpus; "" is an explicit opt-out.
+        corpus_arg = (str(REPO / "data" / "adp_ourops_corpus") if args.adp_meta_corpus is None
+                     else args.adp_meta_corpus)
+        if corpus_arg:
+            corpus = Path(corpus_arg)
             for required in ("Metafeature.csv", "label.csv"):
                 if not (corpus / required).exists():
                     ap.error(f"--adp-meta-corpus {corpus} has no {required}; build it with "
@@ -458,8 +480,10 @@ def main() -> int:
         if not args.keep_scratch:
             for junk in scratch.glob(f"*{ds}*"):
                 shutil.rmtree(junk, ignore_errors=True) if junk.is_dir() else junk.unlink(missing_ok=True)
+        n_exc = row.get("search_iteration_exceptions") or 0
+        exc_flag = f"  !! {n_exc} search-iteration exceptions (result may be unevaluated)" if n_exc else ""
         print(f"     status={row.get('status')} score={row.get('score')} "
-              f"time={row['total_seconds']}s")
+              f"time={row['total_seconds']}s{exc_flag}")
 
     if not args.keep_scratch and not args.scratch:
         shutil.rmtree(scratch, ignore_errors=True)
@@ -500,6 +524,23 @@ def summarize(pattern: str) -> int:
     if bad:
         print(f"\n!! {len(bad)} row(s) are NOT AutoGluon scores "
               f"(eval_method in {sorted({str(r.get('eval_method')) for r in bad})}) -- exclude before averaging")
+    empty = [r for r in rows if r.get("empty_pipeline")]
+    if empty:
+        print(f"\n!! {len(empty)} AutoDP row(s) have an EMPTY pipeline -- AutoDP selected no "
+              f"preprocessing, so the score is the RAW frame, not a search result: "
+              + ", ".join(f"{r.get('arm')}/{r.get('dataset_id')}" for r in empty))
+    salvaged = [r for r in rows if r.get("salvaged_from_checkpoint")]
+    if salvaged:
+        print(f"\n!! {len(salvaged)} AutoDP row(s) were SALVAGED from a cap-killed search "
+              f"(best completed iteration, not a converged search) -- disclose when reporting: "
+              + ", ".join(f"{r.get('arm')}/{r.get('dataset_id')}" for r in salvaged))
+    crashed = [r for r in rows if (r.get("search_iteration_exceptions") or 0) > 0]
+    if crashed:
+        print(f"\n!! {len(crashed)} AutoDP row(s) had search-iteration exceptions -- their MCTS "
+              f"loop swallows exceptions in a bare except:, so these pipelines may never have "
+              f"been genuinely evaluated. Treat with caution before averaging: "
+              + ", ".join(f"{r.get('arm')}/{r.get('dataset_id')} "
+                          f"({r['search_iteration_exceptions']} exc)" for r in crashed))
     return 0
 
 

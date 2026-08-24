@@ -131,6 +131,48 @@ def _run_autodp(adp_python: str, csv_path: str, did: str, mode: str, scratch: st
     return os.path.join(scratch, space_tag, f"dataset_{did}"), proc.returncode
 
 
+class ScoringCrashed(RuntimeError):
+    """The AutoGluon scoring child died (segfault/OOM), but the search result still exists."""
+
+    def __init__(self, returncode):
+        super().__init__(f"AutoGluon scoring subprocess exited {returncode}")
+        self.returncode = returncode
+
+
+def _score_prepared_isolated(csv_path: str, prepared_dir: str, time_limit: int,
+                             autogluon_profile: str, seed: int, verbose: bool) -> dict:
+    """Run stage-3 scoring (eval_autodatapre.score_prepared) in a child process.
+
+    AutoGluon can take the whole interpreter down with it (macOS OpenMP segfaults are the usual
+    culprit). In-process, that killed adp_bench itself AND deleted the scratch dir holding a
+    finished multi-hour search -- dataset 378 died with rc -11 after 55 minutes of search had
+    already succeeded. A crash now raises ScoringCrashed while the prepared dataset survives, so
+    the caller can record the pipeline and keep the frame for a later re-score.
+    """
+    out_json = os.path.join(prepared_dir, "score_result.json")
+    code = (
+        "import json, sys\n"
+        f"sys.path.insert(0, {_HERE!r})\n"
+        f"sys.path.insert(0, {os.path.join(_REPO, 'src')!r})\n"
+        "from eval_autodatapre import score_prepared\n"
+        f"r = score_prepared({csv_path!r}, {prepared_dir!r}, time_limit={int(time_limit)}, "
+        f"autogluon_profile={autogluon_profile!r}, seed={int(seed)}, verbose={bool(verbose)})\n"
+        # numpy scalars are not JSON-serializable; .item() keeps them numeric (default=str would
+        # turn scores into strings and break the caller's :.4f formatting).
+        "def _d(o):\n"
+        "    try:\n"
+        "        return o.item()\n"
+        "    except Exception:\n"
+        "        return str(o)\n"
+        f"json.dump(r, open({out_json!r}, 'w'), default=_d)\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", code])
+    if proc.returncode != 0 or not os.path.exists(out_json):
+        raise ScoringCrashed(proc.returncode)
+    with open(out_json) as f:
+        return json.load(f)
+
+
 # ------------------------------------------------------------------------------------------ run
 
 
@@ -183,8 +225,6 @@ def import_dir(args) -> int:
 
 
 def run(args) -> None:
-    from eval_autodatapre import score_prepared  # imported late: needs AutoGluon in this env
-
     ids = [t for t in " ".join(args.ids).replace(",", " ").split() if t] if args.ids else list(EVAL_IDS)
     if args.shard:
         ids = _shard(ids, args.shard)
@@ -234,9 +274,40 @@ def run(args) -> None:
                       f"no prepared dataset produced", flush=True)
                 continue
 
-            res = score_prepared(csv_path, prepared_dir, time_limit=args.time_limit,
-                                 autogluon_profile=args.autogluon_profile, seed=args.seed,
-                                 verbose=args.verbose)
+            # Salvage disclosure: run_autodatapre may have produced this frame from a
+            # checkpointed pipeline after a cap kill (autodp_meta.json says so).
+            meta_path = os.path.join(prepared_dir, "autodp_meta.json")
+            adp_meta = {}
+            if os.path.exists(meta_path):
+                with open(meta_path) as f:
+                    adp_meta = json.load(f)
+
+            try:
+                res = _score_prepared_isolated(csv_path, prepared_dir,
+                                               time_limit=args.time_limit,
+                                               autogluon_profile=args.autogluon_profile,
+                                               seed=args.seed, verbose=args.verbose)
+            except ScoringCrashed as crash:
+                # The search result is intact; keep the prepared frame OUT of the scratch dir so
+                # a later `--import-dir`-style re-score does not have to redo the search.
+                keep_dir = os.path.join(
+                    os.path.dirname(os.path.abspath(args.out)) or ".",
+                    f"adp_salvage_{did}_{mode}")
+                shutil.rmtree(keep_dir, ignore_errors=True)
+                shutil.copytree(prepared_dir, keep_dir)
+                _append(args.out, {
+                    "dataset_id": str(did), "mode": mode, "status": "eval_crashed",
+                    "score": None, "pipeline": adp_meta.get("pipeline"),
+                    "autodp_seconds": adp_meta.get("search_seconds"),
+                    "autogluon_seconds": None,
+                    "total_seconds": round(time.time() - t_start, 1),
+                    "n_rows": n_rows, "n_features": shape - 1,
+                    "detail": f"{crash}; prepared frame kept at {keep_dir} for re-scoring",
+                    "prepared_dir_kept": keep_dir,
+                })
+                print(f"[eval_crashed] {did} [{mode}]: {crash}; search result preserved at "
+                      f"{keep_dir}", flush=True)
+                continue
             record = {
                 "dataset_id": str(did),
                 "mode": mode,
@@ -255,12 +326,27 @@ def run(args) -> None:
                 "n_features_scored": res["n_features_scored"],
                 "autodp_converged": res["autodp_converged"],
                 "autodp_hit_cap": res["autodp_hit_cap"],
+                "search_split": res.get("search_split"),
+                "internal_scorer_seed": res.get("internal_scorer_seed"),
+                "leakfree_cbe": res.get("leakfree_cbe"),
+                "search_iteration_exceptions": res.get("search_iteration_exceptions"),
+                "search_iteration_exception_kinds": res.get("search_iteration_exception_kinds"),
+                # True when the pipeline is the best of a cap-killed search's completed
+                # iterations rather than a converged one -- disclose when reporting.
+                "salvaged_from_checkpoint": bool(adp_meta.get("salvaged_from_checkpoint", False)),
+                # An EMPTY operator chain means AutoDP selected no preprocessing at all, so this
+                # row scores the RAW frame -- it is a no-op baseline wearing AutoDP's name, not a
+                # search result. Reliably produced by the explicit-runTime retry path on large
+                # frames, where the budget expires before the first iteration finishes.
+                "empty_pipeline": len(res["autodp_pipeline"] or []) <= 1,
             }
             _append(args.out, record)
+            n_exc = record.get("search_iteration_exceptions") or 0
+            exc_flag = f" !! {n_exc} SEARCH-ITERATION EXCEPTIONS (result may be unevaluated)" if n_exc else ""
             print(f"[ok] {did} [{mode}] {record['metric']}={record['score']:.4f} "
                   f"pipeline={record['pipeline']} "
                   f"adp={record['autodp_seconds']}s ag={record['autogluon_seconds']}s "
-                  f"total={record['total_seconds']}s", flush=True)
+                  f"total={record['total_seconds']}s{exc_flag}", flush=True)
         except Exception as exc:
             _append(args.out, {
                 "dataset_id": str(did), "mode": mode, "status": "error", "score": None,
@@ -350,6 +436,33 @@ def summarize(args) -> None:
         lines.append("\n**AutoDP deleted test rows** here; `score` counts those rows as wrong: "
                      + ", ".join(f"{r['dataset_id']} ({r['mode']}, cov={r['test_coverage']:.2f})"
                                  for r in low_cov))
+    empty = [r for r in records if r.get("empty_pipeline")]
+    if empty:
+        lines.append(
+            "\n**Empty pipeline — AutoDP selected NO preprocessing**, so these rows score the raw "
+            "frame and are a no-op baseline rather than a search result. The explicit-runTime "
+            "retry path produces this on large frames whenever the budget expires before the "
+            "first MCTS iteration completes. Do not read them as 'AutoDP chose to do nothing': "
+            + ", ".join(f"{r['dataset_id']} ({r['mode']})" for r in empty))
+    salvaged = [r for r in records if r.get("salvaged_from_checkpoint")]
+    if salvaged:
+        lines.append(
+            "\n**Salvaged from a checkpoint.** The search was killed at the wall-clock cap; the "
+            "pipeline is the best of the iterations that DID complete, not of a converged search. "
+            "Disclose when reporting: "
+            + ", ".join(f"{r['dataset_id']} ({r['mode']})" for r in salvaged))
+    crashed = [r for r in records if (r.get("search_iteration_exceptions") or 0) > 0]
+    if crashed:
+        lines.append(
+            "\n**Search-iteration exceptions.** Their MCTS loop swallows every exception in a "
+            "bare `except:`, so a search that failed on every iteration still 'converges' and "
+            "reports a pipeline that was never evaluated -- most likely on small frames, where a "
+            "classifier's internal k_folds guard returns None and drop_unpromising's sort() "
+            "cannot compare None to float. Rows below did NOT necessarily produce a genuine "
+            "AutoDP preference; treat with caution before averaging: "
+            + ", ".join(f"{r['dataset_id']} ({r['mode']}, "
+                        f"{r['search_iteration_exceptions']} exc, pipeline={r.get('pipeline')})"
+                        for r in crashed))
     lines.append("")
 
     text = "\n".join(lines)
@@ -364,7 +477,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ids", nargs="*", default=None, help="dataset ids (default: all 23 eval ids)")
     ap.add_argument("--shard", default=None, metavar="I/N", help="run the I-th of N shards, e.g. 2/4")
-    ap.add_argument("--modes", nargs="*", default=["native", "fair"])
+    ap.add_argument("--modes", nargs="*", default=["fair"],
+                    help="fair (default) = the reported protocol: AutoDP's search scores on our "
+                         "seed-42 split (scripts/autodp_protocol.py). native = its published "
+                         "transductive API, literally unpatched, NOT a reported number for either "
+                         "method -- pass explicitly only for a disclosure column.")
     ap.add_argument("--out", default="autodp_results.jsonl", help="the single output file (JSONL)")
     ap.add_argument("--cap-seconds", type=float, default=900.0,
                     help="wall-clock watchdog per dataset; AutoDP otherwise runs to its own convergence")

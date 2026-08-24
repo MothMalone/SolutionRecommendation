@@ -42,9 +42,12 @@ Four patches:
 """
 from __future__ import annotations
 
+import json
+import os
+import time
 import traceback
 from collections import Counter
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -67,29 +70,49 @@ def build_search_dataset(
     ``tr`` / ``val`` are ORIGINAL row positions from ``_split_positions`` (seed-42 0.6/0.2/0.2).
     The test positions are not a parameter here on purpose: they must not be reachable.
 
-    Index preservation is load-bearing and is why this uses ``.iloc[positions]`` on the original
-    frame rather than ``split_train_val_test``'s return values, which ``reset_index(drop=True)``:
+    This dict is discarded once the search returns a pipeline (``_run_fair`` does ``del dataset``
+    right after) -- unlike the APPLY dict built separately in ``_run_fair``, nothing downstream
+    reads its row identity. So it does NOT preserve the original dataframe's row positions as its
+    index; it gets a fresh contiguous ``0..len(tr)+len(val)-1`` range instead (train first, test
+    second), and that turns out not to be optional:
 
-      * their operators look labels up as ``dataset['target'].loc[X.index]``;
-      * ``scripts/autodp_our_space.py`` reads surviving row identity off the index;
-      * ``__adp_row__`` -- how stage 3 re-attaches the original y -- is that index.
+    ``MCTS.default_policy`` -> ``merge_datasets`` concatenates train+test, sorts by index, and
+    hands the result to ``MetaFeature.setMetaFeature``, which does ``data[0]`` -- a LABEL lookup
+    for row-label ``0``, not a positional one. Their own ``read_dataset`` gets away with this
+    because ``train_test_split`` partitions its FULL input, so ``train union test`` always covers
+    every original label and ``0`` is always present after the sort. Preserving original row
+    positions here would violate that invariant on purpose: ``tr union val`` is deliberately only
+    80% of the dataset (``te`` is excluded so the search never sees test rows), so whenever
+    original position 0 landed in ``te``, label ``0`` would be simply absent and ``data[0]`` would
+    raise on EVERY search iteration -- observed on dataset 862 (87 rows): 1.7M swallowed
+    exceptions, one per attempted iteration, and an empty pipeline. A gapless 0-based index sidesteps
+    it entirely, since it is relabeling relative to the 80% actually being searched, not the original
+    100%.
+
+    Their operators still get what they need: ``dataset['target'].loc[X.index]``-style lookups only
+    require train/target (and test/target_test) to share an index with EACH OTHER, which they do.
 
     Their ``read_dataset`` also LabelEncodes the target, and we keep that: it is the signal their
     classifiers were built around. Stage 3 re-attaches the ORIGINAL y regardless.
     """
     from sklearn.preprocessing import LabelEncoder
 
-    if set(np.asarray(tr).tolist()) & set(np.asarray(val).tolist()):
+    tr = np.asarray(tr)
+    val = np.asarray(val)
+    if set(tr.tolist()) & set(val.tolist()):
         raise AssertionError("train and val positions overlap; the split is not a partition")
 
     y_enc = pd.Series(LabelEncoder().fit_transform(df[target]), index=df.index, name=target)
     feats = df.drop(columns=[target])
 
+    train_labels = np.arange(len(tr))
+    test_labels = np.arange(len(tr), len(tr) + len(val))
+
     dataset = {
-        "train": feats.iloc[tr].copy(),
-        "target": y_enc.iloc[tr].to_frame(),
-        "test": feats.iloc[val].copy(),
-        "target_test": y_enc.iloc[val].to_frame(),
+        "train": feats.iloc[tr].set_axis(train_labels, axis=0).copy(),
+        "target": y_enc.iloc[tr].to_frame().set_axis(train_labels, axis=0),
+        "test": feats.iloc[val].set_axis(test_labels, axis=0).copy(),
+        "target_test": y_enc.iloc[val].to_frame().set_axis(test_labels, axis=0),
     }
     assert_dict_aligned(dataset)
     return dataset
@@ -275,6 +298,81 @@ def install_scorer_patches(seed: int = 42, verbose: bool = False) -> None:
     if verbose:
         print(f"[protocol] scorer seeded (random_state={seed}); LDA now scores the holdout split "
               f"like NB and RF", flush=True)
+
+
+# --------------------------------------------------------------------------- search checkpoint
+
+
+class SearchCheckpoint:
+    """Persist the best-so-far pipeline after every completed search iteration.
+
+    AutoDP checks its time budget only BETWEEN iterations, and a single iteration can run for
+    hours on a large frame (AD dedup is O(n^2), LOF, MICE) -- so the wall-clock watchdog in
+    ``run_autodatapre.py`` can kill a search that has already found a perfectly good pipeline and
+    get NOTHING back (dataset 722: two full cap-kills, zero results). This wrapper mirrors the
+    ``best_node`` bookkeeping of ``CLA/REG_Without_TimeBudget`` from the outside: whenever an
+    iteration returns a node with a new best profit, the pipeline is written to ``path``
+    atomically, so the parent process can salvage it after a kill and run apply-only.
+
+    Not a method change: which pipeline wins is decided by their loop exactly as before; this
+    only records the running argmax. On a run that finishes normally the checkpoint is simply
+    ignored.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.best_profit: Optional[float] = None
+        self.pipeline: Optional[List[Any]] = None
+        self.n_iterations = 0
+
+    def install(self, verbose: bool = False) -> None:
+        from autodatapre.Pipeline_Generation import MCTS
+
+        original = MCTS.monte_carlo_tree_search
+        ckpt = self
+
+        def checkpointing_mcts(node, dataset, datasetTarget, taskType):
+            result = original(node, dataset, datasetTarget, taskType)
+            try:
+                ckpt.n_iterations += 1
+                profit = float(result.get_pre_profit())
+                if ckpt.best_profit is None or profit > ckpt.best_profit:
+                    ckpt.best_profit = profit
+                    ckpt.pipeline = list(result.state.cumulative_choices)
+                    ckpt._write()
+            except BaseException:
+                pass  # bookkeeping must never break their search
+            return result
+
+        MCTS.monte_carlo_tree_search = checkpointing_mcts
+        if verbose:
+            print(f"[protocol] checkpointing best-so-far pipeline to {self.path}", flush=True)
+
+    def _write(self) -> None:
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({
+                "pipeline": self.pipeline,
+                "profit": self.best_profit,
+                # As of THIS checkpoint. The file is only rewritten when the best improves, so a
+                # later non-improving iteration leaves this number behind -- which is what it
+                # should mean: how much search the salvaged pipeline is backed by.
+                "iterations_completed": self.n_iterations,
+                "written_at": time.time(),
+            }, fh)
+        os.replace(tmp, self.path)
+
+    @staticmethod
+    def read(path: str) -> Optional[dict]:
+        """The parent-side reader: the checkpoint if one was written, else None."""
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+            return data if data.get("pipeline") else None
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------- exception counter

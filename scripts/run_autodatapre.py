@@ -223,6 +223,20 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS,
         dataset=search_dataset, df_metafeatures=df,
     )
     del dataset  # searched only to obtain the pipeline; its frames are train/val, not train/test
+    prepared, status = _apply_fair(df, target, pipeline, mctsdata, seed=seed)
+    return prepared, pipeline, times, scores, status
+
+
+def _apply_fair(df: pd.DataFrame, target: str, pipeline, mctsdata, seed: int = 42):
+    """The apply half of the fair protocol: winning chain -> {train+val 80%, test 20%}.
+
+    Shared by the normal path (_run_fair) and the checkpoint-salvage path (_salvage_worker), so
+    a salvaged pipeline goes through byte-identical apply logic.
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    tr, val, te = _split_positions(len(df), seed=seed)
+    trainval = np.concatenate([tr, val])
 
     # The apply step reuses the same LabelEncoding the search ran under, so the operators that read
     # labels see a consistent target. Stage 3 re-attaches the original y regardless.
@@ -259,7 +273,7 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS,
     p_test = p_test.copy()
     p_test["__adp_row__"] = p_test.index
     p_test["__adp_split__"] = "test"
-    return pd.concat([p_train, p_test], axis=0, ignore_index=True), pipeline, times, scores, status
+    return pd.concat([p_train, p_test], axis=0, ignore_index=True), status
 
 
 def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: str,
@@ -296,6 +310,11 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
         autodp_protocol.install_leakfree_cbe(verbose=True)
         autodp_protocol.install_scorer_patches(seed=seed, verbose=True)
         exc_counter.install(verbose=True)
+        # Best-so-far checkpoint, so a wall-clock kill can be salvaged apply-only instead of
+        # rerunning the whole search (see SearchCheckpoint's docstring). Installed AFTER the
+        # counter so it wraps the counting wrapper and both observe every iteration.
+        os.makedirs(out_dir, exist_ok=True)
+        autodp_protocol.SearchCheckpoint(_checkpoint_path(out_dir)).install(verbose=True)
 
     df = pd.read_csv(csv_path)
     task = _task_type(df[target])
@@ -347,6 +366,92 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
           f"in {elapsed:.1f}s", flush=True)
 
 
+def _checkpoint_path(out_dir: str) -> str:
+    return os.path.join(out_dir, "search_checkpoint.json")
+
+
+def _salvage_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: str,
+                    operator_space: str = "theirs", meta_corpus=None,
+                    family_order: str = "prior") -> None:
+    """Apply-only child: take the checkpointed best-so-far pipeline and produce prepared.csv.
+
+    Run after the watchdog killed the search at the wall-clock cap. The search already paid for
+    the pipeline; this only replays the fair-protocol apply step, which is one pass instead of
+    hundreds of iterations. `fair` mode only -- `native` is not a reported path and keeps the old
+    kill-means-timeout behaviour.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    ckpt = autodp_protocol.SearchCheckpoint.read(_checkpoint_path(out_dir))
+    if ckpt is None:
+        raise SystemExit("no checkpoint to salvage")
+    pipeline = list(ckpt["pipeline"])
+
+    if operator_space == "ours":
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import autodp_our_space
+        autodp_our_space.install(verbose=True, retrained_dir=meta_corpus, family_order=family_order)
+        global _ADAPTER
+        _ADAPTER = autodp_our_space
+
+    from autodatapre.Pipeline_Generation import MCTS_DATA as mctsdata
+
+    autodp_protocol.install_leakfree_cbe(verbose=True)
+    autodp_protocol.install_scorer_patches(seed=seed, verbose=True)
+
+    df = pd.read_csv(csv_path)
+    task = _task_type(df[target])
+    t0 = time.time()
+    prepared, status = _apply_fair(df, target, pipeline, mctsdata, seed=seed)
+    elapsed = time.time() - t0
+
+    os.makedirs(out_dir, exist_ok=True)
+    prepared.to_csv(os.path.join(out_dir, "prepared.csv"), index=False)
+    feat_cols = [c for c in prepared.columns if not c.startswith("__adp_")]
+    meta = {
+        "dataset_csv": os.path.abspath(csv_path),
+        "mode": mode,
+        "operator_space": operator_space,
+        "meta_corpus": str(meta_corpus) if meta_corpus else None,
+        "task_type": task,
+        "status": status,
+        "autodp_version": "0.1.12",
+        "runtime_budget_seconds": None,
+        "converged_default_budget": False,
+        "hit_wall_clock_cap": True,
+        # DISCLOSE WHEN REPORTING: the search was killed at the cap; this pipeline is the best
+        # of the iterations that completed, not of a converged search.
+        "salvaged_from_checkpoint": True,
+        "checkpoint_iterations_completed": int(ckpt.get("iterations_completed") or 0),
+        "checkpoint_internal_profit": ckpt.get("profit"),
+        "search_seconds": None,
+        "apply_seconds": round(elapsed, 2),
+        "seed": seed,
+        "search_split": autodp_protocol.SEARCH_SPLIT_TAG,
+        "metafeature_frame": "full",
+        "internal_scorer_seed": seed,
+        "leakfree_cbe": True,
+        "search_iteration_exceptions": None,  # counted in the killed process, not recoverable
+        "search_iteration_exception_kinds": None,
+        "search_iteration_first_traceback": None,
+        "pipeline": pipeline,
+        "search_curve_times": [],
+        "search_curve_scores": [],
+        "n_rows_input": int(len(df)),
+        "n_rows_prepared": int(len(prepared)),
+        "n_features_input": int(df.shape[1] - 1),
+        "n_features_prepared": len(feat_cols),
+        "prepared_feature_columns": feat_cols,
+        "n_object_cols_prepared": int(prepared[feat_cols].select_dtypes(include=["object", "category"]).shape[1]),
+    }
+    with open(os.path.join(out_dir, "autodp_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+    print(f"[ok  ] SALVAGED mode={mode} status={status} pipeline={pipeline} "
+          f"({meta['checkpoint_iterations_completed']} search iterations completed before the cap)",
+          flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset-csv", required=True, help="an exported <id>.csv from export_eval_datasets.py")
@@ -384,6 +489,43 @@ def main() -> None:
         return
 
     ctx = mp.get_context("spawn")  # torch + sklearn are not fork-safe on macOS
+
+    def _try_salvage() -> bool:
+        """After a cap kill: apply the checkpointed best-so-far pipeline instead of giving up.
+
+        The search wrote its running best to search_checkpoint.json after every completed
+        iteration (autodp_protocol.SearchCheckpoint), so a kill only loses the iterations that
+        never happened, not the ones already paid for. Returns True when prepared.csv +
+        autodp_meta.json exist, i.e. the dataset now has a scoreable result.
+        """
+        if args.mode != "fair":
+            return False
+        ckpt = autodp_protocol.SearchCheckpoint.read(_checkpoint_path(out_dir))
+        if ckpt is None:
+            return False
+        print(f"[warn] {did} ({args.mode}): killed at the cap after "
+              f"{ckpt.get('iterations_completed')} search iterations; salvaging the "
+              f"checkpointed pipeline {ckpt.get('pipeline')} apply-only", flush=True)
+        sp = ctx.Process(target=_salvage_worker,
+                         args=(args.dataset_csv, args.target, args.mode, args.seed, out_dir,
+                               args.operator_space, args.adp_meta_corpus, args.adp_family_order))
+        sp.start()
+        # The apply step gets its OWN budget, not the cap the search just exhausted: it is a
+        # single pass over the frame rather than a search loop, so the cap that was too small for
+        # hundreds of iterations says nothing about it. Floored so a deliberately tiny --cap-seconds
+        # (smoke tests) cannot sabotage the salvage it is meant to trigger.
+        sp.join(timeout=max(float(args.cap_seconds), 600.0))
+        if sp.is_alive():
+            sp.terminate()
+            sp.join(30)
+            if sp.is_alive():
+                sp.kill()
+                sp.join()
+            print(f"[warn] {did}: the apply step itself exceeded the cap; salvage abandoned",
+                  flush=True)
+            return False
+        return sp.exitcode == 0 and os.path.exists(done)
+
     # The retry budget is HALF the cap, not the cap itself: AutoDP still has to apply the winning
     # pipeline and merge the frames after its search loop ends, and on a large dataset that tail
     # can exceed whatever slack is left, which just burns the cap a second time. Worst case per
@@ -405,6 +547,11 @@ def main() -> None:
             if proc.is_alive():
                 proc.kill()
                 proc.join()
+            # A checkpointed pipeline beats both alternatives from here: the retry re-searches
+            # from scratch (and on the datasets that hit the cap once, it reliably hits it again
+            # -- dataset 722 burned 2x cap for nothing), and the failure row records nothing.
+            if _try_salvage():
+                return
             if attempt == 0 and args.runtime is None:
                 continue  # convergence mode never terminated -> fall back to the capped budget
             # Record the timeout so a rerun does not spend the same hours again, and so the report
@@ -415,14 +562,19 @@ def main() -> None:
                     "dataset_id": did, "mode": args.mode, "status": "timeout",
                     "cap_seconds": args.cap_seconds, "retry_runtime": retry_runtime,
                     "detail": "killed at the wall-clock cap in both the convergence attempt and the "
-                              "explicit-budget retry; AutoDP checks its budget only between search "
-                              "iterations, so a single slow operator (AD dedup is O(n^2), LOF, MICE) "
-                              "can overrun any budget on a large frame",
+                              "explicit-budget retry, and checkpoint salvage produced no result "
+                              "(no completed iteration, or the apply step itself overran the cap); "
+                              "AutoDP checks its budget only between search iterations, so a single "
+                              "slow operator (AD dedup is O(n^2), LOF, MICE) can overrun any budget",
                 }, f, indent=2)
             print(f"[FAIL] {did} ({args.mode}): killed at the wall-clock cap; recorded as a timeout. "
                   f"Rerun this dataset alone with a larger --cap-seconds to chase a real number.")
             sys.exit(2)
         if proc.exitcode != 0:
+            # A crashed search (segfault in a native op, OOM kill) is salvageable the same way a
+            # capped one is: any completed iteration left a checkpoint behind.
+            if _try_salvage():
+                return
             print(f"[FAIL] {did} ({args.mode}): worker exited {proc.exitcode}")
             sys.exit(proc.exitcode or 1)
         if runtime is not None and args.runtime is None:
