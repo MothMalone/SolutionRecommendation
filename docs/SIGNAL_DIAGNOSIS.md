@@ -1,5 +1,12 @@
 # Where the signal actually is — and where it is not
 
+> **⚠ Sections 4 and 6 were tested and did not hold.** The selection ladder §6 recommends was
+> measured on 24 reference-holdout datasets and returned −0.0004 (paired t=−0.18) at 3.80× the
+> runtime. §6's simulation manufactures headroom by resampling candidate pools with kernel
+> smoothing, and §4's proxy claim rests on the same inflated pool. **Read
+> [LADDER_RESULT.md](LADDER_RESULT.md) before acting on either.** Sections 1–3 and 5 are measured
+> and stand.
+
 Reproduce every number here with:
 
     python scripts/diagnose_signal_contribution.py

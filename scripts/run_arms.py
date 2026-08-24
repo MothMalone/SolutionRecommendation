@@ -149,6 +149,16 @@ ACOREC_REF_FLAGS = [
     "--autogluon-profile", "best_quality",
 ]
 
+# !! MEASURED AND FOUND NULL -- see docs/LADDER_RESULT.md. Do not enable this expecting a gain.
+#
+# Head-to-head on 24 reference-holdout datasets: mean delta -0.0004 vs REF, paired t=-0.18,
+# 4 wins / 4 losses / 16 exact ties, at 3.80x the runtime. The projected +0.06 to +0.07 below came
+# from a simulation whose candidate pools are resampled with kernel smoothing, which manufactures
+# maxima above anything measured; its regret scale is 4x the real one. Kept as a runnable arm so
+# the negative result stays reproducible, and because --screen-topk may still pay somewhere with
+# genuine spread between candidates. The rationale below is preserved as the reasoning that WAS
+# tested, not as a live recommendation.
+#
 # REF plus the multi-fidelity selection ladder. Kept SEPARATE from REF on purpose: REF is the
 # configuration the paper reports, and an arm that quietly changed it would make every existing
 # number incomparable. Running both is a clean ablation of the ladder alone.
