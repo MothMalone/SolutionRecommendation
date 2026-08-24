@@ -105,11 +105,15 @@ cells = [
         if (SOLUTION_DIR / ".git").exists():
             subprocess.run(["git", "-C", str(SOLUTION_DIR), "fetch", "origin", BRANCH], check=True)
             subprocess.run(["git", "-C", str(SOLUTION_DIR), "switch", BRANCH], check=True)
-            subprocess.run(["git", "-C", str(SOLUTION_DIR), "pull", "--ff-only", "origin", BRANCH], check=True)
+            # This is a disposable /kaggle/temp checkout. Resetting it makes
+            # a rerun deterministic instead of reusing an old evaluator file.
+            subprocess.run(["git", "-C", str(SOLUTION_DIR), "reset", "--hard", f"origin/{BRANCH}"], check=True)
         else:
             subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(SOLUTION_DIR)], check=True)
         # Guard against an old notebook/session cache before a long run.
         evaluator_path = SOLUTION_DIR / "scripts" / "h2o_evaluator.py"
+        if not evaluator_path.exists():
+            raise RuntimeError("H2O evaluator is missing from the cloned checkout")
         evaluator_source = evaluator_path.read_text(encoding="utf-8")
         required_evaluator_markers = (
             "def _classification_labels",
