@@ -181,13 +181,41 @@ At N=200, moving K from 1→5 gains **+0.036** — more than the entire 12→200
 | **3-rung — N=200, 20 → 5 → 1** | **0.8602** | **+0.074** |
 | 3-rung wider — N=400, 40 → 8 → 1 | 0.8683 | +0.082 |
 
-Read these as *relative* comparisons. The absolute levels are inflated by the resampling, which
-gives a richer candidate pool than 19 real pipelines; the ordering and the ratios are the result.
+Read these as *relative* comparisons, and read the 3-rung rows as an **upper bound**. Two reasons:
+the absolute levels are inflated by resampling, which gives a richer candidate pool than 19 real
+pipelines; and the simulation models the rungs as independent observers, whereas in the
+implementation screening ranks on the seed-42 validation split and the gate's 3-fold CV then
+re-scores over overlapping rows. The gate therefore partly re-confirms whichever candidates got
+lucky on that same signal rather than giving a second opinion. Leak-free with respect to test
+either way — just less additive than +0.074 suggests.
 
-**The cost objection does not survive measurement.** The gate was budgeted as if AutoGluon fits
-cost `time_limit` (300 s). Measured fits from the arm runs: **4–20 s**, including 19.4 s on a
-48,842-row dataset. A K of 8 with 3-fold CV is roughly 8 × 4 × 10 s ≈ 320 s. AutoDP spends
-3,300–6,500 s per large dataset. There is room for the whole ladder inside a comfortable win on time.
+**K does not rise forever, and the ceiling depends on gate fidelity.** The gate selects on a
+validation split, so ranking more candidates on it is the same winner's-curse mechanism this
+document identifies on the proxy axis. Sweeping the assumed gate fidelity (`--gate-rho`):
+
+| gate ρ | best K at N=12 | K=10 vs K=5 |
+|---|---|---|
+| 0.90 | still rising at 20 | +0.005 |
+| 0.70 | ~10 | +0.001 |
+| 0.55 | ~5 | **−0.002** |
+| 0.40 | ~3 | **−0.005** |
+
+K=5 was never worse than REF's K=1 at any fidelity tested, which is why the `ladder` preset uses
+it. Going higher needs the real gate fidelity measured first — the Spearman between the gate's own
+val and test scores — and that matters most on the small frames, where 862 (87 rows) has a ~17-row
+validation block that cannot rank five candidates reliably.
+
+**The cost objection mostly does not survive measurement.** The gate was budgeted as if AutoGluon
+fits cost `time_limit` (300 s). Measured fits from the arm runs: **4–20 s**, including 19.4 s on a
+48,842-row dataset. A K of 8 with 3-fold CV is roughly 8 × 4 × 10 s ≈ 320 s, against AutoDP's
+3,300–6,500 s per large dataset.
+
+One caveat those figures do not cover: they are fits on an *already prepared* frame, whereas
+screening runs 20 fits on 20 **differently preprocessed** frames, and the preprocessing is not free
+— knn imputation, lof and pca on 722's 15,000 × 48 cost real time before AutoGluon starts. Run the
+ladder on one real mid-size dataset end to end before committing a full pass; that is also the only
+way to see whether `--screen-time-limit 30` produces a model at all on the largest frames (if it
+does not, the code correctly falls back to proxy order, but silently).
 
 ---
 

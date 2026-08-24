@@ -973,6 +973,16 @@ class MetaPipelineRecommender:
         configs are re-scored from scratch by the caller's gate. Test labels are never consulted
         here. Returns proxy order unchanged if screening produces nothing usable, so a failure
         degrades to today's behaviour rather than losing the run.
+
+        NOT independent of the gate, though: this ranks on the seed-42 validation split and the
+        gate's CV then re-scores over overlapping rows, so the gate partly re-confirms the same
+        luck rather than providing a second opinion. The two rungs are therefore less additive
+        than treating them as separate observers would suggest.
+
+        Depends on `evaluate_candidates_autogluon` returning its results ordered by VALIDATION
+        score under `select_on_val=True` -- if that ever returns candidate order instead, this
+        silently degrades to returning the proxy's top-K. Pinned by
+        tests/test_candidate_screening.py::test_evaluate_candidates_autogluon_returns_val_ordered_results.
         """
         keep = max(1, int(keep))
         if len(candidate_configs) <= keep:
@@ -1826,8 +1836,9 @@ class MetaPipelineRecommender:
             retrieval_local_protected_candidates: List[Dict[str, Any]] = []
             protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
             ag_candidate_scores: Dict[str, float] = {}
-            # Set from the full deduped proxy ranking when the plain-ACO path runs; the ordering
-            # and per-feature paths leave it None and fall back to `aco_results`.
+            # Set from the full deduped proxy ranking when the plain-ACO path runs. The
+            # --search-ordering and per-feature paths leave it None and fall back to the
+            # `k`-truncated `aco_results`, so screening is capped at `k` there; REF uses neither.
             screen_pool: Optional[List[Tuple[Dict[str, Any], float]]] = None
             hybrid_select = bool(aco_params.get("hybrid_select", False))
             hybrid_select_margin = float(aco_params.get("hybrid_select_margin", 0.0))

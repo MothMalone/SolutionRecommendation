@@ -169,3 +169,82 @@ def test_screen_pool_is_not_clamped_by_k(monkeypatch):
     assert calls[0][0] == 6, f"screening saw {calls[0][0]} candidates, not the full 6 (k clamped it)"
     assert not calls[0][1], "screening rung must not run CV"
     assert "c4" in calls[1][2], f"proxy-rank-5 winner never reached the gate: {calls[1][2]}"
+
+
+def test_evaluate_candidates_autogluon_returns_val_ordered_results(monkeypatch):
+    """THE CONTRACT the screening rung stands on, exercised against the real function.
+
+    `_screen_candidates_with_autogluon` keeps `results[:keep]` and relies on `results` being
+    ordered by VALIDATION score under select_on_val=True. Every other test in this file mocks
+    `_evaluate_candidates_with_autogluon` and hands back a pre-ordered list, so they only prove
+    the slice works -- if the real function returned candidate order instead, screening would be
+    a silent no-op that returns the proxy's top-K and still passes all of them.
+
+    This drives the real `evaluate_candidates_autogluon` with a stubbed AutoGluon whose val and
+    test rankings are deliberately OPPOSITE, so candidate order, val order and test order are
+    three different permutations and only the right one can pass.
+    """
+    from automl_aco.search import evaluation as E
+
+    # val ranks c_lowtest best; test ranks it worst. Candidate order is a third permutation.
+    plan = {
+        "c_mid":     {"val": 0.50, "test": 0.60},
+        "c_lowtest": {"val": 0.90, "test": 0.10},
+        "c_hitest":  {"val": 0.10, "test": 0.90},
+    }
+    # A full config: this drives the REAL preprocessor, which requires every step key.
+    configs = [{"name": n, "imputation": "none", "scaling": "none", "encoding": "onehot",
+                "outlier_removal": "none", "feature_selection": "none",
+                "dimensionality_reduction": "none"} for n in plan]
+
+    # target is a perfect copy of x1, so a prediction can be built from the feature frame alone
+    # (the fit helper is handed features only -- labels are scored by the caller).
+    n = 120
+    df = pd.DataFrame({"x1": [float(i % 2) for i in range(n)],
+                       "target": [i % 2 for i in range(n)]})
+
+    monkeypatch.setattr(E, "AUTOGLUON_AVAILABLE", True, raising=False)
+    monkeypatch.setattr(E, "TabularPredictor", object, raising=False)
+    monkeypatch.setattr(E, "IdentityFeatureGenerator", object, raising=False)
+
+    state = {"i": 0}
+    order = list(plan)
+
+    def fake_fit(*, test_df, select_df=None, target_column, **kw):
+        # Called once per candidate, in candidate order.
+        name = order[state["i"] % len(order)]
+        state["i"] += 1
+        want = plan[name]
+
+        def _preds(frame, acc):
+            # target == x1, so the first column IS the correct answer; flip a controlled
+            # fraction of it to land on the accuracy this candidate is supposed to score.
+            truth = frame.iloc[:, 0].to_numpy().astype(int)
+            out = truth.copy()
+            n_wrong = int(round((1.0 - acc) * len(truth)))
+            out[:n_wrong] = 1 - out[:n_wrong]
+            return out
+
+        sel = _preds(select_df, want["val"]) if select_df is not None else None
+        return _preds(test_df, want["test"]), sel, None
+
+    monkeypatch.setattr(E, "_fit_predict_with_autogluon", fake_fit)
+
+    best_cfg, best_score, results, unsorted_res = E.evaluate_candidates_autogluon(
+        dataset=df, target_column="target", candidate_configs=configs,
+        time_limit_per_model=5, select_on_val=True, prepare_mode="leakfree",
+    )
+
+    names = [c["name"] for c, _ in results]
+    assert names[0] == "c_lowtest", (
+        f"results must be ordered by VALIDATION score; got {names}. If this fails, "
+        "_screen_candidates_with_autogluon is silently returning proxy order."
+    )
+    assert names == ["c_lowtest", "c_mid", "c_hitest"], f"not val-ordered: {names}"
+    # And the reported score is the chosen candidate's TEST score, not its val score.
+    assert best_cfg["name"] == "c_lowtest"
+    assert best_score == pytest.approx(0.10, abs=0.05), (
+        "selection is on val but the REPORTED number must be the test score"
+    )
+    # unsorted_res preserves candidate order -- that is what makes it 'unsorted'.
+    assert [c["name"] for c, _ in unsorted_res] == list(plan)

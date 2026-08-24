@@ -158,13 +158,29 @@ ACOREC_REF_FLAGS = [
 #     agrees with AutoGluon at Spearman 0.42. Simulated, moving that 1 -> 5 gains more (+0.036)
 #     than widening the search 12 -> 200 evaluations does (+0.028).
 #   * --screen-topk 20 puts a real-but-cheap AutoGluon rung between them, so the gate chooses from
-#     candidates ordered by AutoGluon rather than by the surrogate. That is the +0.07 row.
+#     candidates ordered by AutoGluon rather than by the surrogate. The simulated +0.07 for this is
+#     an UPPER BOUND: it models the rungs as independent observers, but screening selects on the
+#     seed-42 val split and the gate's 3-fold CV then re-scores over overlapping rows, so the gate
+#     partly re-confirms whichever candidates got lucky on that same signal. Leak-free with respect
+#     to test either way; just less additive than the number suggests.
 #   * n_ants/n_iterations 8x6=48 rather than 4x3=12: width is worth little on its own, but it is
 #     what gives the screening rung something to choose from.
 #   * neighbour aggregation 5/1 rather than the hardcoded 1/1, which was the worst-performing
 #     Siamese cell measured (regret 0.0373 vs 0.0343).
-# Costs roughly 320s of extra AutoGluon on measured fit times (4-20s each, even at 48k rows)
-# against AutoDP's 3300-6500s per large dataset.
+#
+# WHY K=5 AND NOT MORE. Gate fidelity is not constant in K -- the gate selects on a validation
+# split, so ranking more candidates on it is the same winner's-curse mechanism as on the proxy
+# axis. Sweeping the assumed gate fidelity: at rho=0.90 the K column rises through K=20, but at
+# rho=0.55 it peaks near K=5 and at rho=0.40 near K=3, with K=10 falling BELOW K=5 in both. K=5
+# was never worse than REF's K=1 at any fidelity tested, which is why it is the setting here.
+# Pushing K higher requires measuring the real gate fidelity first (Spearman between the gate's
+# val and test scores) -- especially on the small frames, where 862 (87 rows) has a ~17-row val
+# block that cannot rank five candidates reliably.
+#
+# COST. Fits themselves are cheap (4-20s measured, even at 48k rows), but screening runs 20 fits
+# on 20 DIFFERENTLY preprocessed frames, and the preprocessing is not free -- knn imputation, lof
+# and pca on a 15000x48 frame (722) cost real time before AutoGluon starts. Run the ladder on one
+# real mid-size dataset end to end before committing a full pass.
 ACOREC_LADDER_FLAGS = ACOREC_REF_FLAGS + [
     "--screen-topk", "20",
     "--screen-profile", "local_rf_xt",
