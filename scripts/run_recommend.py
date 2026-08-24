@@ -376,6 +376,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--screen-topk",
+        type=int,
+        default=0,
+        help=(
+            "Middle rung of the selection ladder: take this many proxy-ranked candidates, order "
+            "them with ONE short AutoGluon fit each on the validation split, and pass the best "
+            "--final-autogluon-topk of them to the full CV gate. 0 = off (the gate sees only the "
+            "proxy's top-k). The proxy agrees with AutoGluon at Spearman ~0.42, so its #1 is "
+            "often not the best candidate the search found; this recovers those without paying "
+            "(folds+1) fits for every one. Must exceed --final-autogluon-topk to do anything."
+        ),
+    )
+    parser.add_argument(
+        "--screen-profile",
+        default="local_rf_xt",
+        choices=["best_quality", "medium_quality", "local_rf_xt"],
+        help="AutoGluon profile for --screen-topk. Cheap by design; the full gate re-scores.",
+    )
+    parser.add_argument(
+        "--screen-time-limit",
+        type=int,
+        default=30,
+        help="AutoGluon time_limit per candidate during --screen-topk screening.",
+    )
+    parser.add_argument(
+        "--hybrid-no-search-neighbor-k",
+        type=int,
+        default=1,
+        help=(
+            "Neighbours aggregated to build the no-search (transfer-only) gate candidate. Was "
+            "hardcoded to 1 with no way to change it. On reference-holdout, aggregating the top 5 "
+            "under the trained metric beats the single nearest neighbour "
+            "(regret 0.0343 vs 0.0373) -- see docs/SIGNAL_DIAGNOSIS.md."
+        ),
+    )
+    parser.add_argument(
+        "--hybrid-no-search-top-l",
+        type=int,
+        default=1,
+        help="Pipelines taken from each neighbour for the no-search candidate. Was hardcoded to 1.",
+    )
+    parser.add_argument(
         "--hybrid-select-margin",
         type=float,
         default=0.0,
@@ -1916,6 +1958,11 @@ def main() -> None:
                     "hybrid_floor": str(args.hybrid_floor),
                     "noprep_penalty": float(getattr(args, "noprep_penalty", 0.0)),
                     "hybrid_select_margin": float(args.hybrid_select_margin),
+                    "screen_topk": int(args.screen_topk),
+                    "screen_profile": str(args.screen_profile),
+                    "screen_time_limit": int(args.screen_time_limit),
+                    "hybrid_no_search_neighbor_k": int(args.hybrid_no_search_neighbor_k),
+                    "hybrid_no_search_top_l": int(args.hybrid_no_search_top_l),
                     "cv_select_folds": int(args.cv_select_folds),
                     "no_warm_start": bool(args.no_warm_start),
                     "global_prior_weight": float(args.global_prior_weight),
@@ -2068,6 +2115,11 @@ def main() -> None:
             "metric_similarity_target": str(args.metric_similarity_target),
             "save_trained_metric": str(args.save_trained_metric) if args.save_trained_metric else None,
             "skip_aco_plot": bool(args.skip_aco_plot),
+            "screen_topk": int(args.screen_topk),
+            "screen_profile": str(args.screen_profile),
+            "screen_time_limit": int(args.screen_time_limit),
+            "hybrid_no_search_neighbor_k": int(args.hybrid_no_search_neighbor_k),
+            "hybrid_no_search_top_l": int(args.hybrid_no_search_top_l),
         }
         with open(rec_path, "w", encoding="utf-8") as f:
             json.dump(recommendation, f, indent=2, default=str)

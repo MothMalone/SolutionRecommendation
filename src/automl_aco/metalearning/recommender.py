@@ -946,6 +946,65 @@ class MetaPipelineRecommender:
             prepare_mode=str(prepare_mode),
         )
 
+    def _screen_candidates_with_autogluon(
+        self,
+        dataset,
+        target_column,
+        candidate_configs,
+        keep: int,
+        time_limit_per_model: int,
+        autogluon_profile: str,
+        seed: int,
+        prepare_mode: str,
+    ) -> List[Dict[str, Any]]:
+        """Middle rung of the selection ladder: cheap REAL AutoGluon, ranked on validation.
+
+        The proxy (a single LogReg) agrees with AutoGluon at Spearman ~0.42, so its #1 is often
+        not the best candidate it saw. Handing the full CV gate only that #1 throws away the
+        search. But the full gate costs (folds+1) fits per candidate, so it cannot absorb the
+        whole shortlist either.
+
+        This rung sits between them: ONE short AutoGluon fit per candidate, ranked on the held-out
+        validation split, keeping the best `keep` for the full gate. It is a genuine AutoGluon
+        signal rather than a surrogate, so it is far better than the proxy at ordering candidates,
+        and it is a single fit rather than k+1, so it costs a fraction of the gate.
+
+        Leak-free by construction: `select_on_val=True` ranks on validation only, and the returned
+        configs are re-scored from scratch by the caller's gate. Test labels are never consulted
+        here. Returns proxy order unchanged if screening produces nothing usable, so a failure
+        degrades to today's behaviour rather than losing the run.
+        """
+        keep = max(1, int(keep))
+        if len(candidate_configs) <= keep:
+            return list(candidate_configs)
+        try:
+            _cfg, _score, results, _unsorted = self._evaluate_candidates_with_autogluon(
+                dataset,
+                target_column,
+                candidate_configs,
+                time_limit_per_model=int(time_limit_per_model),
+                autogluon_profile=str(autogluon_profile),
+                select_on_val=True,          # rank on validation; never on test
+                select_default_name=None,    # no floor here -- the caller's gate owns that choice
+                cv_select_folds=0,           # one fit per candidate: that is the whole point
+                seed=int(seed),
+                prepare_mode=str(prepare_mode),
+            )
+        except Exception as exc:
+            if _is_autogluon_unavailable_error(exc):
+                raise
+            logger.warning("Candidate screening failed (%s); falling back to proxy order.", exc)
+            return list(candidate_configs[:keep])
+
+        if not results:
+            return list(candidate_configs[:keep])
+        # `results` is ordered by validation score when select_on_val=True.
+        screened = [dict(cfg) for cfg, _sc in results[:keep]]
+        if self.verbose:
+            print(f"Screened {len(candidate_configs)} candidates -> {len(screened)} "
+                  f"via {autogluon_profile} @ {time_limit_per_model}s (ranked on validation)")
+        return screened or list(candidate_configs[:keep])
+
     def _evaluate_candidates_with_simple_models(
         self,
         dataset,
@@ -1767,6 +1826,9 @@ class MetaPipelineRecommender:
             retrieval_local_protected_candidates: List[Dict[str, Any]] = []
             protect_retrieval_incumbent = bool(aco_params.get("protect_retrieval_incumbent", False))
             ag_candidate_scores: Dict[str, float] = {}
+            # Set from the full deduped proxy ranking when the plain-ACO path runs; the ordering
+            # and per-feature paths leave it None and fall back to `aco_results`.
+            screen_pool: Optional[List[Tuple[Dict[str, Any], float]]] = None
             hybrid_select = bool(aco_params.get("hybrid_select", False))
             hybrid_select_margin = float(aco_params.get("hybrid_select_margin", 0.0))
             cv_select_folds = int(aco_params.get("cv_select_folds", 0))
@@ -2158,14 +2220,35 @@ class MetaPipelineRecommender:
                 aco_results = final_ranked[:k]
                 aco_unsorted_res = all_unsorted_results
                 best_pipeline, best_score = aco_results[0]
+                # The FULL deduped proxy ranking, before `k` truncates it. `k` means "top-k
+                # similar datasets" for retrieval and doubles as the pipeline-shortlist cap, so
+                # without this the screening rung could never consider more than `k` candidates
+                # and --screen-topk would be silently clamped to it.
+                screen_pool = final_ranked
 
             final_eval = {"method": "proxy", "score": float(best_score)}
             if use_autogluon:
                 if autogluon_runtime_enabled and target_column is not None:
                     try:
                         topk = max(1, int(final_autogluon_topk))
+                        screen_topk = int(aco_params.get("screen_topk", 0))
                         if aco_results:
-                            ag_candidates = [dict(cfg) for cfg, _sc in aco_results[:topk]]
+                            # Screen from the FULL proxy ranking, not the `k`-truncated one.
+                            ranked_for_screen = screen_pool if screen_pool else aco_results
+                            if screen_topk > topk and len(ranked_for_screen) > topk:
+                                # Proxy picks a SHORTLIST, a short real AutoGluon fit orders it,
+                                # and only then does the expensive CV gate run. Without this the
+                                # gate sees the proxy's #1 and nothing else.
+                                pool = [dict(cfg) for cfg, _sc in ranked_for_screen[:screen_topk]]
+                                ag_candidates = self._screen_candidates_with_autogluon(
+                                    new_dataset, target_column, pool, keep=topk,
+                                    time_limit_per_model=int(aco_params.get("screen_time_limit", 30)),
+                                    autogluon_profile=str(aco_params.get("screen_profile", "local_rf_xt")),
+                                    seed=int(aco_params.get("seed", 42)),
+                                    prepare_mode=str(aco_params.get("prepare_mode", "leakfree")),
+                                )
+                            else:
+                                ag_candidates = [dict(cfg) for cfg, _sc in aco_results[:topk]]
                         else:
                             ag_candidates = [best_pipeline]
                         if optimizer_name == "retrieval_local" and retrieval_local_protected_candidates:
