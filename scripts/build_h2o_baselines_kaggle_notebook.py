@@ -84,6 +84,7 @@ cells = [
         H2O_NFOLDS = 5
         H2O_NTHREADS = 1
         H2O_MAX_MEM_SIZE = "6G"
+        H2O_BASE_PORT = 54321
 
         if RUN_MODE not in {"smoke", "final"} or not 0 <= DATASET_SHARD_INDEX < NUM_DATASET_SHARDS:
             raise ValueError("Invalid RUN_MODE or DATASET_SHARD_INDEX")
@@ -113,6 +114,8 @@ cells = [
         required_evaluator_markers = (
             "def _classification_labels",
             "test_prediction = _classification_labels(test_prediction)",
+            "port: Optional[int] = None",
+            "categorical/object predictors to strings",
         )
         if (
             "h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size), silent=True)" in evaluator_source
@@ -163,7 +166,7 @@ cells = [
                 raise RuntimeError(f"Could not load dataset {spec['dataset_id']}")
             return dataset
 
-        def evaluate_mode(dataset, mode):
+        def evaluate_mode(dataset, mode, port):
             X = pd.DataFrame(dataset["X"]).copy()
             y = pd.Series(dataset["y"]).copy()
             X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=SPLIT_SEED)
@@ -177,6 +180,7 @@ cells = [
                 seed=42,
                 nthreads=H2O_NTHREADS,
                 max_mem_size=H2O_MAX_MEM_SIZE,
+                port=port,
             )
             result.update({
                 "dataset_id": int(dataset["id"]),
@@ -205,14 +209,15 @@ cells = [
 
         for position, spec in enumerate(RUN_DATASETS, start=1):
             dataset = None
-            for mode in ("no_preprocessing", "h2o_default"):
+            for mode_index, mode in enumerate(("no_preprocessing", "h2o_default")):
                 if (str(spec["dataset_id"]), mode) in completed:
                     print(f"SKIP {spec['name']} / {mode}")
                     continue
                 print(f"[{position}/{len(RUN_DATASETS)}] {spec['name']} / {mode}")
                 try:
                     dataset = dataset or load_canonical(spec)
-                    row = evaluate_mode(dataset, mode)
+                    port = H2O_BASE_PORT + (position - 1) * 2 + mode_index
+                    row = evaluate_mode(dataset, mode, port)
                 except Exception as error:
                     traceback.print_exc()
                     row = {

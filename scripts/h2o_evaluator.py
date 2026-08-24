@@ -37,20 +37,32 @@ def _shutdown_h2o(h2o: Any) -> None:
     """Release the H2O JVM and frames after one isolated evaluation."""
     try:
         h2o.remove_all()
-    finally:
-        try:
-            h2o.cluster().shutdown(prompt=False)
-        except Exception:
-            # The cluster may already have exited after a JVM error.
-            pass
-        gc.collect()
+    except Exception:
+        # The JVM may already have exited; cleanup must not replace the real
+        # evaluation exception with a second H2OConnectionError.
+        pass
+    try:
+        h2o.cluster().shutdown(prompt=False)
+    except Exception:
+        # The cluster may already have exited after a JVM error.
+        pass
+    gc.collect()
 
 
-def _init_h2o(h2o: Any, *, nthreads: int, max_mem_size: str) -> None:
+def _init_h2o(
+    h2o: Any,
+    *,
+    nthreads: int,
+    max_mem_size: str,
+    port: Optional[int] = None,
+) -> None:
     """Start H2O with arguments supported by the pinned 3.46.x client."""
     # H2O 3.46.x removed the legacy ``silent`` keyword from ``h2o.init``.
     # Passing it through raises H2OTypeError before the JVM starts.
-    h2o.init(nthreads=int(nthreads), max_mem_size=str(max_mem_size))
+    kwargs = {"nthreads": int(nthreads), "max_mem_size": str(max_mem_size)}
+    if port is not None:
+        kwargs["port"] = int(port)
+    h2o.init(**kwargs)
     h2o.remove_all()
 
 
@@ -156,6 +168,7 @@ def evaluate_h2o_frames(
     seed: int = 42,
     nthreads: int = 1,
     max_mem_size: str = "6G",
+    port: Optional[int] = None,
     include_algos: Optional[list[str]] = None,
     keep_h2o_alive: bool = False,
 ) -> Tuple[Dict[str, Any], Any]:
@@ -163,44 +176,57 @@ def evaluate_h2o_frames(
     if task_type not in {"classification", "regression"}:
         raise ValueError(f"Unsupported task_type: {task_type!r}")
     h2o, H2OAutoML = _load_h2o()
-    _init_h2o(h2o, nthreads=nthreads, max_mem_size=max_mem_size)
+    _init_h2o(h2o, nthreads=nthreads, max_mem_size=max_mem_size, port=port)
 
-    train_x = _as_frame(X_train)
-    val_x = _as_frame(X_val, columns=list(train_x.columns))
-    test_x = _as_frame(X_test, columns=list(train_x.columns))
-    train_y = pd.Series(y_train).reset_index(drop=True)
-    val_y = pd.Series(y_val).reset_index(drop=True)
-    test_y = pd.Series(y_test).reset_index(drop=True)
-    if len(train_x) != len(train_y) or len(val_x) != len(val_y) or len(test_x) != len(test_y):
-        raise ValueError("H2O evaluator received mismatched X/y lengths")
+    try:
+        train_x = _as_frame(X_train)
+        val_x = _as_frame(X_val, columns=list(train_x.columns))
+        test_x = _as_frame(X_test, columns=list(train_x.columns))
+        train_y = pd.Series(y_train).reset_index(drop=True)
+        val_y = pd.Series(y_val).reset_index(drop=True)
+        test_y = pd.Series(y_test).reset_index(drop=True)
+        if len(train_x) != len(train_y) or len(val_x) != len(val_y) or len(test_x) != len(test_y):
+            raise ValueError("H2O evaluator received mismatched X/y lengths")
 
-    train_pd = train_x.copy()
-    val_pd = val_x.copy()
-    test_pd = test_x.copy()
-    if task_type == "classification":
-        # H2O factor predictions are returned using the factor labels. Keep
-        # the same string representation for validation/test metric scoring.
-        train_target = train_y.astype(str)
-        val_target = val_y.astype(str)
-        test_target = test_y.astype(str)
-    else:
-        train_target, val_target, test_target = train_y, val_y, test_y
-    train_pd["__target__"] = train_target.to_numpy()
-    val_pd["__target__"] = val_target.to_numpy()
-    test_pd["__target__"] = test_target.to_numpy()
-    train_frame = h2o.H2OFrame(train_pd)
-    val_frame = h2o.H2OFrame(val_pd)
-    test_frame = h2o.H2OFrame(test_pd)
-    categorical_predictors = _categorical_feature_columns(train_x)
-    _force_h2o_categorical_columns(
-        (train_frame, val_frame, test_frame), categorical_predictors
-    )
-    train_frame["__target__"] = train_frame["__target__"].asnumeric() if task_type == "regression" else train_frame["__target__"].asfactor()
-    val_frame["__target__"] = val_frame["__target__"].asnumeric() if task_type == "regression" else val_frame["__target__"].asfactor()
-    test_frame["__target__"] = test_frame["__target__"].asnumeric() if task_type == "regression" else test_frame["__target__"].asfactor()
-    predictors = [column for column in train_frame.names if column != "__target__"]
-    if not predictors:
-        raise ValueError("H2O evaluator received zero predictor columns")
+        train_pd = train_x.copy()
+        val_pd = val_x.copy()
+        test_pd = test_x.copy()
+        if task_type == "classification":
+            # H2O factor predictions are returned using the factor labels. Keep
+            # the same string representation for validation/test metric scoring.
+            train_target = train_y.astype(str)
+            val_target = val_y.astype(str)
+            test_target = test_y.astype(str)
+        else:
+            train_target, val_target, test_target = train_y, val_y, test_y
+        train_pd["__target__"] = train_target.to_numpy()
+        val_pd["__target__"] = val_target.to_numpy()
+        test_pd["__target__"] = test_target.to_numpy()
+        categorical_predictors = _categorical_feature_columns(train_x)
+        # H2OFrame may infer an object column containing numeric-looking values as
+        # a real column. Convert pandas categorical/object predictors to strings
+        # before upload so the later asfactor() call is type-stable across splits.
+        for frame in (train_pd, val_pd, test_pd):
+            for column in categorical_predictors:
+                frame[column] = frame[column].map(
+                    lambda value: None if pd.isna(value) else str(value)
+                )
+        train_frame = h2o.H2OFrame(train_pd)
+        val_frame = h2o.H2OFrame(val_pd)
+        test_frame = h2o.H2OFrame(test_pd)
+        _force_h2o_categorical_columns(
+            (train_frame, val_frame, test_frame), categorical_predictors
+        )
+        train_frame["__target__"] = train_frame["__target__"].asnumeric() if task_type == "regression" else train_frame["__target__"].asfactor()
+        val_frame["__target__"] = val_frame["__target__"].asnumeric() if task_type == "regression" else val_frame["__target__"].asfactor()
+        test_frame["__target__"] = test_frame["__target__"].asnumeric() if task_type == "regression" else test_frame["__target__"].asfactor()
+        predictors = [column for column in train_frame.names if column != "__target__"]
+        if not predictors:
+            raise ValueError("H2O evaluator received zero predictor columns")
+    except Exception:
+        if not keep_h2o_alive:
+            _shutdown_h2o(h2o)
+        raise
 
     preprocessing = ["target_encoding"] if h2o_preprocessing == "target_encoding" else None
     kwargs: Dict[str, Any] = {
