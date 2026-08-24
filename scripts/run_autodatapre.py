@@ -309,12 +309,18 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
     if mode == "fair":
         autodp_protocol.install_leakfree_cbe(verbose=True)
         autodp_protocol.install_scorer_patches(seed=seed, verbose=True)
-        exc_counter.install(verbose=True)
-        # Best-so-far checkpoint, so a wall-clock kill can be salvaged apply-only instead of
-        # rerunning the whole search (see SearchCheckpoint's docstring). Installed AFTER the
-        # counter so it wraps the counting wrapper and both observe every iteration.
+        # Best-so-far checkpoint, written per NODE EVALUATION so a kill can be salvaged apply-only.
+        # Iteration granularity was not enough: on 378/722 no iteration ever completed, because
+        # their scorer's profit=None poisons drop_unpromising and the loop spins (see
+        # SearchCheckpoint's docstring).
         os.makedirs(out_dir, exist_ok=True)
-        autodp_protocol.SearchCheckpoint(_checkpoint_path(out_dir)).install(verbose=True)
+        checkpoint = autodp_protocol.SearchCheckpoint(_checkpoint_path(out_dir))
+        checkpoint.install(verbose=True)
+        # The counter needs the checkpoint to tell a DEAD loop (iterations raising with no node
+        # evaluated between them) from a merely slow one, and to abort the former immediately
+        # rather than spinning until the wall-clock cap.
+        exc_counter = autodp_protocol.ExceptionCounter(checkpoint=checkpoint)
+        exc_counter.install(verbose=True)
 
     df = pd.read_csv(csv_path)
     task = _task_type(df[target])
@@ -423,7 +429,9 @@ def _salvage_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: s
         # DISCLOSE WHEN REPORTING: the search was killed at the cap; this pipeline is the best
         # of the iterations that completed, not of a converged search.
         "salvaged_from_checkpoint": True,
-        "checkpoint_iterations_completed": int(ckpt.get("iterations_completed") or 0),
+        "checkpoint_node_evals": int(ckpt.get("node_evals_completed") or 0),
+        "checkpoint_none_profit_evals": int(ckpt.get("none_profit_evals") or 0),
+        "checkpoint_depth": ckpt.get("depth"),
         "checkpoint_internal_profit": ckpt.get("profit"),
         "search_seconds": None,
         "apply_seconds": round(elapsed, 2),
@@ -448,7 +456,7 @@ def _salvage_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: s
     with open(os.path.join(out_dir, "autodp_meta.json"), "w") as f:
         json.dump(meta, f, indent=2, default=str)
     print(f"[ok  ] SALVAGED mode={mode} status={status} pipeline={pipeline} "
-          f"({meta['checkpoint_iterations_completed']} search iterations completed before the cap)",
+          f"({meta['checkpoint_node_evals']} node evaluations completed before the abort)",
           flush=True)
 
 
@@ -504,7 +512,7 @@ def main() -> None:
         if ckpt is None:
             return False
         print(f"[warn] {did} ({args.mode}): killed at the cap after "
-              f"{ckpt.get('iterations_completed')} search iterations; salvaging the "
+              f"{ckpt.get('node_evals_completed')} node evaluations; salvaging the "
               f"checkpointed pipeline {ckpt.get('pipeline')} apply-only", flush=True)
         sp = ctx.Process(target=_salvage_worker,
                          args=(args.dataset_csv, args.target, args.mode, args.seed, out_dir,

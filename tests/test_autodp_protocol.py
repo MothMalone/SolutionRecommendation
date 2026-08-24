@@ -433,55 +433,6 @@ print('@@' + json.dumps({
     assert result["report"]["search_iteration_exception_kinds"] == {"ValueError": 1}
 
 
-def test_checkpoint_records_running_best_and_survives_a_kill(tmp_path):
-    """The salvage path's whole premise: a checkpoint exists BEFORE the search finishes.
-
-    Simulates three iterations returning profits 0.5, 0.7, 0.6 and asserts the file on disk holds
-    the argmax pipeline (the 0.7 one), not the last one -- that is what makes an apply-only
-    salvage equivalent to what their loop would have returned had it stopped there.
-    """
-    ckpt_path = tmp_path / "search_checkpoint.json"
-    out = _run_in_adp_env(f"""
-import autodp_protocol as P
-from autodatapre.Pipeline_Generation import MCTS
-
-class FakeState:
-    def __init__(self, choices): self.cumulative_choices = choices
-
-class FakeNode:
-    def __init__(self, profit, choices):
-        self._p = profit
-        self.state = FakeState(choices)
-    def get_pre_profit(self): return self._p
-
-seq = iter([FakeNode(0.5, ['NB', 'MF']), FakeNode(0.7, ['NB', 'MF', 'ZS']), FakeNode(0.6, ['NB'])])
-MCTS.monte_carlo_tree_search = lambda *a, **k: next(seq)
-
-ckpt = P.SearchCheckpoint({str(ckpt_path)!r})
-ckpt.install(verbose=False)
-
-mid = None
-for i in range(3):
-    MCTS.monte_carlo_tree_search(None, None, None, None)
-    if i == 0:
-        # a kill right here must still leave a usable checkpoint behind
-        mid = P.SearchCheckpoint.read({str(ckpt_path)!r})
-
-print('@@' + json.dumps({{
-    'after_first': mid,
-    'final': P.SearchCheckpoint.read({str(ckpt_path)!r}),
-}}))
-""")
-    result = out[0]
-    assert result["after_first"]["pipeline"] == ["NB", "MF"], "no checkpoint after iteration 1"
-    final = result["final"]
-    assert final["pipeline"] == ["NB", "MF", "ZS"], "checkpoint must hold the BEST, not the last"
-    assert final["profit"] == pytest.approx(0.7)
-    # 2, not 3: the file is rewritten only when the best improves, so the count is "iterations
-    # completed as of this checkpoint". Iteration 3 was worse and correctly did not overwrite it.
-    assert final["iterations_completed"] == 2
-
-
 def test_checkpoint_read_returns_none_when_nothing_was_written(tmp_path):
     """No completed iteration -> no salvage. The caller must fall through to the timeout row."""
     out = _run_in_adp_env(f"""
@@ -494,3 +445,117 @@ junk = P.SearchCheckpoint.read({str(tmp_path / 'junk.json')!r})
 print('@@' + json.dumps({{'missing': missing, 'empty': empty, 'junk': junk}}))
 """)
     assert out[0] == {"missing": None, "empty": None, "junk": None}
+
+
+def test_checkpoint_records_every_node_evaluation_not_just_iterations(tmp_path):
+    """378 and 722 burned 10,800s each and produced NOTHING with iteration-level checkpointing.
+
+    Their scorer returns ``accuracy = None`` when a candidate leaves no usable numeric columns,
+    which makes ``get_profit_value`` compute ``None + float`` and ``drop_unpromising`` sort None
+    against floats. Both raise TypeError, the bare ``except:`` swallows it, ``gapcount`` never
+    advances, and the loop spins forever WITHOUT completing an iteration -- so an iteration-level
+    checkpoint stays empty while nodes have in fact been evaluated and scored.
+
+    Hooking ``get_profit`` captures them. This pins that the checkpoint exists after node
+    evaluations alone, with no iteration ever completing, and that a None profit is counted rather
+    than written as the best.
+    """
+    ckpt_path = tmp_path / "search_checkpoint.json"
+    out = _run_in_adp_env(f"""
+import autodp_protocol as P
+from autodatapre.Pipeline_Generation import MCTS
+
+class FakeState:
+    def __init__(self, choices, depth):
+        self.cumulative_choices = choices
+        self._d = depth
+    def get_current_depth(self): return self._d
+
+class FakeNode:
+    def __init__(self, profit, choices, depth):
+        self._p = profit
+        self.state = FakeState(choices, depth)
+    def get_pre_profit(self): return self._p
+    def get_state(self): return self.state
+
+# The real get_profit MUTATES its node argument and returns None, so the wrapper reads the
+# profit off the argument. The stub is a no-op: each node already carries its profit.
+MCTS.get_profit = lambda node, dataset, taskType, datasetTarget: None
+
+ckpt = P.SearchCheckpoint({str(ckpt_path)!r})
+ckpt.install(verbose=False)
+
+# profits mirror the real 378 trace: two valid, then a None from their no-usable-columns path.
+for node in (FakeNode(0.769, ['RF'], 0),
+             FakeNode(0.813, ['RF', 'CBE'], 1),
+             FakeNode(None,  ['RF', 'FE'], 1)):
+    MCTS.get_profit(node, None, None, None)
+
+print('@@' + json.dumps({{
+    'saved': P.SearchCheckpoint.read({str(ckpt_path)!r}),
+    'node_evals': ckpt.n_node_evals,
+    'none_profits': ckpt.n_none_profits,
+}}))
+""")
+    r = out[0]
+    assert r["node_evals"] == 3
+    assert r["none_profits"] == 1, "a None profit must be counted, not silently ignored"
+    saved = r["saved"]
+    assert saved is not None, "no checkpoint written despite three completed node evaluations"
+    assert saved["pipeline"] == ["RF", "CBE"], "must hold the best VALID node, not the last"
+    assert saved["profit"] == pytest.approx(0.813)
+    assert saved["depth"] == 1
+
+
+def test_exception_counter_aborts_a_dead_search_instead_of_spinning(tmp_path):
+    """The spin is what turned a 2-second failure into a 3-hour one on 378 and 722.
+
+    Their loop advances ``gapcount`` only on SUCCESS, so once every iteration raises it never
+    terminates. The signal for dead-not-slow is that iterations keep raising while the node-eval
+    counter does not move. Escape has to be ``os._exit``: their ``except:`` is bare, so it catches
+    SystemExit too and no exception can reach the caller.
+
+    Asserts the child really exits with code 3 after the threshold, and -- the other half --
+    that it does NOT abort while nodes are still being evaluated between failures.
+    """
+    ckpt_path = tmp_path / "ck.json"
+    script = f"""
+import autodp_protocol as P
+from autodatapre.Pipeline_Generation import MCTS
+
+ckpt = P.SearchCheckpoint({str(ckpt_path)!r})
+ckpt.pipeline = ['RF', 'CBE']; ckpt.best_profit = 0.813; ckpt._write()
+
+MCTS.monte_carlo_tree_search = lambda *a, **k: (_ for _ in ()).throw(TypeError('poisoned'))
+counter = P.ExceptionCounter(checkpoint=ckpt, spin_abort_after=25)
+counter.install(verbose=False)
+
+for i in range(200):
+    if {{ADVANCE}}:
+        ckpt.n_node_evals += 1      # work happening between failures => slow, not stuck
+    try:
+        MCTS.monte_carlo_tree_search(None, None, None, None)
+    except TypeError:
+        pass
+print('@@' + json.dumps({{'survived': True, 'exceptions': sum(counter.kinds.values())}}))
+"""
+    # Stuck: no node evaluated between failures -> must abort with code 3.
+    proc = subprocess.run([str(ADP_PY), "-c",
+                           "import warnings,sys,json; warnings.filterwarnings('ignore');"
+                           f"sys.path.insert(0,{SRC!r}); sys.path.insert(0,{SCRIPTS!r});"
+                           + script.replace("{ADVANCE}", "False")],
+                          capture_output=True, text=True)
+    assert proc.returncode == 3, (
+        f"a dead search must abort with code 3, got {proc.returncode}\n{proc.stdout}\n{proc.stderr}")
+    assert "ABORTING A DEAD SEARCH" in proc.stdout
+    assert "['RF', 'CBE']" in proc.stdout, "the abort must name the pipeline it is salvaging"
+
+    # Slow but alive: nodes ARE evaluated between failures -> must NOT abort.
+    proc = subprocess.run([str(ADP_PY), "-c",
+                           "import warnings,sys,json; warnings.filterwarnings('ignore');"
+                           f"sys.path.insert(0,{SRC!r}); sys.path.insert(0,{SCRIPTS!r});"
+                           + script.replace("{ADVANCE}", "True")],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, (
+        f"a slow-but-progressing search must NOT be aborted, got {proc.returncode}\n{proc.stderr}")
+    assert '"survived": true' in proc.stdout.replace("True", "true")

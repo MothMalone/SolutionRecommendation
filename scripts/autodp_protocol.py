@@ -304,49 +304,69 @@ def install_scorer_patches(seed: int = 42, verbose: bool = False) -> None:
 
 
 class SearchCheckpoint:
-    """Persist the best-so-far pipeline after every completed search iteration.
+    """Persist the best-so-far pipeline after every NODE EVALUATION.
 
-    AutoDP checks its time budget only BETWEEN iterations, and a single iteration can run for
-    hours on a large frame (AD dedup is O(n^2), LOF, MICE) -- so the wall-clock watchdog in
-    ``run_autodatapre.py`` can kill a search that has already found a perfectly good pipeline and
-    get NOTHING back (dataset 722: two full cap-kills, zero results). This wrapper mirrors the
-    ``best_node`` bookkeeping of ``CLA/REG_Without_TimeBudget`` from the outside: whenever an
-    iteration returns a node with a new best profit, the pipeline is written to ``path``
-    atomically, so the parent process can salvage it after a kill and run apply-only.
+    Iteration granularity was not enough. On datasets 378 and 722 the search never completed a
+    single MCTS iteration in 5400s, so an iteration-level checkpoint stayed empty and the
+    wall-clock kill produced nothing twice over. The cause is not slowness -- measured node
+    evaluations on 378 take 0.0-0.9s -- it is that their own scorer returns ``accuracy = None``
+    when a candidate leaves no usable numeric columns (``classifier.py``: ``if
+    (len(X_train.columns) < 1) or (len(X_train) < k): accuracy = None``), and then:
 
-    Not a method change: which pipeline wins is decided by their loop exactly as before; this
-    only records the running argmax. On a run that finishes normally the checkpoint is simply
-    ignored.
+      * ``Node.get_profit_value`` computes ``pre_profit + after_profit`` -> ``None + float``, and
+      * ``drop_unpromising`` calls ``profit.sort()`` on a list mixing ``None`` with floats.
+
+    Either raises TypeError on python 3, ``CLA_Without_TimeBudget``'s bare ``except:`` swallows it,
+    ``gapcount`` never advances, and the loop spins forever at full CPU without evaluating another
+    node. Observed on 378: 7 nodes evaluated in ~2s, then nothing for the rest of the budget.
+
+    Hooking ``get_profit`` -- the atomic unit that actually calls ``mctsdata.getAcc`` -- captures
+    those 7 evaluations, and the best of them (``['RF', 'CBE']``, profit 0.813) is a genuine,
+    genuinely-evaluated AutoDP preference. It also runs during the initial expansion loop, before
+    the ``while True`` is ever entered.
+
+    Not a method change: which pipeline their loop would pick is untouched; this only records the
+    running argmax over nodes THEY chose to evaluate and scored themselves.
     """
 
     def __init__(self, path: str) -> None:
         self.path = path
         self.best_profit: Optional[float] = None
         self.pipeline: Optional[List[Any]] = None
-        self.n_iterations = 0
+        self.best_depth: Optional[int] = None
+        self.n_node_evals = 0
+        self.n_none_profits = 0
 
     def install(self, verbose: bool = False) -> None:
         from autodatapre.Pipeline_Generation import MCTS
 
-        original = MCTS.monte_carlo_tree_search
+        original = MCTS.get_profit
         ckpt = self
 
-        def checkpointing_mcts(node, dataset, datasetTarget, taskType):
-            result = original(node, dataset, datasetTarget, taskType)
+        def checkpointing_get_profit(node, dataset, taskType, datasetTarget):
+            result = original(node, dataset, taskType, datasetTarget)
             try:
-                ckpt.n_iterations += 1
-                profit = float(result.get_pre_profit())
+                ckpt.n_node_evals += 1
+                profit = node.get_pre_profit()
+                if profit is None:
+                    # Their scorer's no-usable-numeric-columns path. Counting these is what turns
+                    # the resulting spin into a diagnosis instead of a mystery slow dataset.
+                    ckpt.n_none_profits += 1
+                    return result
+                profit = float(profit)
                 if ckpt.best_profit is None or profit > ckpt.best_profit:
                     ckpt.best_profit = profit
-                    ckpt.pipeline = list(result.state.cumulative_choices)
+                    ckpt.pipeline = list(node.get_state().cumulative_choices)
+                    ckpt.best_depth = int(node.get_state().get_current_depth())
                     ckpt._write()
             except BaseException:
                 pass  # bookkeeping must never break their search
             return result
 
-        MCTS.monte_carlo_tree_search = checkpointing_mcts
+        MCTS.get_profit = checkpointing_get_profit
         if verbose:
-            print(f"[protocol] checkpointing best-so-far pipeline to {self.path}", flush=True)
+            print(f"[protocol] checkpointing best-so-far pipeline (per node eval) to {self.path}",
+                  flush=True)
 
     def _write(self) -> None:
         tmp = self.path + ".tmp"
@@ -357,7 +377,9 @@ class SearchCheckpoint:
                 # As of THIS checkpoint. The file is only rewritten when the best improves, so a
                 # later non-improving iteration leaves this number behind -- which is what it
                 # should mean: how much search the salvaged pipeline is backed by.
-                "iterations_completed": self.n_iterations,
+                "node_evals_completed": self.n_node_evals,
+                "none_profit_evals": self.n_none_profits,
+                "depth": self.best_depth,
                 "written_at": time.time(),
             }, fh)
         os.replace(tmp, self.path)
@@ -398,10 +420,15 @@ class ExceptionCounter:
     a silently-empty search visible in the results row.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, checkpoint: "Optional[SearchCheckpoint]" = None,
+                 spin_abort_after: int = 500) -> None:
         self.kinds: Counter = Counter()
         self.first_traceback: Optional[str] = None
         self.installed = False
+        self.checkpoint = checkpoint
+        self.spin_abort_after = int(spin_abort_after)
+        self._evals_at_spin_start: Optional[int] = None
+        self._consecutive = 0
 
     def install(self, verbose: bool = False) -> None:
         from autodatapre.Pipeline_Generation import MCTS
@@ -411,17 +438,69 @@ class ExceptionCounter:
 
         def counting_mcts(node, dataset, datasetTarget, taskType):
             try:
-                return original(node, dataset, datasetTarget, taskType)
+                result = original(node, dataset, datasetTarget, taskType)
+                counter._consecutive = 0
+                counter._evals_at_spin_start = None
+                return result
             except BaseException as exc:
                 counter.kinds[type(exc).__name__] += 1
                 if counter.first_traceback is None:
                     counter.first_traceback = traceback.format_exc(limit=6)
+                counter._note_failure()
                 raise  # their loop still handles it; we only observe
 
         MCTS.monte_carlo_tree_search = counting_mcts
         self.installed = True
         if verbose:
-            print("[protocol] counting search-iteration exceptions", flush=True)
+            print("[protocol] counting search-iteration exceptions"
+                  + (f"; aborting if {self.spin_abort_after} consecutive raise with no new node "
+                     f"evaluation" if self.checkpoint is not None else ""), flush=True)
+
+    def _note_failure(self) -> None:
+        """Detect the dead loop and get out of it, instead of burning the whole wall-clock cap.
+
+        ``CLA_Without_TimeBudget``'s bare ``except:`` makes a permanently-failing iteration
+        indistinguishable from a slow one: ``gapcount`` only advances on SUCCESS, so once every
+        iteration raises, ``while True`` never terminates. That is what happened on 378 and 722 --
+        7 nodes evaluated in ~2s, then hours of pure spin, killed at the cap with nothing to show.
+
+        The signal for "dead, not slow" is precise: iterations keep raising while the node-eval
+        counter does not move, i.e. no work is being done between failures. A genuinely slow
+        dataset evaluates nodes between iterations and resets the counter.
+
+        Escaping is the awkward part. Their ``except:`` is bare, so it catches every exception
+        type, ``SystemExit`` and ``KeyboardInterrupt`` included -- there is no exception this can
+        raise that reaches the caller. ``os._exit`` is the only exit that their handler cannot
+        swallow. The checkpoint is already on disk (written per node evaluation), and
+        ``run_autodatapre`` salvages on a non-zero exit code, so the result survives the abort.
+        """
+        if self.checkpoint is None:
+            return
+        evals = self.checkpoint.n_node_evals
+        if self._evals_at_spin_start is None or evals != self._evals_at_spin_start:
+            # Work happened since the last failure: slow, not stuck. Restart the count.
+            self._evals_at_spin_start = evals
+            self._consecutive = 1
+            return
+        self._consecutive += 1
+        if self._consecutive < self.spin_abort_after:
+            return
+
+        import sys as _sys
+        print(
+            f"\n[protocol] ABORTING A DEAD SEARCH: {self._consecutive} consecutive iterations "
+            f"raised {dict(self.kinds)} with no node evaluated between them.\n"
+            f"[protocol] Their loop advances gapcount only on success, so this never terminates; "
+            f"it would spin until the wall-clock cap.\n"
+            f"[protocol] {evals} node(s) were evaluated before the spin "
+            f"({self.checkpoint.n_none_profits} returned profit=None, which is what poisons "
+            f"drop_unpromising/get_profit_value).\n"
+            f"[protocol] best checkpointed pipeline: {self.checkpoint.pipeline} "
+            f"(profit={self.checkpoint.best_profit}) -> salvaging apply-only.",
+            flush=True)
+        _sys.stdout.flush()
+        _sys.stderr.flush()
+        os._exit(3)   # their bare `except:` would swallow any exception, including SystemExit
 
     def report(self) -> dict:
         return {
