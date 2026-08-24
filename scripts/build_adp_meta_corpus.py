@@ -67,6 +67,14 @@ from automl_aco.eval_ids import EVAL_ID_SET, assert_disjoint, normalize_id  # no
 from automl_aco.adp_metafeatures import as_matrix, batch_dataset_vectors  # noqa: E402
 from automl_aco.search.evaluation import evaluate_candidates_simple  # noqa: E402
 from autodp_our_space import STEP_OPERATORS, _code  # noqa: E402
+from run_arms import THEIR_DATASETS  # noqa: E402
+
+# Arm 2-adp-ourops runs THIS corpus's retrained meta-learner ON their ten datasets. If any of
+# THEIR_DATASETS were also corpus rows, the 1-NN would retrieve the target dataset's own best
+# pipeline -- the same leak class as the ACORec-side one in run_arms.py. Verified disjoint from
+# this corpus (108 datasets, 0 overlap) when it was built; held out here so a future rebuild
+# cannot silently reintroduce the overlap.
+_HOLDOUT_EXTRA = list(THEIR_DATASETS)
 
 # Their pipeline is 7 slots: 6 preprocessing families then a model. Our space has exactly 6
 # families, so the shape is preserved and n_features_in_ stays 14 -- the arm varies the
@@ -189,7 +197,7 @@ def available_locally(local_dirs) -> set:
 def choose_ids(args, local_dirs=()) -> list:
     if args.ids:
         chosen = [normalize_id(i) for i in args.ids.split(",") if i.strip()]
-        assert_disjoint(chosen, context="adp meta-corpus --ids")
+        assert_disjoint(chosen, context="adp meta-corpus --ids", extra_ids=_HOLDOUT_EXTRA)
         return chosen
     feats = pd.read_csv(REPO / "data" / "openml" / "dataset_feats.csv", index_col=0)
     # Keep classification datasets only. The corpus feeds their CLASSIFICATION meta-learner, and
@@ -210,8 +218,8 @@ def choose_ids(args, local_dirs=()) -> list:
         print(f"[corpus] pool restricted to <= {args.max_features} features: "
               f"{before} -> {len(feats)} datasets")
     pool = [normalize_id(i) for i in feats.index]
-    pool = [i for i in pool if i not in EVAL_ID_SET]
-    assert_disjoint(pool, context="adp meta-corpus candidate pool")
+    pool = [i for i in pool if i not in EVAL_ID_SET and i not in _HOLDOUT_EXTRA]
+    assert_disjoint(pool, context="adp meta-corpus candidate pool", extra_ids=_HOLDOUT_EXTRA)
 
     # Prefer datasets that are already on disk. Sampling the library blind and relying on an
     # OpenML fetch fails wholesale in offline/partially-offline environments (observed on Kaggle:
@@ -238,7 +246,7 @@ def choose_ids(args, local_dirs=()) -> list:
     if args.shard:
         i, n = (int(x) for x in args.shard.split("/"))
         chosen = [d for k, d in enumerate(chosen) if k % n == (i - 1) % n]
-    assert_disjoint(chosen, context="adp meta-corpus selected datasets")
+    assert_disjoint(chosen, context="adp meta-corpus selected datasets", extra_ids=_HOLDOUT_EXTRA)
     return chosen
 
 
@@ -459,7 +467,7 @@ def main() -> int:
         print("[corpus] nothing succeeded; not writing CSVs")
         return 1
     ok.sort(key=lambda r: r["dataset_id"])
-    assert_disjoint([r["dataset_id"] for r in ok], context="adp meta-corpus output")
+    assert_disjoint([r["dataset_id"] for r in ok], context="adp meta-corpus output", extra_ids=_HOLDOUT_EXTRA)
 
     def _cached(dsid: str) -> Path:
         for base in [cache] + extra_caches:

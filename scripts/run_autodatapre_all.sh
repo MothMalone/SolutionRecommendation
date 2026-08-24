@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full AutoDP baseline over all 23 evaluation datasets, both protocols, end to end.
+# Full AutoDP baseline over all 30 evaluation datasets (EVAL_IDS), fair protocol, end to end.
 #
 #   stage 1  export_eval_datasets.py   main env    OpenML -> data/eval_datasets/<id>.csv
 #   stage 2  run_autodatapre.py        .venv-autodp  AutoDP MCTS -> prepared.csv
@@ -15,7 +15,7 @@
 #
 # Then:
 #   bash scripts/run_autodatapre_all.sh outputs/autodp
-#   bash scripts/run_autodatapre_all.sh outputs/autodp 1800 300 "native fair"
+#   bash scripts/run_autodatapre_all.sh outputs/autodp 1800 300 "fair" "$(python3 -c 'import sys; sys.path.insert(0,"src"); from automl_aco.eval_ids import EVAL_IDS; print(" ".join(EVAL_IDS))')"
 #
 # Args: <output_dir> [cap_seconds] [autogluon_time_limit] [modes] [ids]
 #   cap_seconds           wall-clock watchdog per dataset. AutoDP runs to ITS OWN convergence rule
@@ -23,14 +23,20 @@
 #                         convergence never fires, by retrying it with an explicit runTime budget.
 #   autogluon_time_limit  passed to AutoGluon in stage 3. Use the SAME value your own runs used,
 #                         or the comparison is not compute-matched.
+#   modes                 default "fair" -- the only REPORTED protocol (docs/AUTODP_BASELINE.md).
+#                         "native" is AutoDP's literal published API, deliberately unpatched and
+#                         NOT a reported number for either method; pass it explicitly only for a
+#                         disclosure column.
 set -u
 cd "$(dirname "$0")/.."
 
 OUT="${1:?usage: run_autodatapre_all.sh <output_dir> [cap_seconds] [ag_time_limit] [modes] [ids]}"
 CAP="${2:-1800}"
 TL="${3:-300}"
-MODES="${4:-native fair}"
-IDS="${5:-248 1066 1164 1047 862 2 40663 1054 1387 876 18 1520 1548 184 378 381 382 993 1485 14 27 29 31}"
+MODES="${4:-fair}"
+# The current 30-id EVAL_IDS (src/automl_aco/eval_ids.py). The old default here was the LEGACY
+# 23-id set; results against it are not comparable to anything reported against the 30.
+IDS="${5:-1066 1047 862 40663 1054 876 18 1520 1548 378 1485 14 27 44956 1037 42932 40668 1471 100000 42165 41001 41671 1046 46597 30 802 722 40922 1119 1497}"
 
 AG_PROFILE="${AG_PROFILE:-best_quality}"   # match whatever your own runs used
 MAIN_PY="${MAIN_PY:-.venv/bin/python}"

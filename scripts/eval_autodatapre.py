@@ -187,6 +187,20 @@ def score_prepared(
         "autodp_search_seconds": adp_meta.get("search_seconds"),
         "autodp_converged": adp_meta.get("converged_default_budget"),
         "autodp_hit_cap": bool(adp_meta.get("hit_wall_clock_cap", False)),
+        # Protocol fields from scripts/autodp_protocol.py, so a reported number can be traced to
+        # what produced it. search_iteration_exceptions in particular: their MCTS loop swallows
+        # every exception in a bare `except:`, so a search that failed on EVERY iteration still
+        # "converges" and reports a pipeline that was never actually evaluated -- most likely on
+        # small frames, where a classifier's internal k_folds guard returns None on a batch shrunk
+        # by Is_BatchTraining, and drop_unpromising's sort() cannot compare None to float. A row
+        # with this near its iteration count is not a real preference and should be flagged, not
+        # averaged in as if the search had succeeded.
+        "search_split": adp_meta.get("search_split"),
+        "metafeature_frame": adp_meta.get("metafeature_frame"),
+        "internal_scorer_seed": adp_meta.get("internal_scorer_seed"),
+        "leakfree_cbe": adp_meta.get("leakfree_cbe"),
+        "search_iteration_exceptions": adp_meta.get("search_iteration_exceptions"),
+        "search_iteration_exception_kinds": adp_meta.get("search_iteration_exception_kinds"),
         "autogluon_eval_seconds": round(eval_seconds, 2),
         "total_seconds": round(float(adp_meta.get("search_seconds") or 0.0) + eval_seconds, 2),
         "problem_type": problem_type,

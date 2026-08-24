@@ -113,13 +113,18 @@ def main() -> None:
     lines.append(
         "Scores are AutoGluon test performance (accuracy for classification, R² for regression) on "
         "the identical seed-42 0.6/0.2/0.2 split, fit on train+val (80%), predicting the same 20% "
-        "test rows. AutoDP's MCTS search, its pretrained meta-learner and its internal NB/LDA/RF "
-        "scoring signal run as published; only the final scorer is swapped to AutoGluon, exactly as "
-        "for our pipelines.\n")
+        "test rows. AutoDP's method runs as published -- MCTS's tree policy, its pretrained "
+        "meta-learner, its value estimate, operator semantics -- but its EVALUATION layer is moved "
+        "onto our setting (scripts/autodp_protocol.py): the search scores on our seed-42 split "
+        "rather than its own unseeded internal one, CBE no longer consumes the labels of the rows "
+        "it encodes, and the internal RF/ExtraTrees scorer is seeded. Only the final scorer is "
+        "swapped to AutoGluon, exactly as for our pipelines.\n")
     lines.append(
-        f"AutoDP score column = `{args.autodp_score}`. **native** = its published API, whose search "
-        "sees the full dataset including our test rows (transductive, generous to AutoDP). **fair** "
-        "= its search restricted to our 80% train+val, the protocol our method is held to. "
+        f"AutoDP score column = `{args.autodp_score}`. **fair** is the only REPORTED protocol: its "
+        "search sees only our 80% train+val, the same discipline our own method is held to. "
+        "**native** -- AutoDP's literal published API, whose search sees the full dataset including "
+        "our test rows, deliberately left unpatched -- is NOT a reported number for either method; "
+        "if this table shows a native column, treat it as a disclosure artifact, not a comparison. "
         + ("Runtime is AutoDP's own search time to convergence; AutoGluon scoring time is excluded "
            "because it is our harness and identical work for every method.\n"
            if args.runtime_column == "search" else
