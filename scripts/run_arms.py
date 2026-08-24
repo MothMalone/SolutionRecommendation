@@ -149,6 +149,30 @@ ACOREC_REF_FLAGS = [
     "--autogluon-profile", "best_quality",
 ]
 
+# REF plus the multi-fidelity selection ladder. Kept SEPARATE from REF on purpose: REF is the
+# configuration the paper reports, and an arm that quietly changed it would make every existing
+# number incomparable. Running both is a clean ablation of the ladder alone.
+#
+# Why these values (all from reference-holdout, never the eval sets -- docs/SIGNAL_DIAGNOSIS.md):
+#   * REF hands the CV gate exactly ONE candidate out of the whole search, chosen by a proxy that
+#     agrees with AutoGluon at Spearman 0.42. Simulated, moving that 1 -> 5 gains more (+0.036)
+#     than widening the search 12 -> 200 evaluations does (+0.028).
+#   * --screen-topk 20 puts a real-but-cheap AutoGluon rung between them, so the gate chooses from
+#     candidates ordered by AutoGluon rather than by the surrogate. That is the +0.07 row.
+#   * n_ants/n_iterations 8x6=48 rather than 4x3=12: width is worth little on its own, but it is
+#     what gives the screening rung something to choose from.
+#   * neighbour aggregation 5/1 rather than the hardcoded 1/1, which was the worst-performing
+#     Siamese cell measured (regret 0.0373 vs 0.0343).
+# Costs roughly 320s of extra AutoGluon on measured fit times (4-20s each, even at 48k rows)
+# against AutoDP's 3300-6500s per large dataset.
+ACOREC_LADDER_FLAGS = ACOREC_REF_FLAGS + [
+    "--screen-topk", "20",
+    "--screen-profile", "local_rf_xt",
+    "--screen-time-limit", "30",
+    "--hybrid-no-search-neighbor-k", "5",
+    "--hybrid-no-search-top-l", "1",
+]
+
 
 def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args,
                data: str = "ours") -> list:
@@ -174,6 +198,23 @@ def acorec_cmd(dataset_id: str, csv_path: Path, ops: str, workdir: Path, args,
         cmd += ["--holdout-ids", ",".join(THEIR_DATASETS)]
     if args.acorec_config == "ref":
         cmd += ACOREC_REF_FLAGS
+    elif args.acorec_config == "ladder":
+        # The ladder needs a wider search to have anything to screen; overriding the budget here
+        # rather than in the flag list keeps --n-ants/--n-iterations usable on the command line.
+        cmd += ACOREC_LADDER_FLAGS
+        # REF's own values for these three are what the ladder exists to change, and they arrive
+        # via ACOREC_REF_FLAGS / the argparse defaults, so they are overridden in place rather
+        # than appended -- a duplicate flag would leave argparse taking the LAST one, which is
+        # fragile to reordering. --final-autogluon-topk is the important one: leaving it at REF's
+        # 1 would let the ladder screen 20 candidates down to a single gate entry and throw away
+        # most of the measured gain (K=1 -> 5 is +0.036; see docs/SIGNAL_DIAGNOSIS.md section 6).
+        for flag, value in (("--n-ants", "8"),
+                            ("--n-iterations", "6"),
+                            ("--final-autogluon-topk", "5")):
+            if flag in cmd:
+                cmd[cmd.index(flag) + 1] = value
+            else:
+                cmd += [flag, value]
     else:
         cmd += ["--hybrid-select", "--cv-select-folds", "3"]
     # Trailing extras win, so an ablation can override any REF flag above.
@@ -308,10 +349,13 @@ def main() -> int:
     ap.add_argument("--n-ants", type=int, default=4)
     ap.add_argument("--n-iterations", type=int, default=3)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--acorec-config", choices=["ref", "minimal"], default="ref",
+    ap.add_argument("--acorec-config", choices=["ref", "ladder", "minimal"], default="ref",
                     help="ref (default) = the deployed ACORec config from docs/EXPERIMENTS.md, "
-                         "including the trained Siamese and --require-autogluon. minimal = the "
-                         "old bare invocation, which silently used cosine similarity.")
+                         "including the trained Siamese and --require-autogluon. ladder = ref plus "
+                         "the multi-fidelity selection ladder (--screen-topk, wider budget, top-5 "
+                         "neighbour aggregation) -- run it against ref as a clean ablation, see "
+                         "docs/SIGNAL_DIAGNOSIS.md. minimal = the old bare invocation, which "
+                         "silently used cosine similarity.")
     ap.add_argument("--acorec-extra", default="",
                     help="Extra flags for run_recommend.py only (ACORec arms).")
     ap.add_argument("--adp-extra", default="",
@@ -439,9 +483,12 @@ def main() -> int:
         head = [sys.executable, str(REPO / "scripts" / "run_recommend.py")]
         check_extra_flags(head, args.extra, "run_recommend.py")
         check_extra_flags(head, args.acorec_extra, "run_recommend.py")
-        print(f"[arms] acorec-config={args.acorec_config}"
-              + ("  (Siamese TRAINED, AutoGluon required)" if args.acorec_config == "ref"
-                 else "  WARNING: 'minimal' uses COSINE similarity, not the trained Siamese"))
+        banner = {
+            "ref": "  (Siamese TRAINED, AutoGluon required)",
+            "ladder": "  (REF + multi-fidelity screening ladder; compare against ref, not to it)",
+            "minimal": "  WARNING: 'minimal' uses COSINE similarity, not the trained Siamese",
+        }[args.acorec_config]
+        print(f"[arms] acorec-config={args.acorec_config}{banner}")
     else:
         head = [sys.executable, str(REPO / "scripts" / "adp_bench.py")]
         check_extra_flags(head, args.extra, "adp_bench.py")
