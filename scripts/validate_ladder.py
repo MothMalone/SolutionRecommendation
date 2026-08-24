@@ -47,12 +47,63 @@ THEIR_DATASETS = {"42493", "43723", "8335", "40945", "1461", "31", "42178", "184
 
 # The deployed configuration, minus the AutoGluon profile and budget, which the caller sets so the
 # same script can run locally and on Kaggle. Mirrors ACOREC_REF_FLAGS in run_arms.py.
+#
+# The metric flags are NOT here: run_recommend rejects --metric-path together with
+# --train-metric-inline, and this script trains the Siamese ONCE and reuses it (see
+# train_shared_metric). run_recommend itself builds the recommender once before its dataset loop,
+# so a batched production run pays that cost once too -- it is one subprocess per dataset here that
+# would otherwise repeat it, which is an artifact of the harness rather than of ACORec, and it
+# would put ~3 identical minutes into both arms' runtimes and make the cost comparison meaningless.
 REF_FLAGS = [
-    "--train-metric-inline", "--metric-loss", "pearson", "--metric-weight-decay", "1e-4",
+    "--metric-loss", "pearson", "--metric-weight-decay", "1e-4",
     "--metric-objective", "embedding_cosine", "--aco-mmas-bounds", "--aco-weight-method", "linear",
     "--hybrid-select", "--proxy-seeds", "42,52,62", "--cv-select-folds", "3",
     "--optimizer", "aco", "--require-autogluon",
 ]
+
+
+def train_shared_metric(holdout: list, args) -> str:
+    """Train the Siamese ONCE against this comparison's holdout, and reuse it for every run.
+
+    Safe precisely because the holdout is identical for every run in the grid: all the datasets
+    being compared are excluded from the reference on all of them, so one metric is the same
+    object each run would have trained for itself. Both arms then load byte-identical weights,
+    which also removes metric-training variance as a confound between them.
+    """
+    metric_path = Path(args.scratch) / "shared_metric.pt"
+    if metric_path.exists() and not args.retrain_metric:
+        print(f"[validate] reusing metric {metric_path}")
+        return str(metric_path)
+
+    probe = holdout[0]
+    cmd = [
+        sys.executable, str(REPO / "scripts" / "run_recommend.py"),
+        "--dataset-source", "csv",
+        "--dataset-csv", str(CORPUS / f"{probe}.csv"),
+        "--target-column", "target", "--dataset-id", str(probe),
+        "--holdout-ids", ",".join(holdout),
+        "--operator-space", "ours",
+        "--train-metric-inline",
+        "--metric-loss", "pearson", "--metric-weight-decay", "1e-4",
+        "--metric-objective", "embedding_cosine",
+        "--seed", str(args.seed),
+        "--save-trained-metric", str(metric_path),
+        # Cheapest possible run that still reaches the save: the recommendation is thrown away,
+        # only the trained weights are wanted.
+        "--baseline-only", "no_preprocessing",
+        "--autogluon-profile", "local_rf_xt", "--time-limit", "15",
+        "--output-dir", str(Path(args.scratch) / "_metric_train"),
+    ]
+    env = dict(os.environ)
+    env.update(OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+               OPENBLAS_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
+    print(f"[validate] training the shared Siamese metric (once) ...", flush=True)
+    t0 = time.time()
+    proc = subprocess.run(cmd, cwd=REPO, env=env, capture_output=True, text=True, timeout=3600)
+    if not metric_path.exists():
+        raise SystemExit(f"metric training produced no file:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+    print(f"[validate] metric trained in {time.time() - t0:.0f}s -> {metric_path}")
+    return str(metric_path)
 
 
 def arm_flags(arm: str, args) -> list:
@@ -70,7 +121,7 @@ def arm_flags(arm: str, args) -> list:
     ]
 
 
-def run_one(arm: str, did: str, holdout: list, args) -> dict:
+def run_one(arm: str, did: str, holdout: list, args, metric_path: str) -> dict:
     workdir = Path(args.scratch) / f"{arm}_{did}"
     cmd = [
         sys.executable, str(REPO / "scripts" / "run_recommend.py"),
@@ -87,6 +138,7 @@ def run_one(arm: str, did: str, holdout: list, args) -> dict:
         "--time-limit", str(args.time_limit),
         "--seed", str(args.seed),
         "--autogluon-profile", args.autogluon_profile,
+        "--metric-path", metric_path,   # identical weights in both arms; see train_shared_metric
         "--output-dir", str(workdir),
     ] + REF_FLAGS + arm_flags(arm, args)
 
@@ -213,6 +265,8 @@ def main() -> int:
     ap.add_argument("--per-run-timeout", type=int, default=3600)
     ap.add_argument("--scratch", default="/tmp/ladder_val")
     ap.add_argument("--arms", default="ref,ladder")
+    ap.add_argument("--retrain-metric", action="store_true",
+                    help="retrain the shared Siamese even if the cached file exists")
     args = ap.parse_args()
 
     if args.summarize:
@@ -247,6 +301,8 @@ def main() -> int:
           f"profile={args.autogluon_profile}, time_limit={args.time_limit}s")
     print(f"[validate] holdout covers all {len(ids)} datasets on every run")
 
+    metric_path = train_shared_metric(ids, args)
+
     for did in ids:
         for arm in arms:
             if (arm, did) in done:
@@ -254,7 +310,7 @@ def main() -> int:
                 continue
             print(f"  {arm}/{did} ...", flush=True)
             try:
-                row = run_one(arm, did, ids, args)
+                row = run_one(arm, did, ids, args, metric_path)
             except subprocess.TimeoutExpired:
                 row = {"arm": arm, "dataset_id": did, "status": "timeout",
                        "seconds": args.per_run_timeout}
