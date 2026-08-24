@@ -302,10 +302,11 @@ def acorec() -> list[dict]:
         md("""
         # ACORec + AutoGluon
 
-        ACORec uses the current repository operator space (`ours`) and searches
-        on outer train+validation only. The final frozen recommendation is
-        evaluated by AutoGluon through `run_recommend.py`, which uses the same
-        repository `split_train_val_test` implementation.
+        ACORec uses the current repository operator space (`ours`). Its proxy
+        receives the explicit outer train/validation split without splitting
+        the 80% search subset again, and query metafeatures are recomputed from
+        those permitted rows. The frozen recommendation is then evaluated by
+        AutoGluon on the untouched outer test split.
 
         AutoGluon is limited to 300 seconds per evaluation in both modes.
         Smoke mode only reduces the number of datasets. Runtime is recorded by
@@ -315,7 +316,7 @@ def acorec() -> list[dict]:
         import os, subprocess, sys
         from pathlib import Path
         REPO_URL = "https://github.com/MothMalone/SolutionRecommendation.git"
-        BRANCH = "feature/acorec-autodp-space"
+        BRANCH = "experiment/aco-search-ablation"
         REPO_DIR = Path("/kaggle/working/SolutionRecommendation")
         if (REPO_DIR / ".git").exists():
             subprocess.run(["git", "-C", str(REPO_DIR), "fetch", "origin", BRANCH], check=True)
@@ -326,6 +327,17 @@ def acorec() -> list[dict]:
         subprocess.run([sys.executable, "-m", "pip", "install", "-q", "-r", str(REPO_DIR / "requirements-kaggle.txt")], check=True)
         os.chdir(REPO_DIR)
         print("Commit:", subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True).strip())
+        runner_source = (REPO_DIR / "scripts/run_recommend.py").read_text(encoding="utf-8")
+        evaluator_source = (REPO_DIR / "src/automl_aco/search/evaluation.py").read_text(encoding="utf-8")
+        required_markers = {
+            "explicit proxy split": "_acorec_fixed_proxy_split" in runner_source and "_proxy_split_from_dataset" in evaluator_source,
+            "split audit metadata": '"explicit_outer_split"' in runner_source,
+            "leak-free query metafeatures": "computed_from_outer_train_validation" in runner_source,
+        }
+        missing = [name for name, present in required_markers.items() if not present]
+        if missing:
+            raise RuntimeError(f"Remote checkout lacks required ACO protocol fixes: {missing}")
+        print("Protocol guard: explicit outer train/validation split; outer test excluded from ACO.")
         """),
         code("""
         from __future__ import annotations
@@ -376,7 +388,7 @@ def acorec() -> list[dict]:
             output_path = dataset_dir / "autogluon_evaluation.json"
             evaluation_command = [sys.executable, str(REPO_DIR / "scripts/evaluate_acorec_autogluon.py"), "--recommendation-json", str(recommendation_path), "--dataset-id", str(dataset_id), "--data-dir", str(CACHE_DIR), "--output-json", str(output_path), "--max-samples", str(MAX_SAMPLES), "--split-seed", str(SPLIT_SEED), "--time-limit", str(AG_TIME_LIMIT), "--presets", AG_PRESETS]
             print("Outer-test AutoGluon:", " ".join(shlex.quote(str(value)) for value in evaluation_command))
-            subprocess.run(evaluation_command, cwd=REPO_DIR, env=env, check=False)
+            subprocess.run(evaluation_command, cwd=REPO_DIR, env=env, check=True)
         """),
         code("""
         def dataset_output_dir(dataset_id): return OUTPUT_DIR if len(run_ids) == 1 else OUTPUT_DIR / f"dataset_{dataset_id}"
@@ -386,7 +398,8 @@ def acorec() -> list[dict]:
             result = json.loads((dataset_dir / "recommendation.json").read_text(encoding="utf-8"))
             evaluation_path = dataset_dir / "autogluon_evaluation.json"
             evaluation = json.loads(evaluation_path.read_text(encoding="utf-8")) if evaluation_path.exists() else {}
-            rows.append({"dataset_id": int(dataset_id), "status": evaluation.get("status", "not_run"), "final_method": evaluation.get("method"), "score": evaluation.get("score"), "accuracy": evaluation.get("accuracy"), "aco_search_elapsed_seconds": result.get("elapsed_seconds"), "autogluon_total_seconds": evaluation.get("total_seconds"), "outer_evaluation_wall_clock_seconds": evaluation.get("acorec_and_evaluation_wall_clock_seconds"), "notebook_wall_clock_seconds": run_wall_clock_seconds, "autogluon_time_limit": AG_TIME_LIMIT, "error": evaluation.get("error", result.get("error"))})
+            protocol = result.get("recommendation_protocol", {})
+            rows.append({"dataset_id": int(dataset_id), "status": evaluation.get("status", "not_run"), "final_method": evaluation.get("method"), "score": evaluation.get("score"), "accuracy": evaluation.get("accuracy"), "proxy_split": protocol.get("proxy_split"), "proxy_train_rows": protocol.get("proxy_train_rows"), "proxy_validation_rows": protocol.get("proxy_validation_rows"), "outer_test_rows": protocol.get("outer_test_rows"), "query_metafeatures_source": protocol.get("query_metafeatures_source"), "aco_search_elapsed_seconds": result.get("elapsed_seconds"), "autogluon_total_seconds": evaluation.get("total_seconds"), "outer_evaluation_wall_clock_seconds": evaluation.get("acorec_and_evaluation_wall_clock_seconds"), "notebook_wall_clock_seconds": run_wall_clock_seconds, "autogluon_time_limit": AG_TIME_LIMIT, "error": evaluation.get("error", result.get("error"))})
         summary = pd.DataFrame(rows); summary.to_csv(OUTPUT_DIR / "acorec_autogluon_summary.csv", index=False); display(summary)
         archive = shutil.make_archive(str(Path("/kaggle/working") / OUTPUT_DIR.name), "gztar", root_dir=OUTPUT_DIR); print("Archive:", archive)
         """),

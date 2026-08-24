@@ -43,7 +43,10 @@ from automl_aco.data.loaders import (
     load_csv_dataset,
 )
 from automl_aco.data.splits import split_train_val_test
-from automl_aco.data.metafeatures import extract_enhanced_metafeatures
+from automl_aco.data.metafeatures import (
+    compute_metafeatures_from_data,
+    extract_enhanced_metafeatures,
+)
 from automl_aco.eval_ids import EVAL_IDS, holdout_ids, holdout_reference, normalize_id
 from automl_aco.metalearning.recommender import MetaPipelineRecommender
 from automl_aco.preprocessing.autodp import (
@@ -1946,6 +1949,30 @@ def main() -> None:
                 print(f"  Auto option guard: {note}")
             test_dataset_df = X_for_search.copy()
             test_dataset_df["target"] = y_for_search
+            if args.recommend_on_train_val:
+                # Preserve the canonical outer split for the proxy evaluator.
+                # The ACO input contains only outer train+validation rows, but
+                # the proxy must not split those 80% rows a second time.
+                test_dataset_df.attrs["_acorec_fixed_proxy_split"] = {
+                    "seed": int(args.recommend_split_seed),
+                    "X_train": X_train_outer.reset_index(drop=True),
+                    "y_train": y_train_outer.reset_index(drop=True),
+                    "X_val": X_val_outer.reset_index(drop=True),
+                    "y_val": y_val_outer.reset_index(drop=True),
+                }
+
+            def _query_metafeatures(_dataset=dataset_for_search):
+                if args.recommend_on_train_val:
+                    # Precomputed OpenML rows include target-dependent and
+                    # landmarking features calculated on the full dataset.
+                    # Recompute from the permitted outer train+validation
+                    # rows so heuristic transfer cannot inspect outer test.
+                    return compute_metafeatures_from_data(
+                        _dataset["X"],
+                        _dataset["y"],
+                        seed=int(args.recommend_split_seed),
+                    )
+                return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
 
             if args.baseline_only != "off":
                 from automl_aco.search.evaluation import evaluate_candidates_autogluon
@@ -2007,8 +2034,8 @@ def main() -> None:
                     # Transfer-only pipeline: best pipeline of the nearest reference dataset (learned
                     # metric, query excluded). Reported alongside no_preprocessing for a clean swap
                     # decision; both fit on the same split so the comparison is apples-to-apples.
-                    def _bl_mf(_df, _dataset=dataset_for_search):
-                        return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+                    def _bl_mf(_df):
+                        return _query_metafeatures()
                     ns_cfg, ns_row, ns_neighbors = recommender.retrieval_no_search_pipeline(
                         new_dataset=test_dataset_df,
                         metafeatures_func=_bl_mf,
@@ -2095,8 +2122,8 @@ def main() -> None:
                                       "elapsed_seconds": time.perf_counter() - run_start})
                 continue
 
-            def _mf_func(_df, _dataset=dataset_for_search):
-                return extract_enhanced_metafeatures(_dataset, meta_features_df=meta)
+            def _mf_func(_df):
+                return _query_metafeatures()
 
             recommendation = recommender.recommend(
                 new_dataset=test_dataset_df,
@@ -2262,6 +2289,20 @@ def main() -> None:
             "recommend_split_seed": int(args.recommend_split_seed),
             "test_used_during_search": False if args.recommend_on_train_val else None,
             "search_rows": int(len(y_for_search)),
+            "proxy_split": (
+                "explicit_outer_split" if args.recommend_on_train_val else "internal_split"
+            ),
+            "proxy_train_rows": (
+                int(len(y_train_outer)) if args.recommend_on_train_val else None
+            ),
+            "proxy_validation_rows": (
+                int(len(y_val_outer)) if args.recommend_on_train_val else None
+            ),
+            "query_metafeatures_source": (
+                "computed_from_outer_train_validation"
+                if args.recommend_on_train_val
+                else "precomputed_or_full_dataset"
+            ),
             "outer_test_rows": int(len(y_test_outer)) if args.recommend_on_train_val else None,
         }
         recommendation["reference_assets"] = {

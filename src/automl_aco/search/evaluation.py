@@ -143,6 +143,38 @@ def _normalize_dataset(dataset: Any, target_column: str) -> pd.DataFrame:
     return df
 
 
+def _proxy_split_from_dataset(
+    df: pd.DataFrame,
+    *,
+    split_seed: int,
+) -> Optional[Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]]:
+    """Return an explicitly supplied outer split, when present.
+
+    The leak-free recommendation protocol gives ACO the outer train+validation
+    rows only.  Re-splitting those rows here would silently create a second,
+    smaller validation set and misalign the proxy with the final evaluator.
+    The split is carried as a private DataFrame attribute so existing public
+    APIs and callers remain unchanged.
+    """
+    payload = df.attrs.get("_acorec_fixed_proxy_split")
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("seed", split_seed)) != int(split_seed):
+        return None
+    # Do not carry the outer test rows into the search process at all.  The
+    # proxy only needs train and validation; the final two tuple elements are
+    # validation placeholders kept for the legacy evaluator bookkeeping.
+    required = ("X_train", "y_train", "X_val", "y_val")
+    if not all(key in payload for key in required):
+        return None
+    values = [
+        payload[key].copy() if hasattr(payload[key], "copy") else payload[key]
+        for key in required
+    ]
+    values.extend([values[2].copy(), values[3].copy()])
+    return tuple(values)  # type: ignore[return-value]
+
+
 def _detect_problem_type(y: pd.Series) -> Tuple[str, str]:
     unique_classes = y.nunique()
     if np.issubdtype(y.dtype, np.number) and unique_classes > 50:
@@ -659,7 +691,13 @@ def evaluate_candidates_simple(
             seed_penalties: List[float] = []
 
             for split_seed in split_seeds:
-                X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=int(split_seed))
+                fixed_split = _proxy_split_from_dataset(df, split_seed=int(split_seed))
+                if fixed_split is None:
+                    X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(
+                        X, y, seed=int(split_seed)
+                    )
+                else:
+                    X_train, y_train, X_val, y_val, X_test, y_test = fixed_split
 
                 pre = _make_preprocessor(cfg)
                 result = pre.fit_transform(X_train, y_train)
