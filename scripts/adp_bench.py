@@ -265,6 +265,7 @@ def run(args) -> None:
                 _append(args.out, {
                     "dataset_id": str(did), "mode": mode,
                     "status": "timeout" if info else "autodp_error",
+                    "evaluator": args.evaluator,
                     "score": None, "pipeline": None,
                     "autodp_seconds": round(time.time() - t_start, 1), "autogluon_seconds": None,
                     "total_seconds": round(time.time() - t_start, 1),
@@ -300,6 +301,7 @@ def run(args) -> None:
                 shutil.copytree(prepared_dir, keep_dir)
                 _append(args.out, {
                     "dataset_id": str(did), "mode": mode, "status": "eval_crashed",
+                    "evaluator": args.evaluator,
                     "score": None, "pipeline": adp_meta.get("pipeline"),
                     "autodp_seconds": adp_meta.get("search_seconds"),
                     "autogluon_seconds": None,
@@ -356,6 +358,7 @@ def run(args) -> None:
         except Exception as exc:
             _append(args.out, {
                 "dataset_id": str(did), "mode": mode, "status": "error", "score": None,
+                "evaluator": args.evaluator,
                 "pipeline": None, "autodp_seconds": None, "autogluon_seconds": None,
                 "total_seconds": round(time.time() - t_start, 1), "error": f"{type(exc).__name__}: {exc}",
             })

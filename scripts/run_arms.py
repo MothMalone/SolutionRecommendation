@@ -566,7 +566,10 @@ def main() -> int:
                 # (--adp-extra "--evaluator ...") that overrode adp_bench's choice would leave a
                 # mislabeled column. Fail loudly rather than average an H2O score as AutoGluon.
                 inner_ev = inner_row.get("evaluator", "autogluon")
-                if str(inner_ev) != str(args.evaluator):
+                # A failed search (autodp_error/timeout/error/eval_crashed, score None) never
+                # reached the downstream evaluator, so an untagged/legacy row there is not a
+                # mislabel -- only guard rows that carry a real score.
+                if inner_row.get("score") is not None and str(inner_ev) != str(args.evaluator):
                     raise SystemExit(
                         f"[arms] evaluator mismatch on {ds}: adp_bench scored with {inner_ev!r} "
                         f"but this run is --evaluator {args.evaluator!r}. Check --adp-extra/--extra "
