@@ -1,0 +1,10 @@
+# Keep Kaggle's binary-compatible NumPy/pandas stack while satisfying TPOT 1.1.
+numpy>=1.25,<2.4
+pandas>=2,<2.4
+scipy
+scikit-learn>=1.4,<1.8
+requests
+pyarrow
+openml
+category_encoders
+TPOT==1.1.0
