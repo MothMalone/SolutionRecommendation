@@ -111,7 +111,16 @@ def _force_h2o_categorical_columns(frames: tuple[Any, ...], columns: list[str]) 
     for frame in frames:
         for column in columns:
             if column in frame.names:
-                frame[column] = frame[column].asfactor()
+                try:
+                    frame[column] = frame[column].asfactor()
+                except Exception:
+                    # H2O can parse numeric-looking object values back to a
+                    # real column during upload (e.g. ``IntComplx`` in
+                    # usp05).  Convert that column to unmistakable strings
+                    # before factorization.  The prefix is removed from
+                    # neither features nor predictions because it is only an
+                    # internal categorical representation.
+                    frame[column] = frame[column].ascharacter().asfactor()
 
 
 def _metric_from_model(model: Any, validation_frame: Any, task_type: str) -> float:
@@ -209,7 +218,9 @@ def evaluate_h2o_frames(
         for frame in (train_pd, val_pd, test_pd):
             for column in categorical_predictors:
                 frame[column] = frame[column].map(
-                    lambda value: None if pd.isna(value) else str(value)
+                    lambda value: None
+                    if pd.isna(value)
+                    else f"__H2O_CAT__{value}"
                 )
         train_frame = h2o.H2OFrame(train_pd)
         val_frame = h2o.H2OFrame(val_pd)
