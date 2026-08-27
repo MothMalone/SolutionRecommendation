@@ -372,7 +372,19 @@ class Preprocessor:
     def _fit_outlier_removal(self, X_num, X_cat, y):
         method_raw = self.config["outlier_removal"]
         method, params = parse_operator_spec(method_raw)
-        if X_num is None or method == "none":
+        # Feature selection can legitimately leave no numerical columns (for
+        # example, when one-hot categorical columns occupy all selected slots).
+        # Row-wise numerical outlier detectors such as LOF/IsolationForest
+        # cannot be fitted on an empty feature matrix; in that case the
+        # operator is a no-op and the remaining categorical representation is
+        # preserved.  Likewise, LOF needs at least two samples.
+        if (
+            X_num is None
+            or method == "none"
+            or getattr(X_num, "ndim", 2) != 2
+            or X_num.shape[1] == 0
+            or X_num.shape[0] < 2
+        ):
             return X_num, X_cat, y
 
         if adp.is_autodp_op(method):

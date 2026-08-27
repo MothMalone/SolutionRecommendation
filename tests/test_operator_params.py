@@ -77,3 +77,28 @@ def test_per_feature_operator_maps_apply_independently():
     assert list(X_t.columns) == list(X_x.columns)
     assert "num_a" in X_t.columns and "num_b" in X_t.columns
     assert any(col.startswith("cat_") for col in X_t.columns)
+
+
+def test_outlier_operator_is_noop_when_feature_selection_leaves_no_numeric_columns():
+    """LOF must not fail on a valid categorical-only representation."""
+    pre = Preprocessor(
+        {
+            "imputation": "none",
+            "scaling": "none",
+            "encoding": "onehot",
+            "feature_selection": "none",
+            "outlier_removal": "lof",
+            "dimensionality_reduction": "svd",
+        }
+    )
+    numeric = pd.DataFrame(index=range(4))
+    categorical = pd.DataFrame({"cat_0": [1.0, 0.0, 1.0, 0.0]})
+    target = pd.Series([0, 1, 0, 1])
+
+    numeric_out, categorical_out, target_out = pre._fit_outlier_removal(
+        numeric, categorical, target
+    )
+
+    assert numeric_out.shape == (4, 0)
+    assert categorical_out.shape == (4, 1)
+    assert len(target_out) == 4
