@@ -116,8 +116,59 @@ def test_assert_disjoint_catches_duplicate_suffixed_id():
         assert_disjoint(["D_3", "D_1471.1"], context="dup-suffixed")
 
 
-def test_arm_dataset_list_matches_eval_ids():
-    """run_arms.OUR_DATASETS had silently drifted from EVAL_IDS; it must not drift again."""
+# --- regression: THEIR_DATASETS overlaps the reference library and is NOT in EVAL_IDS --------
+#
+# run_arms.py's ACORec arms on `data == "theirs"` evaluate on AutoDP's own ten datasets, none of
+# which are in EVAL_IDS. Five of the ten (184, 31, 1461, 1590, 40701) are performance-matrix
+# columns and a sixth (40945) is a metafeature row, so the default holdout does not touch them --
+# the recommender could retrieve the target dataset's own best pipeline. 184 and 31 used to be
+# protected under the legacy 23-id eval set; the set changed to today's 30 and the protection
+# silently lapsed. `extra_ids` closes this for any dataset list, not just EVAL_IDS.
+
+
+def test_assert_disjoint_extra_ids_catches_non_eval_leakage():
+    # "184" is not an eval id, so the bare call must pass...
+    assert_disjoint(["184", "D_3"], context="clean w.r.t. EVAL_IDS")
+    # ...but must raise once it is named as an extra id, exactly like run_arms.py's use.
+    with pytest.raises(AssertionError, match="LEAKAGE"):
+        assert_disjoint(["184", "D_3"], context="their data", extra_ids=["184", "31"])
+
+
+def test_holdout_reference_extra_ids_drops_additional_columns_and_rows():
+    perf, meta = _toy_reference()
+    # Add a non-eval column/row that must be dropped only when named as an extra id.
+    perf["D_184"] = np.random.RandomState(2).rand(len(perf))
+    meta.loc["D_184"] = np.random.RandomState(3).rand(meta.shape[1])
+
+    # Without extra_ids, D_184 survives (it is not an eval id).
+    perf_c, meta_c, report = holdout_reference(perf, meta)
+    assert "184" in [normalize_id(c) for c in perf_c.columns]
+    assert report["extra_ids_requested"] == []
+
+    # With extra_ids, it is removed and the report attributes it correctly.
+    perf_c2, meta_c2, report2 = holdout_reference(perf, meta, extra_ids=["184", "9999"])
+    assert "184" not in [normalize_id(c) for c in perf_c2.columns]
+    assert "184" not in [normalize_id(i) for i in meta_c2.index]
+    assert report2["extra_perf_cols_dropped"] == ["184"]
+    assert report2["extra_meta_rows_dropped"] == ["184"]
+    # The eval-id drops from _toy_reference (1066, 18) are unaffected by extra_ids.
+    assert set(report2["perf_cols_dropped"]) == {"1066", "18", "184"}
+    assert_disjoint(perf_c2.columns, context="perf after extra holdout", extra_ids=["184"])
+    assert_disjoint(meta_c2.index, context="meta after extra holdout", extra_ids=["184"])
+
+
+def test_holdout_reference_extra_ids_normalizes_like_eval_ids():
+    # extra_ids goes through the same normalize_id path as EVAL_ID_SET (D_/dataset_/openml_
+    # prefixes, .0 suffixes) -- a caller passing "184" or "D_184" must behave identically.
+    perf, meta = _toy_reference()
+    perf["D_184"] = np.random.RandomState(2).rand(len(perf))
+    meta.loc["D_184"] = np.random.RandomState(3).rand(meta.shape[1])
+    _, _, report_bare = holdout_reference(perf, meta, extra_ids=["184"])
+    _, _, report_prefixed = holdout_reference(perf, meta, extra_ids=["D_184"])
+    assert report_bare["extra_perf_cols_dropped"] == report_prefixed["extra_perf_cols_dropped"] == ["184"]
+
+
+def _load_run_arms():
     import importlib.util
     import pathlib
 
@@ -125,7 +176,43 @@ def test_arm_dataset_list_matches_eval_ids():
     spec = importlib.util.spec_from_file_location("run_arms", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
+
+
+def test_arm_dataset_list_matches_eval_ids():
+    """run_arms.OUR_DATASETS had silently drifted from EVAL_IDS; it must not drift again."""
+    mod = _load_run_arms()
     assert list(mod.OUR_DATASETS) == list(EVAL_IDS)
+
+
+def test_acorec_cmd_holds_out_their_datasets_on_their_data():
+    """ACORec arms on data=='theirs' must pass --holdout-ids, or 6/10 THEIR_DATASETS leak in.
+
+    Regression for the bug found in this audit: THEIR_DATASETS overlaps the reference library
+    (184, 31, 1461, 1590, 40701 as perf columns; +40945 as a metafeature row) and none of the ten
+    are in EVAL_IDS, so the default eval-ID holdout never touched them.
+    """
+    mod = _load_run_arms()
+
+    class _Args:
+        target_column = "target"
+        n_ants, n_iterations = 4, 3
+        protocol = "leakfree"
+        time_limit = 300
+        seed = 42
+        acorec_config = "ref"
+        extra = ""
+        acorec_extra = ""
+
+    from pathlib import Path
+
+    cmd_theirs = mod.acorec_cmd("1461", Path("x.csv"), "ours", Path("wd"), _Args(), data="theirs")
+    assert "--holdout-ids" in cmd_theirs
+    holdout_value = cmd_theirs[cmd_theirs.index("--holdout-ids") + 1]
+    assert set(holdout_value.split(",")) == set(mod.THEIR_DATASETS)
+
+    cmd_ours = mod.acorec_cmd("1066", Path("x.csv"), "ours", Path("wd"), _Args(), data="ours")
+    assert "--holdout-ids" not in cmd_ours
 
 
 def test_normalize_id_only_collapses_integer_decimals():

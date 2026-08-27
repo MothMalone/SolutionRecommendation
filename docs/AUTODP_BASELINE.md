@@ -12,21 +12,27 @@ fallback), accuracy for classification and R² for regression. Stages 1 and 3 re
 `automl_aco.data.splits.split_train_val_test`, `_detect_problem_type` and
 `_fit_predict_with_autogluon` directly rather than reimplementing them.
 
-AutoDP's method runs as published: its MCTS, its pretrained meta-learner picking the search-space
-ordering from its own `Metafeature.csv` neighbours, and its internal NB/LDA/RF scoring signal are
-all untouched. Only the **final** scorer is swapped to AutoGluon — exactly what we do to our own
-pipelines.
+AutoDP's METHOD runs as published: MCTS's tree policy, UCB, backup and pruning, its pretrained
+meta-learner picking the search-space ordering from its own `Metafeature.csv` neighbours, its
+value estimate, and operator semantics (per-split statistics, union-fitted encoders) are all
+untouched. What changed is its EVALUATION LAYER — moved onto our setting, because a split, a
+label-leakage guard, and scorer determinism/objective are not pipeline-selection logic:
+`scripts/autodp_protocol.py` seeds the internal RF/ExtraTrees scorer, gives LDA the same
+holdout-accuracy objective NB and RF already use, and closes a leak where `CBE` consumed the
+labels of the rows it was encoding. The final scorer is swapped to AutoGluon, as before.
 
-## Two protocols, because their API has no fit/transform split
+## `fair` is the only reported protocol
 
-`AutoDP.Classifier(df, ...)` takes one dataframe and returns a prepared dataframe. So:
+`AutoDP.Classifier(df, ...)` takes one dataframe and returns a prepared dataframe, so a fit/transform
+split has to be built on top of it:
 
 | mode | what the search sees | reading |
 |---|---|---|
-| `native` | the **full** dataset, including our test rows (its published API; its internal scorer holds out its own unseeded random 20%) | transductive, **generous to AutoDP** |
-| `fair` | only our **80% train+val**; the winning operator chain is then applied to our 80%/20% using AutoDP's own operator classes | leak-free, the protocol our method is held to |
+| `fair` (default, reported) | our **seed-42 0.6 train / 0.2 val** — `scripts/autodp_protocol.py::build_search_dataset` replaces their own `read_dataset`, whose `train_test_split` had no `random_state`; the winning chain is then applied to our 80%/20% using AutoDP's operator classes, `CBE` now leak-free | leak-free, the protocol our own method is held to |
+| `native` (NOT reported) | the **full** dataset, including our test rows — literally their published API, deliberately left unpatched; its internal scorer holds out its own unseeded random 20% | transductive; kept only so the deviation from `fair` is inspectable |
 
-Both are run. If we win under `native`, we win under their best case.
+Only `fair` numbers go in any table. `native` exists as a disclosure artifact, not a second column
+to average or compare against.
 
 ## Known behaviours of their code, and how each is handled
 
@@ -44,6 +50,25 @@ Both are run. If we win under `native`, we win under their best case.
 - **Bare `except:` in their entry points** silently returns the RAW frame when the winning pipeline
   crashes on apply. Stage 2 detects it and records `status`; the report flags those rows with ⚠️
   instead of passing off raw data as prepared.
+- **Bare `except:` inside the SEARCH loop too** (`CLA_Without_TimeBudget`), which can swallow every
+  MCTS iteration and still report a "converged" pipeline that was never actually evaluated even
+  once. `scripts/autodp_protocol.py::ExceptionCounter` counts these; a non-zero
+  `search_iteration_exceptions` on a reported row means treat the pipeline with caution.
+  DISCLOSED, NOT FIXED (it is search machinery -- `drop_unpromising`, `best_child`,
+  `Is_BatchTraining`, all theirs). One concrete trigger, found while validating this counter:
+  `classifier.py`'s internal `k_folds`-based `None` guard combined with `Is_BatchTraining`'s
+  progressive subsampling can shrink a small dataset's usable batch below the guard threshold at
+  shallow tree depth, and `drop_unpromising`'s `profit.sort()` then raises `TypeError: '<' not
+  supported between instances of 'NoneType' and 'float'` -- on EVERY iteration, for the rest of the
+  search. Measured on dataset 862 (87 rows, one of the smallest of the 30): 1.19M swallowed
+  exceptions, pipeline `['NB']` (no preprocessing, because nothing was ever actually evaluated).
+  Smaller datasets are more exposed in general -- our seed-42 0.6 train (vs their published 80%)
+  gives `Is_BatchTraining` less headroom before the guard fires -- but which specific datasets
+  trip it is a property of the running search, not a static property of the split, so this is not
+  precomputable the way the (separate, fixed) index-labelling bug below was. Watch
+  `search_iteration_exceptions` per row instead of trying to predict it. Regression test (a
+  different, already-fixed trigger on the same dataset):
+  `tests/test_autodp_protocol.py::test_search_dataset_reproduces_the_862_failure_mode_directly`.
 - **A pipeline of length 1** means AutoDP picked a classifier and *no* preprocessing operator, so its
   output is the raw data. The report calls those out — on a 30s smoke run of dataset 31 this is
   exactly what happened, so watch for it at full budget.

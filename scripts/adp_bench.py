@@ -140,7 +140,8 @@ class ScoringCrashed(RuntimeError):
 
 
 def _score_prepared_isolated(csv_path: str, prepared_dir: str, time_limit: int,
-                             autogluon_profile: str, seed: int, verbose: bool) -> dict:
+                             autogluon_profile: str, seed: int, verbose: bool,
+                             evaluator: str = "autogluon") -> dict:
     """Run stage-3 scoring (eval_autodatapre.score_prepared) in a child process.
 
     AutoGluon can take the whole interpreter down with it (macOS OpenMP segfaults are the usual
@@ -156,7 +157,8 @@ def _score_prepared_isolated(csv_path: str, prepared_dir: str, time_limit: int,
         f"sys.path.insert(0, {os.path.join(_REPO, 'src')!r})\n"
         "from eval_autodatapre import score_prepared\n"
         f"r = score_prepared({csv_path!r}, {prepared_dir!r}, time_limit={int(time_limit)}, "
-        f"autogluon_profile={autogluon_profile!r}, seed={int(seed)}, verbose={bool(verbose)})\n"
+        f"autogluon_profile={autogluon_profile!r}, seed={int(seed)}, verbose={bool(verbose)}, "
+        f"evaluator={evaluator!r})\n"
         # numpy scalars are not JSON-serializable; .item() keeps them numeric (default=str would
         # turn scores into strings and break the caller's :.4f formatting).
         "def _d(o):\n"
@@ -286,7 +288,8 @@ def run(args) -> None:
                 res = _score_prepared_isolated(csv_path, prepared_dir,
                                                time_limit=args.time_limit,
                                                autogluon_profile=args.autogluon_profile,
-                                               seed=args.seed, verbose=args.verbose)
+                                               seed=args.seed, verbose=args.verbose,
+                                               evaluator=args.evaluator)
             except ScoringCrashed as crash:
                 # The search result is intact; keep the prepared frame OUT of the scratch dir so
                 # a later `--import-dir`-style re-score does not have to redo the search.
@@ -317,8 +320,11 @@ def run(args) -> None:
                 "metric": res["eval_metric"],
                 "problem_type": res["problem_type"],
                 "pipeline": res["autodp_pipeline"],
+                "evaluator": res.get("evaluator", "autogluon"),
+                "evaluator_meta": res.get("evaluator_meta"),
                 "autodp_seconds": res["autodp_search_seconds"],
-                "autogluon_seconds": res["autogluon_eval_seconds"],
+                "autogluon_seconds": res.get("autogluon_eval_seconds"),
+                "eval_seconds": res.get("eval_seconds", res.get("autogluon_eval_seconds")),
                 "total_seconds": round(time.time() - t_start, 1),
                 "test_coverage": res["test_coverage"],
                 "n_rows": n_rows,
@@ -343,9 +349,9 @@ def run(args) -> None:
             _append(args.out, record)
             n_exc = record.get("search_iteration_exceptions") or 0
             exc_flag = f" !! {n_exc} SEARCH-ITERATION EXCEPTIONS (result may be unevaluated)" if n_exc else ""
-            print(f"[ok] {did} [{mode}] {record['metric']}={record['score']:.4f} "
+            print(f"[ok] {did} [{mode}] [{record['evaluator']}] {record['metric']}={record['score']:.4f} "
                   f"pipeline={record['pipeline']} "
-                  f"adp={record['autodp_seconds']}s ag={record['autogluon_seconds']}s "
+                  f"adp={record['autodp_seconds']}s eval={record['eval_seconds']}s "
                   f"total={record['total_seconds']}s{exc_flag}", flush=True)
         except Exception as exc:
             _append(args.out, {
@@ -379,18 +385,30 @@ def summarize(args) -> None:
     if not records:
         raise SystemExit(f"no records found in {paths}")
 
-    modes = sorted({r["mode"] for r in records}, key=lambda m: {"native": 0, "fair": 1}.get(m, 2))
+    # Column key: `mode`, or `mode/evaluator` when the files mix downstream evaluators (autogluon
+    # vs h2o). Without the evaluator in the key, an h2o row silently overwrites the autogluon row
+    # for the same (dataset, mode) and the mean is wrong with no warning.
+    evs = {r.get("evaluator", "autogluon") for r in records}
+
+    def _col(r) -> str:
+        m = r["mode"]
+        return f"{m}/{r.get('evaluator', 'autogluon')}" if len(evs) > 1 else m
+
+    modes = sorted({_col(r) for r in records},
+                   key=lambda m: {"native": 0, "fair": 1}.get(m.split("/")[0], 2))
     by_id: dict = {}
     for r in records:
-        by_id.setdefault(str(r["dataset_id"]), {})[r["mode"]] = r
+        by_id.setdefault(str(r["dataset_id"]), {})[_col(r)] = r
 
     lines = ["# AutoDP (autodatapre 0.1.12) — score, pipeline, runtime\n"]
-    lines.append("Scores are AutoGluon test performance (accuracy / R²) on the seed-42 0.6/0.2/0.2 "
-                 "split, fit on train+val (80%), predicting the same 20% test rows — the identical "
-                 "protocol our own numbers use. `native` = AutoDP's published API, whose search sees "
-                 "the full dataset including our test rows; `fair` = its search restricted to our "
-                 "80% train+val. An empty pipeline means AutoDP selected no preprocessing operator, "
-                 "so its output is the raw data.\n")
+    lines.append("Scores are downstream-AutoML test performance (accuracy / R²) on the seed-42 "
+                 "0.6/0.2/0.2 split, fit on train+val (80%), predicting the same 20% test rows — the "
+                 "identical protocol our own numbers use. The evaluator is AutoGluon unless a column "
+                 "is suffixed `/h2o` (H2O AutoML at its defaults, downstream preprocessing off). "
+                 "`native` = AutoDP's published API, whose search sees the full dataset including "
+                 "our test rows; `fair` = its search restricted to our 80% train+val. An empty "
+                 "pipeline means AutoDP selected no preprocessing operator, so its output is the "
+                 "raw data.\n")
     header = ["Dataset", "task"]
     for m in modes:
         header += [f"{m} score", f"{m} pipeline", f"{m} time"]
@@ -490,6 +508,10 @@ def main() -> None:
     ap.add_argument("--time-limit", type=int, default=300, help="AutoGluon time_limit")
     ap.add_argument("--autogluon-profile", default="best_quality",
                     choices=["best_quality", "medium_quality", "local_rf_xt"])
+    ap.add_argument("--evaluator", default="autogluon", choices=["autogluon", "h2o"],
+                    help="downstream AutoML for stage-3 scoring. h2o = H2O AutoML at its defaults, "
+                         "downstream preprocessing off, max_runtime_secs = --time-limit. Same split "
+                         "/ fit convention / target re-attach as the autogluon path.")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--adp-python", default=os.path.join(_REPO, ".venv-autodp", "bin", "python"),
                     help="interpreter of the pinned AutoDP env (see scripts/setup_autodp_env.sh)")

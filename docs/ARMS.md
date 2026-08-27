@@ -66,48 +66,39 @@ ALL INVARIANTS HOLD
 `ours` does **not** pass — see the open issues below. Those failures are pre-existing and unrelated
 to this work.
 
-## Protocol: `--protocol native` (the default)
+## Protocol: `--protocol leakfree` (the default, and the ONLY reported protocol)
 
-AutoDP is scored under its **published protocol** — its search and its pipeline application both see
-the whole table, because that is what the released API does. To keep the comparison fair, **ACORec
-is prepared the same way** in these arms: `--prepare-mode native` fits the chosen pipeline on the
-full dataset (train and test together) before the AutoGluon split evaluation, mirroring their
-operators fitting on `concat(train, test)`.
+Every reported number now comes from `--protocol leakfree`. Both sides fit on train only:
+`--prepare-mode leakfree` for ACORec, and for AutoDP its search scores candidates on our seed-42
+0.6 train / 0.2 val, its evaluation layer moved onto ours by `scripts/autodp_protocol.py` — see
+that module for the exact list of what moved (split, CBE's label channel, scorer seeding, scorer
+objective) and what stayed theirs (MCTS itself, the value estimate, operator semantics).
 
-`--protocol native` sets both sides at once and is the default, so the two can never drift apart by
-accident. `--protocol leakfree` gives the fit-on-train discipline to both.
+**Consequence, and it is a real improvement to the control arm:** this lifts
+`_ROW_DROPPING_OPERATORS`, so ACORec's search now covers all **22 of their 22** reimplemented
+operators, not 17.
 
-Verified to actually take effect, on a deliberately shifted split (`_fit_pipeline`, `ZS` scaling):
+`--protocol native` still exists but is **not a reported path for either method**. It is AutoDP's
+literal published API — the MCTS searches the full dataset and its internal scorer holds out its
+own *unseeded* random 20%, so our test rows are visible to the search — kept, unpatched, only so
+the deviation from `leakfree` is inspectable. `native`'s one remaining structural difference from
+`leakfree` even after a hypothetical split-fix is the **apply** step: it fits on `concat(train,
+test)` via `merge_datasets`, which `leakfree` never does. Verified to actually take effect on a
+deliberately shifted split (`_fit_pipeline`, `ZS` scaling):
 
 ```
 leakfree   train column mean = +0.0000     (fitted on train)
 native     train column mean = -0.5768     (fitted on the union)
 ```
 
-**Anything scored under `native` is not a measurement of generalisation, for either method.** It is
-a like-for-like comparison under their protocol. Label the column that way, and if you also want a
-generalisation number, run `--protocol leakfree` for both sides and report it separately.
+### Historical note: the asymmetry `native` could never remove
 
-### The one asymmetry `native` cannot remove — disclose it
-
-Under `native` the pipeline is fitted on the full frame and applied with `transform()`, which never
-deletes rows. **Row-dropping operators are therefore excluded from ACORec's search under `native`**
-(`_ROW_DROPPING_OPERATORS`): `ZSB`, `IQR`, `LOF`, `ED`, `DROP` in their space; `iqr`, `zscore`,
-`lof`, `isolation_forest` in ours. Selecting one would otherwise be a **silent no-op** — measured
-before the fix: `ZSB` cut 90 train rows to 73 under `leakfree` and to 90 (i.e. nothing) under
-`native`. A hard guard in `_fit_pipeline` now raises rather than letting that recur.
-
-Consequences to state in the paper:
-
-- ACORec's **native** search covers **17 of their 22** operators, not 22. The full 22 are available
-  under `--protocol leakfree`.
-- AutoDP under native **does** delete rows, which is why its results carry `score_full` /
-  `score_kept`. ACORec never deletes test rows under either protocol.
-
-The alternative — tracking surviving row indices through the full-frame fit and slicing the splits
-from them, as `run_autodatapre.py` does with `__adp_row__` — would restore the missing 5 operators.
-It is not implemented; this is the honest, verifiable version, and it makes ACORec weaker under
-native rather than stronger.
+Under `native`, `transform()` never deletes rows, so row-dropping operators were excluded from
+ACORec's search there (`_ROW_DROPPING_OPERATORS`: `ZSB`, `IQR`, `LOF`, `ED`, `DROP` in their space;
+`iqr`, `zscore`, `lof`, `isolation_forest` in ours) — a silent no-op otherwise, measured before the
+fix (`ZSB` cut 90 train rows to 73 under `leakfree`, to 90 under `native`). A hard guard in
+`_fit_pipeline` still raises rather than letting this recur, but it is moot now that `native` is
+not reported.
 
 ## Running
 
@@ -146,12 +137,41 @@ Output is one JSONL row per (arm, dataset) with `score`, `eval_method`, `pipelin
 On Kaggle keep `--autogluon-profile best_quality` (the default). `local_rf_xt` is for local smoke
 tests only; `best_quality` segfaults on macOS via AutoGluon's OpenMP layer.
 
+### Second downstream evaluator: `--evaluator h2o` (AutoDP arms only)
+
+`--evaluator h2o` re-scores an AutoDP arm with **H2O AutoML at its defaults** instead of AutoGluon,
+to get the ACORec-vs-AutoDP comparison under a second downstream AutoML. Only stage-3 scoring
+changes — the AutoDP search, the `leakfree` protocol, the seed-42 split, the fit-on-train+val /
+predict-20%-test convention, the original-target re-attachment and the `score_full`/`score_kept`
+accounting are all identical to the AutoGluon path (`scripts/eval_autodatapre.py`,
+`score_prepared(evaluator=...)`). H2O runs with `preprocessing=None` (downstream preprocessing
+OFF), `max_runtime_secs` = `--time-limit`, and everything else (nfolds, StackedEnsemble,
+sort_metric) at H2O defaults; residual categoricals go to H2O as native `enum` factors rather than
+being one-hot encoded. `--time-limit` sets `max_runtime_secs` to the same *number* the AutoGluon
+path uses, but it is not the same *quantity* (whole-AutoML budget vs AutoGluon's per-model budget),
+and H2O overruns it by ~20% in practice. Rows are tagged `evaluator: "h2o"` and `--summarize`
+groups the mean by
+`(arm, evaluator)`, so an H2O run never averages into the same arm's AutoGluon column. Keep H2O
+runs in their own JSONL files (`arms_<arm>_h2o_*.jsonl`). Run book:
+`docs/kaggle_adp_arm1_h2o_cells.md`. ACORec's downstream evaluator is set inside `run_recommend.py`,
+so `--evaluator h2o` is rejected on ACORec arms.
+
 ## Open issues, in priority order
 
-1. **`THEIR_DATASETS` in `run_arms.py` is UNVERIFIED.** The ids were transcribed from their paper
-   and several are OCR-risky (`8335`, `43723`, `42493`). Confirm each against OpenML *before* any
-   arm-2 or arm-3 run, and check overlap with the 901-dataset reference library — `184` and `31` are
-   known to appear in both, and any overlap must be held out for those arms to be leak-free.
+1. **`THEIR_DATASETS` in `run_arms.py` is still UNVERIFIED against the OpenML API** — the ids were
+   transcribed from their paper and several are OCR-risky (`8335`, `43723`, `42493`). Confirm each
+   before reporting any arm-2 or arm-3 number.
+
+   The **overlap-with-the-reference-library** half of this issue is FIXED. Checked directly: 5 of
+   the 10 (`1461`, `1590`, `184`, `31`, `40701`) are performance-matrix columns and a 6th (`40945`)
+   is a metafeature row. None are in `EVAL_IDS` (they moved from the legacy 23 to today's 30), so
+   the default eval-ID holdout never touched them — `184` and `31` used to be protected under the
+   legacy set and silently stopped being protected when it changed. `run_recommend.py --holdout-ids`
+   (`src/automl_aco/eval_ids.py::holdout_reference(extra_ids=...)`) closes this; `run_arms.py`'s
+   `acorec_cmd` now passes all ten `THEIR_DATASETS` automatically whenever `data == "theirs"`, and
+   `scripts/build_adp_meta_corpus.py` holds the same ten out of the retrained corpus. Regression
+   tests: `tests/test_leakage_holdout.py::test_acorec_cmd_holds_out_their_datasets_on_their_data`
+   and `::test_holdout_reference_extra_ids_*`.
 2. **`ag_candidate_scores` under-reports the gate by one candidate.** Instrumented on dataset 1054,
    the gate receives the floor in both spaces:
 
@@ -171,9 +191,29 @@ tests only; `best_quality` segfaults on macOS via AutoGluon's OpenMP layer.
    are swallowed and scored as failures, which silently biases the ACO away from `imputation=none`
    combinations. Left unchanged deliberately — it is your method and changing it needs a
    test-set-independent rationale — but it should be a conscious choice, not an accident.
-4. **`score_full` vs `score_kept` for the AutoDP arms.** Their `ZSB`/`LOF` delete test rows, so the
-   two diverge now that pipelines are non-empty. Fix the choice before running, not after seeing
-   both numbers. (ACORec never deletes test rows in either protocol, so this asymmetry is theirs
-   alone and should be stated wherever the AutoDP column appears.)
+4. **DECIDED: `score_full` is the headline column for the AutoDP arms; `score_kept` is reported
+   alongside, never in its place.** Their `ZSB`/`LOF` delete test rows, so the two diverge whenever
+   a pipeline is non-empty. `score_full` charges AutoDP for the rows it declined to predict
+   (classification: wrong; regression: training-target-mean fallback) and is therefore the column
+   directly comparable to ACORec, which never deletes test rows under any protocol. Fixed here,
+   before any reported number exists — `scripts/adp_bench.py`'s `run()` already writes both fields
+   per row (`eval_autodatapre.py::score_prepared`); the summary/report layer must read `score`
+   (== `score_full`), not `score_kept`.
 5. **Dataset 1047 has a mixed-type target** (`float` and `str`), which crashes `np.unique` in
    `evaluate_candidates_simple`. Pre-existing, reproduces in both spaces.
+6. **AutoDP's search can crash-loop into an empty pipeline on small datasets, and it is now
+   VISIBLE, not fixed.** `MCTS.CLA_Without_TimeBudget`'s search loop wraps every iteration in a
+   bare `except:`, so a search that fails on every single iteration still "converges" and reports a
+   pipeline that was never actually evaluated. Root cause (found validating the exception counter
+   on dataset 862, 87 rows): a classifier's internal `k_folds` guard returns `None` on a batch
+   shrunk by `Is_BatchTraining`'s progressive subsampling, and `drop_unpromising`'s `profit.sort()`
+   then raises comparing `None` to `float` — on every iteration for the rest of the run. Measured:
+   1.19M swallowed exceptions, pipeline `['NB']`. This is search machinery (`drop_unpromising`,
+   `best_child`, `Is_BatchTraining`), so per Part 3 it is DISCLOSED, not patched. What changed:
+   `scripts/autodp_protocol.py::ExceptionCounter` counts it, and `search_iteration_exceptions` /
+   `search_iteration_exception_kinds` are now threaded through `eval_autodatapre.py` →
+   `adp_bench.py` → `run_arms.py` into every reported row, so a row with a large count can be
+   excluded or flagged rather than silently averaged in as a genuine AutoDP preference. Both
+   `adp_bench.py --summarize` and `run_arms.py --summarize` print a warning listing affected rows.
+   Full writeup: `docs/AUTODP_BASELINE.md` "Known behaviours of their code". Regression test:
+   `tests/test_autodp_protocol.py::test_exception_counter_counts_and_reraises`.

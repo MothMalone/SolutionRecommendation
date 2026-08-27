@@ -506,16 +506,41 @@ dishonest arm. The retrained version is the better paper.
 
 ---
 
-## 7. Two decisions the re-run forces
+## 7. Two decisions the re-run forced — both resolved
 
-**(a) `score_full` or `score_kept` — decide before running.** Every AutoDP result so far had
-`test_coverage == 1.0`, but only because the searches returned empty pipelines. That is over.
-`ZSB` and `LOF` delete test rows and were selected on 4 of the 8 datasets that preprocessed (ZSB on
-1164 and 14; LOF on 184 and 31), and §2.5 measures ZSB deleting ~8% of even clean data. The two
-scores will diverge and they answer different questions — `score_full` charges AutoDP for rows it
-declined to predict, `score_kept` does not. Choosing after seeing both numbers is precisely what a
-reviewer will challenge, so fix the choice now and record it here.
+**(a) RESOLVED: `score_full` is the headline; `score_kept` is reported alongside.** `ZSB` and `LOF`
+delete test rows and were selected on 4 of the 8 datasets that preprocessed under the old (leaky)
+run (ZSB on 1164 and 14; LOF on 184 and 31), and §2.5 measures ZSB deleting ~8% of even clean data.
+`score_full` charges AutoDP for rows it declined to predict and is the column directly comparable
+to ACORec, which never deletes test rows under any protocol. `docs/ARMS.md` open issue 4 and
+`scripts/report_autodatapre.py --autodp-score` both default to `score_full`.
 
-**(b) The `fair` arm is not yet leak-free.** We hand their operators our real `target_test`. Until
-that is replaced with a dummy target, `CBE` can consume genuine held-out labels inside the arm whose
-whole purpose is to exclude them.
+**(b) RESOLVED: the `fair` (now the only reported) arm is leak-free.** The original concern was
+real: their operators were handed our genuine `target_test`, and `CBE`'s `Encoding.transform`
+(`encoding.py:80-92`) fits `CatBoostEncoder` on `concat(target, target_test)`, consuming those
+labels for every row being scored — not just at apply time, but inside the search itself once the
+search dict is built from our split (below), because the "test" half of the search dict is our val
+labels, which the encoder would otherwise still consume from its own rows.
+
+The fix is NOT a dummy target — that drifts the encodings toward the fill value, a silent
+distribution shift that would itself need disclosing. `scripts/autodp_protocol.py::install_leakfree_cbe`
+patches `Encoding.transform` in memory so `CBE` fits on the train block only and transforms the
+rest, reusing the existing leak-free implementation in
+`src/automl_aco/preprocessing/autodp_ops.py::build_encoder("CBE")` so the reimplemented `theirs`
+operator space and this patch cannot drift apart. Direct proof:
+`tests/test_autodp_protocol.py::test_cbe_leak_is_closed_at_the_operator_level` — a pattern-reversal
+fixture where the unpatched path visibly leaks (test-row encodings move when test labels are
+permuted) and the patched path does not, on the same fixture in the same process, so the test is
+proven non-vacuous rather than trivially passing.
+
+**A third thing surfaced by the same audit, folded in here rather than opened as a new item:**
+AutoDP's internal train/test split (`MCTS_DATA.read_dataset`,
+`train_test_split(X, Y, test_size=0.2)`) had no `random_state`, so the search signal was
+non-reproducible run to run, and under the (now unreported) `native` protocol its internal "test"
+was drawn from the full frame and contained our held-out rows. `MCTS.CLA_With/Without_TimeBudget`
+never call `read_dataset` themselves — the `{train,target,test,target_test}` dict is a parameter —
+so `scripts/run_autodatapre.py::_run_fair` now builds it directly from our seed-42 0.6 train / 0.2
+val (`autodp_protocol.build_search_dataset`), and the search never sees our test rows at all. See
+`docs/ARMS.md`'s protocol section for the full list of what moved onto our setting (also: scorer
+seeding, and giving LDA the same holdout-accuracy objective NB and RF already used) and what stayed
+theirs (MCTS's tree policy, UCB, the value estimate, operator semantics).

@@ -4,3 +4,7 @@ scipy
 # Install only Tabular since the project uses autogluon.tabular APIs.
 # Let pip resolve compatible scikit-learn/xgboost versions with AutoGluon.
 autogluon.tabular==1.5.0
+# H2O AutoML: the second downstream evaluator for the ACORec-vs-AutoDP comparison
+# (scripts/eval_autodatapre.py --evaluator h2o). Pure-python client + bundled JAR; needs a JVM
+# (Kaggle images ship OpenJDK). Coexists with AutoGluon in one interpreter.
+h2o==3.46.0.12

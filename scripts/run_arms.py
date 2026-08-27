@@ -104,7 +104,7 @@ def shard(items, spec: str):
     return [x for j, x in enumerate(items) if j % n == (i - 1)]
 
 
-def done_ids(out_path: Path, arm: str, protocol: str) -> set:
+def done_ids(out_path: Path, arm: str, protocol: str, evaluator: str = "autogluon") -> set:
     if not out_path.exists():
         return set()
     seen = set()
@@ -113,10 +113,12 @@ def done_ids(out_path: Path, arm: str, protocol: str) -> set:
             row = json.loads(line)
         except Exception:
             continue
-        # Key on protocol too: the same dataset under native and leakfree are different
-        # results, and skipping the second one silently loses half the comparison.
+        # Key on protocol AND evaluator too: the same dataset under native/leakfree or under
+        # autogluon/h2o are different results, and skipping the second one silently loses half
+        # the comparison.
         if (row.get("arm") == arm and row.get("status") == "ok"
-                and str(row.get("protocol", protocol)) == str(protocol)):
+                and str(row.get("protocol", protocol)) == str(protocol)
+                and str(row.get("evaluator", "autogluon")) == str(evaluator)):
             seen.add(str(row.get("dataset_id")))
     return seen
 
@@ -273,6 +275,8 @@ def autodp_cmd(dataset_id: str, ops: str, out_dir: Path, args) -> list:
         corpus = str(REPO / "data" / "adp_ourops_corpus")
     if ops == "ours" and corpus:
         cmd += ["--adp-meta-corpus", corpus]
+    if getattr(args, "evaluator", "autogluon") != "autogluon":
+        cmd += ["--evaluator", args.evaluator]
     if args.extra:
         cmd += shlex.split(args.extra)
     if args.adp_extra:
@@ -407,6 +411,12 @@ def main() -> int:
                          "internal one (scripts/autodp_protocol.py). native = AutoDP's published "
                          "transductive protocol, literally unpatched, kept only as a disclosure "
                          "column -- NOT a reported number for either method.")
+    ap.add_argument("--evaluator", choices=["autogluon", "h2o"], default="autogluon",
+                    help="AutoDP arms only: downstream AutoML for stage-3 scoring. h2o = H2O "
+                         "AutoML at its defaults, downstream preprocessing off, max_runtime_secs = "
+                         "--time-limit -- a SECOND evaluation setting for the ACORec-vs-AutoDP "
+                         "comparison, alongside AutoGluon. Rows are tagged evaluator=h2o and "
+                         "--summarize groups them separately; keep them in their own JSONL files.")
     ap.add_argument("--extra", default="", help="extra args passed through to the inner script")
     ap.add_argument("--scratch", default="",
                     help="scratch dir. Default: a temp dir OUTSIDE --out's folder, deleted as it "
@@ -420,6 +430,8 @@ def main() -> int:
 
     if args.print_commands:
         arms = [args.arm] if args.arm else sorted(ARMS)
+        ev = f" --evaluator {args.evaluator}" if args.evaluator != "autogluon" else ""
+        tag = f"_{args.evaluator}" if args.evaluator != "autogluon" else ""
         for arm in arms:
             ds = [d.strip() for d in args.datasets.split(",") if d.strip()] or datasets_for(arm)
             if ARMS[arm]["method"] == "autodp" and ARMS[arm]["ops"] == "ours":
@@ -433,21 +445,25 @@ def main() -> int:
                 print(f"\n# ---- arm {arm}: {len(ds)} runs, one dataset each ----")
                 for d in ds:
                     print(f"python scripts/run_arms.py --arm {arm} --datasets {d} "
-                          f"--out arms_{arm}.jsonl --protocol {args.protocol} "
-                          f"--time-limit {args.time_limit}")
+                          f"--out arms_{arm}{tag}.jsonl --protocol {args.protocol} "
+                          f"--time-limit {args.time_limit}{ev}")
             else:
                 n = args.shards
                 print(f"\n# ---- arm {arm}: {len(ds)} datasets over {n} shards ----")
                 for i in range(1, n + 1):
                     print(f"python scripts/run_arms.py --arm {arm} --shard {i}/{n} "
-                          f"--out arms_{arm}_{i}of{n}.jsonl --protocol {args.protocol} "
-                          f"--time-limit {args.time_limit}")
+                          f"--out arms_{arm}{tag}_{i}of{n}.jsonl --protocol {args.protocol} "
+                          f"--time-limit {args.time_limit}{ev}")
         return 0
 
     if not args.arm:
         ap.error("--arm is required unless --print-commands is given")
 
     spec = ARMS[args.arm]
+    if args.evaluator != "autogluon" and spec["method"] != "autodp":
+        ap.error(f"--evaluator {args.evaluator} is only supported for AutoDP arms "
+                 f"(arm {args.arm} runs {spec['method']}). ACORec's downstream evaluator is set "
+                 f"inside run_recommend.py.")
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     # Deliberately NOT under out_path.parent: on Kaggle that is /kaggle/working, and the whole
@@ -457,10 +473,11 @@ def main() -> int:
 
     base = [d.strip() for d in args.datasets.split(",") if d.strip()] or datasets_for(args.arm)
     ids = shard(base, args.shard)
-    already = done_ids(out_path, args.arm, args.protocol)
+    already = done_ids(out_path, args.arm, args.protocol, args.evaluator)
     todo = [i for i in ids if i not in already]
 
-    print(f"[arms] arm={args.arm} method={spec['method']} data={spec['data']} ops={spec['ops']}")
+    print(f"[arms] arm={args.arm} method={spec['method']} data={spec['data']} ops={spec['ops']} "
+          f"evaluator={args.evaluator}")
     print(f"[arms] shard={args.shard or 'all'}  {len(todo)} to run, {len(already)} already done")
     if spec["data"] == "theirs":
         print("[arms] WARNING: THEIR_DATASETS ids are transcribed from the paper and UNVERIFIED. "
@@ -525,7 +542,8 @@ def main() -> int:
         print(f"\n[{n}/{len(todo)}] dataset {ds}", flush=True)
         t0 = time.time()
         row = {"arm": args.arm, "dataset_id": ds, "method": spec["method"],
-               "data": spec["data"], "operators": spec["ops"], "protocol": args.protocol}
+               "data": spec["data"], "operators": spec["ops"], "protocol": args.protocol,
+               "evaluator": args.evaluator}
 
         if spec["method"] == "acorec":
             if not csv_path.exists():
@@ -543,7 +561,17 @@ def main() -> int:
             rc = subprocess.run(cmd, cwd=REPO).returncode
             inner = scratch / f"adp_{ds}.jsonl"
             if rc == 0 and inner.exists() and inner.read_text().strip():
-                row.update(json.loads(inner.read_text().strip().splitlines()[-1]))
+                inner_row = json.loads(inner.read_text().strip().splitlines()[-1])
+                # The row's evaluator tag is the whole point of this arm; a passthrough flag
+                # (--adp-extra "--evaluator ...") that overrode adp_bench's choice would leave a
+                # mislabeled column. Fail loudly rather than average an H2O score as AutoGluon.
+                inner_ev = inner_row.get("evaluator", "autogluon")
+                if str(inner_ev) != str(args.evaluator):
+                    raise SystemExit(
+                        f"[arms] evaluator mismatch on {ds}: adp_bench scored with {inner_ev!r} "
+                        f"but this run is --evaluator {args.evaluator!r}. Check --adp-extra/--extra "
+                        f"for a conflicting --evaluator flag.")
+                row.update(inner_row)
                 row.setdefault("status", "ok")
             else:
                 row.update({"status": "failed", "returncode": rc})
@@ -577,22 +605,28 @@ def summarize(pattern: str) -> int:
     if not rows:
         print(f"no rows matched {pattern}")
         return 1
+    def _evtag(r):
+        # ACORec rows carry eval_method (autogluon/proxy/autogluon_failed); AutoDP rows carry
+        # evaluator (autogluon/h2o). Show whichever is set, and group means by it so an AutoDP
+        # H2O arm never averages into the AutoGluon column for the same arm name.
+        return str(r.get("evaluator") or r.get("eval_method") or "-")
+
     print(f"{'arm':16} {'dataset':9} {'proto':9} {'score':>8} {'eval':16} {'sel':18} {'secs':>7}")
     print("-" * 92)
     by_arm = {}
-    for r in sorted(rows, key=lambda r: (r.get("arm", ""), str(r.get("dataset_id")))):
+    for r in sorted(rows, key=lambda r: (r.get("arm", ""), _evtag(r), str(r.get("dataset_id")))):
         sc = r.get("score")
         print(f"{str(r.get('arm'))[:16]:16} {str(r.get('dataset_id'))[:9]:9} "
               f"{str(r.get('protocol', '-'))[:9]:9} "
               f"{(f'{sc:.4f}' if isinstance(sc, (int, float)) else str(r.get('status'))):>8} "
-              f"{str(r.get('eval_method', '-'))[:16]:16} "
+              f"{_evtag(r)[:16]:16} "
               f"{str(r.get('selected_candidate', '-'))[:18]:18} "
               f"{r.get('total_seconds', 0):>7}")
         if isinstance(sc, (int, float)):
-            by_arm.setdefault(r.get("arm"), []).append(sc)
+            by_arm.setdefault((r.get("arm"), _evtag(r)), []).append(sc)
     print("-" * 92)
-    for arm, scores in sorted(by_arm.items()):
-        print(f"{arm:16} n={len(scores):<3} mean={sum(scores)/len(scores):.4f}")
+    for (arm, ev), scores in sorted(by_arm.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
+        print(f"{str(arm)[:14]:14} {ev[:10]:10} n={len(scores):<3} mean={sum(scores)/len(scores):.4f}")
     bad = [r for r in rows if r.get("eval_method") not in (None, "autogluon")]
     if bad:
         print(f"\n!! {len(bad)} row(s) are NOT AutoGluon scores "
