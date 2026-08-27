@@ -559,3 +559,41 @@ print('@@' + json.dumps({{'survived': True, 'exceptions': sum(counter.kinds.valu
     assert proc.returncode == 0, (
         f"a slow-but-progressing search must NOT be aborted, got {proc.returncode}\n{proc.stderr}")
     assert '"survived": true' in proc.stdout.replace("True", "true")
+
+
+def test_dead_search_with_no_scored_node_writes_a_marker_for_the_raw_frame_salvage(tmp_path):
+    """862/27 under leakfree: every node scores profit=None, so no checkpoint is ever written.
+
+    The abort still has to leave evidence behind -- the counts live in the process os._exit is
+    about to kill -- so the parent can produce the raw frame LABELLED dead_search rather than a
+    silent empty pipeline (docs/ARMS.md item 6). Pins that dead_search.json lands next to the
+    checkpoint path with the spin diagnostics, and that it records no checkpointed pipeline.
+    """
+    ckpt_path = tmp_path / "search_checkpoint.json"
+    script = (
+        "import warnings,sys,json; warnings.filterwarnings('ignore');"
+        f"sys.path.insert(0,{SRC!r}); sys.path.insert(0,{SCRIPTS!r});"
+        "import autodp_protocol as P\n"
+        "from autodatapre.Pipeline_Generation import MCTS\n"
+        f"ckpt = P.SearchCheckpoint({str(ckpt_path)!r})\n"
+        "ckpt.n_node_evals = 3; ckpt.n_none_profits = 3\n"  # scored 3 nodes, all None -> no _write
+        "MCTS.monte_carlo_tree_search = lambda *a, **k: (_ for _ in ()).throw(TypeError('poisoned'))\n"
+        "counter = P.ExceptionCounter(checkpoint=ckpt, spin_abort_after=5)\n"
+        "counter.install(verbose=False)\n"
+        "for _ in range(50):\n"
+        "    try: MCTS.monte_carlo_tree_search(None, None, None, None)\n"
+        "    except TypeError: pass\n"
+        "print('@@unreachable')\n"
+    )
+    proc = subprocess.run([str(ADP_PY), "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 3, f"dead search must abort with 3\n{proc.stdout}\n{proc.stderr}"
+    assert "@@unreachable" not in proc.stdout, "the loop must not fall through the abort"
+
+    marker = tmp_path / "dead_search.json"
+    assert marker.exists(), "dead_search.json must be written before os._exit"
+    data = json.loads(marker.read_text())
+    assert data["had_checkpointed_pipeline"] is False
+    assert data["none_profit_evals"] == 3
+    assert data["node_evals_completed"] == 3
+    assert data["search_iteration_exceptions"] >= 5
+    assert data["search_iteration_exception_kinds"] == {"TypeError": data["search_iteration_exceptions"]}

@@ -460,6 +460,81 @@ def _salvage_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: s
           flush=True)
 
 
+def _dead_search_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: str) -> None:
+    """Apply-nothing child: the search crashed on every iteration and scored zero nodes, so there
+    is no checkpointed pipeline to salvage. Produce the RAW frame as an empty pipeline instead of
+    a `no prepared dataset` failure, and label it dead_search so the reported row is 'AutoDP was
+    given the operator space and its search collapsed', not 'AutoDP evaluated its options and
+    chose no preprocessing'. Operator space is irrelevant here -- an empty chain touches no
+    operator -- so the adapter is deliberately not installed. `fair` mode only.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    marker_path = autodp_protocol.dead_search_marker_path(out_dir)
+    marker = {}
+    if os.path.exists(marker_path):
+        with open(marker_path) as f:
+            marker = json.load(f)
+
+    from autodatapre.Pipeline_Generation import MCTS_DATA as mctsdata
+
+    df = pd.read_csv(csv_path)
+    task = _task_type(df[target])
+    t0 = time.time()
+    prepared, status = _apply_fair(df, target, [], mctsdata, seed=seed)
+    elapsed = time.time() - t0
+
+    os.makedirs(out_dir, exist_ok=True)
+    prepared.to_csv(os.path.join(out_dir, "prepared.csv"), index=False)
+    feat_cols = [c for c in prepared.columns if not c.startswith("__adp_")]
+    meta = {
+        "dataset_csv": os.path.abspath(csv_path),
+        "mode": mode,
+        "operator_space": "ours",
+        "task_type": task,
+        "status": "dead_search_raw_frame",
+        "autodp_version": "0.1.12",
+        "runtime_budget_seconds": None,
+        "converged_default_budget": False,
+        "hit_wall_clock_cap": False,
+        # DISCLOSE WHEN REPORTING: AutoDP's MCTS raised on every iteration and scored no candidate,
+        # so this row is the untouched frame, not a search result. dead_search + empty_pipeline
+        # both flag it; the counts are how much spinning happened before the abort.
+        "dead_search": True,
+        "empty_pipeline": True,
+        "salvaged_from_checkpoint": False,
+        "dead_search_spin_iterations": marker.get("spin_iterations"),
+        "dead_search_node_evals": marker.get("node_evals_completed"),
+        "dead_search_none_profit_evals": marker.get("none_profit_evals"),
+        "search_seconds": None,
+        "apply_seconds": round(elapsed, 2),
+        "seed": seed,
+        "search_split": autodp_protocol.SEARCH_SPLIT_TAG,
+        "metafeature_frame": "full",
+        "internal_scorer_seed": seed,
+        "leakfree_cbe": True,
+        "search_iteration_exceptions": marker.get("search_iteration_exceptions"),
+        "search_iteration_exception_kinds": marker.get("search_iteration_exception_kinds"),
+        "search_iteration_first_traceback": marker.get("first_traceback"),
+        "pipeline": [],
+        "search_curve_times": [],
+        "search_curve_scores": [],
+        "n_rows_input": int(len(df)),
+        "n_rows_prepared": int(len(prepared)),
+        "n_features_input": int(df.shape[1] - 1),
+        "n_features_prepared": len(feat_cols),
+        "prepared_feature_columns": feat_cols,
+        "n_object_cols_prepared": int(prepared[feat_cols].select_dtypes(include=["object", "category"]).shape[1]),
+    }
+    with open(os.path.join(out_dir, "autodp_meta.json"), "w") as f:
+        json.dump(meta, f, indent=2, default=str)
+    print(f"[ok  ] DEAD-SEARCH SALVAGE mode={mode} status={status} pipeline=[] raw frame "
+          f"({marker.get('search_iteration_exceptions')} swallowed exceptions, "
+          f"{marker.get('none_profit_evals')}/{marker.get('node_evals_completed')} nodes scored None)",
+          flush=True)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dataset-csv", required=True, help="an exported <id>.csv from export_eval_datasets.py")
@@ -534,6 +609,35 @@ def main() -> None:
             return False
         return sp.exitcode == 0 and os.path.exists(done)
 
+    def _try_dead_search_salvage() -> bool:
+        """After a DEAD-search abort with no checkpointed pipeline: score the raw frame.
+
+        ``ExceptionCounter`` writes ``dead_search.json`` when it kills a search that raised on
+        every iteration and never scored a node. There is no pipeline to apply, so the honest
+        downstream input is the untouched frame -- produced here as an empty pipeline, labelled
+        ``dead_search`` so the row is not read as a genuine AutoDP no-preprocessing preference.
+        """
+        if args.mode != "fair":
+            return False
+        if not os.path.exists(autodp_protocol.dead_search_marker_path(out_dir)):
+            return False
+        print(f"[warn] {did} ({args.mode}): search collapsed with no scored node; "
+              f"salvaging the raw frame as an empty pipeline", flush=True)
+        sp = ctx.Process(target=_dead_search_worker,
+                         args=(args.dataset_csv, args.target, args.mode, args.seed, out_dir))
+        sp.start()
+        sp.join(timeout=max(float(args.cap_seconds), 600.0))
+        if sp.is_alive():
+            sp.terminate()
+            sp.join(30)
+            if sp.is_alive():
+                sp.kill()
+                sp.join()
+            print(f"[warn] {did}: the raw-frame apply itself overran the cap; salvage abandoned",
+                  flush=True)
+            return False
+        return sp.exitcode == 0 and os.path.exists(done)
+
     # The retry budget is HALF the cap, not the cap itself: AutoDP still has to apply the winning
     # pipeline and merge the frames after its search loop ends, and on a large dataset that tail
     # can exceed whatever slack is left, which just burns the cap a second time. Worst case per
@@ -558,7 +662,7 @@ def main() -> None:
             # A checkpointed pipeline beats both alternatives from here: the retry re-searches
             # from scratch (and on the datasets that hit the cap once, it reliably hits it again
             # -- dataset 722 burned 2x cap for nothing), and the failure row records nothing.
-            if _try_salvage():
+            if _try_salvage() or _try_dead_search_salvage():
                 return
             if attempt == 0 and args.runtime is None:
                 continue  # convergence mode never terminated -> fall back to the capped budget
@@ -580,8 +684,10 @@ def main() -> None:
             sys.exit(2)
         if proc.exitcode != 0:
             # A crashed search (segfault in a native op, OOM kill) is salvageable the same way a
-            # capped one is: any completed iteration left a checkpoint behind.
-            if _try_salvage():
+            # capped one is: any completed iteration left a checkpoint behind. Exit 3 is the
+            # dead-search abort -- if it scored at least one node _try_salvage handles it, and if
+            # it scored none _try_dead_search_salvage produces the raw frame.
+            if _try_salvage() or _try_dead_search_salvage():
                 return
             print(f"[FAIL] {did} ({args.mode}): worker exited {proc.exitcode}")
             sys.exit(proc.exitcode or 1)

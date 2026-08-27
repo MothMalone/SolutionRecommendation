@@ -55,6 +55,16 @@ import pandas as pd
 #: Recorded in autodp_meta.json so a number can be traced to the protocol that produced it.
 SEARCH_SPLIT_TAG = "ours-seed42-0.6train/0.2val"
 
+# Written by ExceptionCounter next to the search checkpoint when a dead search is aborted, so the
+# parent process can tell "AutoDP's search crashed on every iteration and evaluated nothing" apart
+# from "AutoDP evaluated its options and preferred the raw frame". The counts inside are the only
+# record of the spin -- they live in the killed subprocess and are otherwise lost at os._exit.
+DEAD_SEARCH_MARKER = "dead_search.json"
+
+
+def dead_search_marker_path(out_dir: str) -> str:
+    return os.path.join(out_dir, DEAD_SEARCH_MARKER)
+
 
 # ---------------------------------------------------------------------------------------- split
 
@@ -487,6 +497,9 @@ class ExceptionCounter:
             return
 
         import sys as _sys
+        have_pipeline = self.checkpoint.pipeline is not None
+        salvage = ("apply-only from the checkpointed pipeline" if have_pipeline else
+                   "raw frame (no node ever scored, so there is no pipeline to apply)")
         print(
             f"\n[protocol] ABORTING A DEAD SEARCH: {self._consecutive} consecutive iterations "
             f"raised {dict(self.kinds)} with no node evaluated between them.\n"
@@ -496,8 +509,26 @@ class ExceptionCounter:
             f"({self.checkpoint.n_none_profits} returned profit=None, which is what poisons "
             f"drop_unpromising/get_profit_value).\n"
             f"[protocol] best checkpointed pipeline: {self.checkpoint.pipeline} "
-            f"(profit={self.checkpoint.best_profit}) -> salvaging apply-only.",
+            f"(profit={self.checkpoint.best_profit}) -> salvaging {salvage}.",
             flush=True)
+        # Persist the diagnosis before os._exit throws it away. When there is no checkpointed
+        # pipeline the parent falls back to the raw frame, and this marker is what lets the
+        # resulting row be labelled dead_search rather than passed off as a genuine empty-pipeline
+        # AutoDP preference (docs/ARMS.md item 6).
+        try:
+            out_dir = os.path.dirname(self.checkpoint.path)
+            with open(dead_search_marker_path(out_dir), "w") as fh:
+                json.dump({
+                    "spin_iterations": int(self._consecutive),
+                    "search_iteration_exceptions": int(sum(self.kinds.values())),
+                    "search_iteration_exception_kinds": dict(self.kinds),
+                    "node_evals_completed": int(evals),
+                    "none_profit_evals": int(self.checkpoint.n_none_profits),
+                    "first_traceback": self.first_traceback,
+                    "had_checkpointed_pipeline": bool(have_pipeline),
+                }, fh, indent=2)
+        except Exception:
+            pass  # the abort must happen regardless; a missing marker only costs the label
         _sys.stdout.flush()
         _sys.stderr.flush()
         os._exit(3)   # their bare `except:` would swallow any exception, including SystemExit

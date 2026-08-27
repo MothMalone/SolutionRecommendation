@@ -69,6 +69,11 @@ to average or compare against.
   `search_iteration_exceptions` per row instead of trying to predict it. Regression test (a
   different, already-fixed trigger on the same dataset):
   `tests/test_autodp_protocol.py::test_search_dataset_reproduces_the_862_failure_mode_directly`.
+  **Outcome for a fully-dead search (0 nodes scored):** the spin is aborted and the row becomes
+  the raw frame, tagged `dead_search: true` + `empty_pipeline: true` + the spin counts. Under
+  `leakfree` this is what 862 and 27 do on `ours` ops (3 nodes, all `profit=None`). Treat it as
+  an AutoDP failure whose reported value is the untouched-frame accuracy — same standing as a
+  timeout on arm 0. See `docs/ARMS.md` item 6.
 - **A pipeline of length 1** means AutoDP picked a classifier and *no* preprocessing operator, so its
   output is the raw data. The report calls those out — on a 30s smoke run of dataset 31 this is
   exactly what happened, so watch for it at full budget.

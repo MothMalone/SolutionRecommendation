@@ -639,6 +639,12 @@ def summarize(pattern: str) -> int:
         print(f"\n!! {len(empty)} AutoDP row(s) have an EMPTY pipeline -- AutoDP selected no "
               f"preprocessing, so the score is the RAW frame, not a search result: "
               + ", ".join(f"{r.get('arm')}/{r.get('dataset_id')}" for r in empty))
+    dead = [r for r in rows if r.get("dead_search")]
+    if dead:
+        print(f"\n!! {len(dead)} AutoDP row(s) had a DEAD SEARCH -- the MCTS raised on every "
+              f"iteration and scored no node, so the score is the RAW frame (an AutoDP failure, "
+              f"reported rather than dropped). Same class as 378/722 timing out: "
+              + ", ".join(f"{r.get('arm')}/{r.get('dataset_id')}" for r in dead))
     salvaged = [r for r in rows if r.get("salvaged_from_checkpoint")]
     if salvaged:
         print(f"\n!! {len(salvaged)} AutoDP row(s) were SALVAGED from a cap-killed search "

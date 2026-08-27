@@ -312,6 +312,11 @@ def score_prepared(
         "leakfree_cbe": adp_meta.get("leakfree_cbe"),
         "search_iteration_exceptions": adp_meta.get("search_iteration_exceptions"),
         "search_iteration_exception_kinds": adp_meta.get("search_iteration_exception_kinds"),
+        # True when AutoDP's search raised on every iteration and scored no node, so this row is
+        # the raw frame (empty pipeline) rather than a searched result -- report it flagged, never
+        # averaged in as a genuine no-preprocessing preference.
+        "dead_search": bool(adp_meta.get("dead_search", False)),
+        "dead_search_none_profit_evals": adp_meta.get("dead_search_none_profit_evals"),
         "evaluator": evaluator,
         "evaluator_meta": evaluator_meta,
         # Kept under the historical key for back-compat (adp_bench.import_dir reads it); it is the

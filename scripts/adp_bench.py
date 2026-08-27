@@ -347,14 +347,21 @@ def run(args) -> None:
                 # search result. Reliably produced by the explicit-runTime retry path on large
                 # frames, where the budget expires before the first iteration finishes.
                 "empty_pipeline": len(res["autodp_pipeline"] or []) <= 1,
+                # dead_search: the raw frame is here because AutoDP's MCTS raised on EVERY
+                # iteration and scored no candidate (small-frame Is_BatchTraining + None-profit
+                # spin), not because a search preferred no preprocessing. A stronger claim than
+                # empty_pipeline -- the search produced nothing at all.
+                "dead_search": bool(res.get("dead_search", False)),
+                "dead_search_none_profit_evals": res.get("dead_search_none_profit_evals"),
             }
             _append(args.out, record)
             n_exc = record.get("search_iteration_exceptions") or 0
             exc_flag = f" !! {n_exc} SEARCH-ITERATION EXCEPTIONS (result may be unevaluated)" if n_exc else ""
+            dead_flag = " !! DEAD SEARCH -> raw frame (search scored no node)" if record["dead_search"] else ""
             print(f"[ok] {did} [{mode}] [{record['evaluator']}] {record['metric']}={record['score']:.4f} "
                   f"pipeline={record['pipeline']} "
                   f"adp={record['autodp_seconds']}s eval={record['eval_seconds']}s "
-                  f"total={record['total_seconds']}s{exc_flag}", flush=True)
+                  f"total={record['total_seconds']}s{exc_flag}{dead_flag}", flush=True)
         except Exception as exc:
             _append(args.out, {
                 "dataset_id": str(did), "mode": mode, "status": "error", "score": None,
@@ -465,6 +472,16 @@ def summarize(args) -> None:
             "retry path produces this on large frames whenever the budget expires before the "
             "first MCTS iteration completes. Do not read them as 'AutoDP chose to do nothing': "
             + ", ".join(f"{r['dataset_id']} ({r['mode']})" for r in empty))
+    dead = [r for r in records if r.get("dead_search")]
+    if dead:
+        lines.append(
+            "\n**Dead search — AutoDP's MCTS raised on every iteration and scored NO node**, so "
+            "these rows are the raw frame. Stronger than 'empty pipeline': the search produced "
+            "nothing at all (small-frame Is_BatchTraining shrinks the batch below a classifier "
+            "guard -> profit=None -> the loop spins on TypeError). Comparable to 378/722 timing "
+            "out on arm 0 — an AutoDP failure, reported as the raw-frame number rather than a "
+            "hole: "
+            + ", ".join(f"{r['dataset_id']} ({r['mode']})" for r in dead))
     salvaged = [r for r in records if r.get("salvaged_from_checkpoint")]
     if salvaged:
         lines.append(
