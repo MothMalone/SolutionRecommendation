@@ -460,13 +460,14 @@ def _salvage_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: s
           flush=True)
 
 
-def _dead_search_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: str) -> None:
+def _dead_search_worker(csv_path: str, target: str, mode: str, seed: int, out_dir: str,
+                        operator_space: str = "ours") -> None:
     """Apply-nothing child: the search crashed on every iteration and scored zero nodes, so there
     is no checkpointed pipeline to salvage. Produce the RAW frame as an empty pipeline instead of
     a `no prepared dataset` failure, and label it dead_search so the reported row is 'AutoDP was
     given the operator space and its search collapsed', not 'AutoDP evaluated its options and
-    chose no preprocessing'. Operator space is irrelevant here -- an empty chain touches no
-    operator -- so the adapter is deliberately not installed. `fair` mode only.
+    chose no preprocessing'. The adapter is deliberately not installed -- an empty chain touches
+    no operator -- but `operator_space` is still recorded as provenance. `fair` mode only.
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -491,7 +492,7 @@ def _dead_search_worker(csv_path: str, target: str, mode: str, seed: int, out_di
     meta = {
         "dataset_csv": os.path.abspath(csv_path),
         "mode": mode,
-        "operator_space": "ours",
+        "operator_space": operator_space,
         "task_type": task,
         "status": "dead_search_raw_frame",
         "autodp_version": "0.1.12",
@@ -624,7 +625,8 @@ def main() -> None:
         print(f"[warn] {did} ({args.mode}): search collapsed with no scored node; "
               f"salvaging the raw frame as an empty pipeline", flush=True)
         sp = ctx.Process(target=_dead_search_worker,
-                         args=(args.dataset_csv, args.target, args.mode, args.seed, out_dir))
+                         args=(args.dataset_csv, args.target, args.mode, args.seed, out_dir,
+                               args.operator_space))
         sp.start()
         sp.join(timeout=max(float(args.cap_seconds), 600.0))
         if sp.is_alive():

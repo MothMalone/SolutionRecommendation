@@ -36,12 +36,14 @@ Recorded per row under `protocol.h2o` / `evaluator_meta`.
 `ours` ops via `autodp_our_space.py`; the same `get_profit` hook applies but has not been measured
 there. Treat ~30 s as "likely", not "confirmed". So:
 
-**862, 27, and 876** collapse a different way under `leakfree` on `ours` ops: the search scores
+**862 and 27** collapse a different way under `leakfree` on `ours` ops: the search scores
 *zero* nodes (all `profit=None` on the tiny 0.6 train split), so there is no checkpoint to
 salvage. As of the dead-search change, the row is now the **raw frame** — `dead_search: true`,
 `empty_pipeline: true`, `score` = H2O on the untouched frame, aborted in ~10 s. Report these as
 AutoDP failures (raw-frame number), the same standing as 378/722 timing out on arm 0 — `--summarize`
 lists them under a "DEAD SEARCH" callout. Local end-to-end check: 862 → H2O `score_full` 0.706.
+(876 spun on **arm 0** only; under arm-1 `ours` ops its smoke run produced `['NB']` — an ordinary
+`empty_pipeline`, not `dead_search`. Watch the rerun but don't assume it.)
 
 - `--cap-seconds 5400` on every shard (only costs wall time when a search needs it; salvage makes a
   kill non-fatal);

@@ -116,7 +116,12 @@ def done_ids(out_path: Path, arm: str, protocol: str, evaluator: str = "autogluo
         # Key on protocol AND evaluator too: the same dataset under native/leakfree or under
         # autogluon/h2o are different results, and skipping the second one silently loses half
         # the comparison.
-        if (row.get("arm") == arm and row.get("status") == "ok"
+        #
+        # `dead_search_raw_frame` is terminal, not a failure: AutoDP's search collapsed, the row
+        # is the raw-frame number, and rerunning only reproduces it. Treat it as done so repeated
+        # resume runs do not keep re-scoring 862/27. Genuine failures (`autodp_error`, `timeout`,
+        # `error`, `eval_crashed`, `failed`) are still NOT done and will be retried.
+        if (row.get("arm") == arm and row.get("status") in ("ok", "dead_search_raw_frame")
                 and str(row.get("protocol", protocol)) == str(protocol)
                 and str(row.get("evaluator", "autogluon")) == str(evaluator)):
             seen.add(str(row.get("dataset_id")))

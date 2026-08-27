@@ -224,13 +224,18 @@ so `--evaluator h2o` is rejected on ACORec arms.
    - **≥1 node scored a real profit before the spin** (e.g. 378 on `theirs` ops: 7 nodes, best
      `['RF','CBE']`): `SearchCheckpoint` salvages that pipeline apply-only. Row carries
      `salvaged_from_checkpoint: true`.
-   - **0 nodes ever scored** (e.g. 862 and 27 on `ours` ops under `leakfree`: 3 nodes, all
+   - **0 nodes ever scored** (862 and 27 on `ours` ops under `leakfree`: 3 nodes, all
      `profit=None`): there is no pipeline, so the salvage applies the **empty pipeline = raw
      frame**. Row carries `dead_search: true` + `empty_pipeline: true` + the spin counts
      (`dead_search_none_profit_evals`, `search_iteration_exceptions`). This is an **AutoDP
      failure reported as the raw-frame number** — the same class as 378/722 timing out on arm 0,
      not a hole in the table and not a genuine "AutoDP chose no preprocessing". Both
-     `--summarize` layers call these rows out separately from ordinary empty pipelines.
+     `--summarize` layers call these rows out separately from ordinary empty pipelines. **When
+     the table wants an "AutoDP-search-succeeded" mean, filter on `dead_search` (and
+     `salvaged_from_checkpoint`, and `search_iteration_exceptions > 0`) — otherwise these
+     raw-frame numbers are averaged into the arm mean, which previously excluded them as
+     `autodp_error`.** `done_ids` treats `dead_search_raw_frame` as terminal, so a resume run
+     does not keep re-scoring these.
      `scripts/autodp_protocol.py` writes `dead_search.json` next to the checkpoint before the
      abort so the counts survive `os._exit`; `run_autodatapre.py::_dead_search_worker` does the
      apply. Regression test:
