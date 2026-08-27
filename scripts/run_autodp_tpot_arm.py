@@ -44,6 +44,8 @@ from automl_aco.eval_ids import EVAL_IDS  # noqa: E402
 
 
 def _read_done(out_path: str) -> set:
+    """(dataset_id, mode) pairs that produced a REAL score. Failed / errored rows are retried on
+    rerun (the AutoDP search is cached under --prepared-root, so the retry is cheap)."""
     done = set()
     if not os.path.exists(out_path):
         return done
@@ -56,7 +58,8 @@ def _read_done(out_path: str) -> set:
                 rec = json.loads(line)
             except Exception:
                 continue
-            done.add((str(rec.get("dataset_id")), rec.get("mode")))
+            if rec.get("score") is not None or rec.get("status") == "ok":
+                done.add((str(rec.get("dataset_id")), rec.get("mode")))
     return done
 
 

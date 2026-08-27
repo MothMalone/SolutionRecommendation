@@ -120,10 +120,20 @@ def numeric_matrix(frame: Any, label: str) -> np.ndarray:
 
 def default_tpot_components(task_type: str):
     try:
+        import tpot as _tpot
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("TPOT 1.1.0 is required for the TPOT evaluator (no `tpot` importable)") from exc
+    try:
         from tpot import TPOTClassifier, TPOTRegressor
         from tpot.config import get_search_space
     except Exception as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError("TPOT 1.1.0 is required for the TPOT evaluator") from exc
+        # The pre-1.0 `tpot` (0.12.x, still shipped in Kaggle's base image) has neither
+        # `tpot.config.get_search_space` nor the `search_space=` API this evaluator is built on.
+        raise RuntimeError(
+            f"found tpot {getattr(_tpot, '__version__', '?')}, but this evaluator needs the "
+            f"1.x API (`tpot.config.get_search_space`). Install TPOT==1.1.0 into an environment "
+            f"that shadows the base one -- see requirements-tpot-kaggle.txt."
+        ) from exc
     estimator = TPOTClassifier if task_type == "classification" else TPOTRegressor
     return estimator, get_search_space
 

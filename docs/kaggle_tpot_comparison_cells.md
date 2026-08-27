@@ -32,7 +32,7 @@ AutoDP's (`numpy<1.24`). So it is a three-environment pipeline, driven by
 | step | env | what |
 |---|---|---|
 | AutoDP search | `.venv-autodp` (`/tmp/adpenv`) | `run_autodatapre.py`, **persisted** under `--prepared-root` — done once, reused |
-| TPOT score | TPOT (`/tmp/tpotlibs`) | `evaluate_autodp_tpot.py` reads the persisted `prepared.csv` |
+| TPOT score | base env, `tpot` upgraded to 1.1.0 | `evaluate_autodp_tpot.py` reads the persisted `prepared.csv` |
 
 The driver runs in the **base env** and shells out to both. It is resumable and shardable exactly
 like `adp_bench.py`, and writes `adp_bench`-compatible JSONL rows tagged `evaluator: "tpot"`.
@@ -98,7 +98,7 @@ echo
   && echo "  openml mount: attached" || echo "  openml mount: NOT attached (Cell 4 needs it)"
 ```
 
-## Cell 2 — the two shell-out environments  (Internet ON)
+## Cell 2 — the two environments  (Internet ON)
 
 ```bash
 %%bash
@@ -107,20 +107,32 @@ REPO=$(cat /tmp/repo_path)
 # AutoDP's pinned env (python 3.10 / numpy 1.23) -> /tmp/adpenv
 ADP_VENV=/tmp/adpenv bash "$REPO/scripts/setup_autodp_env.sh"
 
-# TPOT env, installed to a target dir so it never shadows the base stack -> /tmp/tpotlibs
-python -c "import tpot" 2>/dev/null || \
-  pip install -q --target=/tmp/tpotlibs -r "$REPO/requirements-tpot-kaggle.txt"
+# TPOT 1.1.0 into the BASE env. Kaggle ships tpot 0.12.x (a DIFFERENT API with no
+# tpot.config.get_search_space) -- must force the upgrade, do NOT `import tpot ||`.
+pip install -q -r "$REPO/requirements-tpot-kaggle.txt"
 
-# sanity: TPOT imports against the base interpreter + that dir
-PYTHONPATH=/tmp/tpotlibs python -c "import tpot, sklearn, numpy; print('tpot', tpot.__version__, 'sklearn', sklearn.__version__, 'numpy', numpy.__version__)"
+# hard gate: the 1.x API this evaluator needs must import
+python - <<'PY'
+import tpot
+from tpot.config import get_search_space   # raises on tpot 0.12.x
+import sklearn, numpy, pandas
+print("tpot", tpot.__version__, "| sklearn", sklearn.__version__,
+      "| numpy", numpy.__version__, "| pandas", pandas.__version__)
+assert tpot.__version__.startswith("1."), f"need TPOT 1.1.0, got {tpot.__version__}"
+print("TPOT 1.x API OK")
+PY
 ```
 
-The driver runs in the base env (only stdlib + `automl_aco.eval_ids`); it does **not** need
-AutoGluon or H2O.
+The driver (`run_autodp_tpot_arm.py`) runs in this base env — it only needs stdlib +
+`automl_aco.eval_ids` + the base `pandas` — and shells out to `/tmp/adpenv/bin/python` for the
+AutoDP search and back to this interpreter for the TPOT score. No AutoGluon / H2O needed.
 
 ## Cell 3 — export all 30 eval CSVs into one dir  (Internet ON)
 
-The same files the ACORec arm reads. If the `eval_all` dir from the H2O run is still attached, reuse it.
+The same files the ACORec arm reads. **Run the full export** — the driver's per-dataset export
+fallback only calls `export_eval_datasets.py`, which cannot resolve the DiffPrep-sourced ids
+(e.g. 42165), so those must be materialised here first. If the `eval_all` dir from the H2O run is
+still attached, reuse it as-is.
 
 ```bash
 %%bash
@@ -153,18 +165,22 @@ python -u "$REPO/scripts/run_autodp_tpot_arm.py" \
   --data-dir /kaggle/working/eval_all \
   --prepared-root /kaggle/working/adp_prepared \
   --adp-python /tmp/adpenv/bin/python \
-  --tpot-libs /tmp/tpotlibs \
   --cap-seconds 5400 \
   --out /kaggle/working/arms_1-adp-ourops_tpot_1of5.jsonl \
   2>&1 | tee /kaggle/working/log_arm1_tpot_1of5.txt
 ```
 
+**Per session: change `--shard I/5`, the `--out` filename, and the log filename together**
+(`_1of5` → `_2of5` …) or the shards overwrite each other.
+
 - `--operator-space ours` + `--adp-meta-corpus data/adp_ourops_corpus` = arm `1-adp-ourops`
   (retrained meta-learner; value estimator NOT retrained — disclose per `docs/ARMS.md`).
 - `--prepared-root /kaggle/working/adp_prepared` persists each search under
-  `fair_ourops/dataset_<id>/`; add it as a Kaggle dataset output so later evaluators can `--skip-search`.
-- `--tpot-libs /tmp/tpotlibs` is prepended to `PYTHONPATH` for the TPOT step only.
-- resumable: rerun the identical command and it skips `(dataset, mode)` rows already in the file.
+  `fair_ourops/dataset_<id>/`; add it as a Kaggle dataset output so a rerun / later evaluator
+  skips the search (`--skip-search`, or it auto-skips when `prepared.csv` already exists).
+- the TPOT step runs against this same interpreter — Cell 2 must have upgraded base `tpot` to 1.1.0.
+- resumable: rerun the identical command; rows that produced a real score are skipped, **failed /
+  errored rows are retried** (the cached search makes the retry cheap).
 - if you would rather not risk shard 5 on 378: `--ids "1054 1037 42165 30 1497"` first, then
   `--ids 378` in its own session.
 
@@ -209,7 +225,7 @@ silently changes which pipeline TPOT scores. It runs in the TPOT env only (no Au
 
 ```bash
 %%bash
-REPO=$(cat /tmp/repo_path); export PYTHONPATH="/tmp/tpotlibs:$REPO/src"
+REPO=$(cat /tmp/repo_path); export PYTHONPATH="$REPO/src"
 ID=1066
 python "$REPO/scripts/evaluate_acorec_tpot.py" \
   --recommendation-json /kaggle/input/<your-acorec-run>/dataset_$ID/recommendation.json \
