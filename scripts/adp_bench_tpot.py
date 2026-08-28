@@ -27,12 +27,34 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from adp_bench import _export_dataset, _read_done, _run_autodp, _shard  # noqa: E402
+from adp_bench import _export_dataset, _run_autodp, _shard  # noqa: E402
 from eval_autodatapre_tpot import score_prepared  # noqa: E402
 from automl_aco.eval_ids import EVAL_IDS  # noqa: E402
 
 
 MODE = "tpot_leakfree"
+
+
+def _read_successful(out_path: str) -> set[tuple[str, str]]:
+    """Return only records that should suppress a rerun.
+
+    The benchmark appends failures as durable records so they remain visible in the
+    output.  They must not, however, prevent a later retry after a transient Kaggle
+    or dependency failure.
+    """
+    successful = set()
+    path = Path(out_path)
+    if not path.exists():
+        return successful
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if record.get("status") in {"ok", "apply_failed_returned_raw"}:
+                successful.add((str(record.get("dataset_id")), str(record.get("mode"))))
+    return successful
 
 
 def _append(out_path: Path, record: dict) -> None:
@@ -59,7 +81,7 @@ def run(args) -> None:
     _validate_corpus(corpus)
     out_path = Path(args.out).resolve()
     ids = _planned_ids(args)
-    done = _read_done(str(out_path))
+    done = _read_successful(str(out_path))
     todo = [dataset_id for dataset_id in ids if (str(dataset_id), MODE) not in done]
     print(
         f"[plan] {len(ids)} dataset(s); {len(done)} completed records in {out_path}; "
