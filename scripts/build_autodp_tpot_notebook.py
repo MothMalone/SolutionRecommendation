@@ -179,11 +179,14 @@ required = [
     _code(
         """
         # Inspect this shard's resumable records and write a CSV companion for download.
-        records = []
+        records_by_key = {}
         if RESULT_PATH.exists():
             for line in RESULT_PATH.read_text(encoding="utf-8").splitlines():
                 if line.strip():
-                    records.append(json.loads(line))
+                    record = json.loads(line)
+                    key = (str(record.get("dataset_id")), str(record.get("mode")))
+                    records_by_key[key] = record
+        records = list(records_by_key.values())
         summary = pd.DataFrame(records)
         if not summary.empty:
             summary_path = RESULT_PATH.with_suffix(".csv")
