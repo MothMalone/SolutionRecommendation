@@ -129,7 +129,12 @@ def _search(df_search: pd.DataFrame, target: str, task: str, runtime, mctsdata, 
     ``runtime=None`` selects AutoDP's default: run until its own convergence rule fires (20
     consecutive iterations improving by less than 0.001).
     """
-    df_search = df_search.copy()
+    # AutoDP 0.1.12's MetaFeature implementation uses ``series[0]`` as a
+    # positional access.  ``df.iloc[tr]`` preserves the source labels, so a
+    # split whose first row is not source row 0 raises ``KeyError: 0`` before
+    # MCTS starts.  Search only needs a compact local frame; original row ids
+    # are tracked separately by the leak-free apply paths.
+    df_search = df_search.copy().reset_index(drop=True)
     dataset = mctsdata.read_dataset(df_search, target)  # their unseeded internal 80/20 + LabelEncoder
     if task == "classification":
         fn = MCTS.CLA_With_TimeBudget if runtime else MCTS.CLA_Without_TimeBudget
