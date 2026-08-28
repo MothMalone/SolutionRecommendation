@@ -64,7 +64,12 @@ cells = [
         else:
             subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(REPO_DIR)], check=True)
 
-        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "TPOT==1.1.0", "pyarrow>=15"], check=True)
+# The benchmark process runs in Kaggle's main Python environment.  The repository
+# loader imports requests before AutoDP is launched in its isolated legacy venv.
+subprocess.run([
+    sys.executable, "-m", "pip", "install", "-q",
+    "TPOT==1.1.0", "pyarrow>=15", "requests>=2.31",
+], check=True)
         subprocess.run(["bash", str(REPO_DIR / "scripts" / "setup_autodp_env.sh")], cwd=REPO_DIR, check=True)
 
         required = [
