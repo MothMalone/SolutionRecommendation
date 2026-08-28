@@ -121,7 +121,10 @@ def _run_autodp(adp_python: str, csv_path: str, did: str, mode: str, scratch: st
     # Not check=True: a wall-clock kill is an expected outcome that the caller records as a
     # timeout row, not an exception to surface as a stack trace.
     proc = subprocess.run(cmd, env=env)
-    return os.path.join(scratch, mode, f"dataset_{did}"), proc.returncode
+    # run_autodatapre.py namespaces the output directory by operator space so that
+    # AutoDP's native and ACORec-space artifacts cannot collide.
+    space_tag = mode if operator_space == "theirs" else f"{mode}_ourops"
+    return os.path.join(scratch, space_tag, f"dataset_{did}"), proc.returncode
 
 
 # ------------------------------------------------------------------------------------------ run
