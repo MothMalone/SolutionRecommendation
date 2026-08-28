@@ -192,18 +192,26 @@ REPO=$(cat /tmp/repo_path)
 python "$REPO/scripts/adp_bench.py" --summarize '/kaggle/working/arms_1-adp-ourops_tpot_*.jsonl'
 ```
 
-`adp_bench --summarize` accepts the `tpot` rows and gives a `fair/tpot` column. Check the callouts:
+`adp_bench --summarize` accepts the `tpot` rows and gives a `fair/tpot` column. Check the callouts
+and the per-row `compat_adapter` / `dropped_rare_class_train_rows` fields in the JSONL:
 
 | flag | meaning | action |
 |---|---|---|
-| **No score** / `status: failed` mentioning **NaN** | AutoDP's frame had NaN (`imp_null`); TPOT with `preprocessing=False` cannot consume it | **exclude from the mean**, footnote as an AutoDP failure — do NOT count as 0 |
+| `compat_adapter.applied: true` | AutoDP's frame had NaN / object columns (usually because it selected NO preprocessing); the **same** train-fit median/mode-impute + one-hot the No-Preprocessing baseline is scored through was applied. AutoDP's own operators are still the only preprocessing under test. | none — this is the identical protocol every other TPOT column uses; recorded for provenance |
+| `dropped_rare_class_train_rows` non-empty | AutoDP's row deletions left a training class with <2 rows (unusable for stratified CV); those rows were dropped, test set untouched | footnote it |
 | `!! DEAD SEARCH -> raw frame` | AutoDP scored zero nodes; the row is the raw frame, not a searched pipeline | exclude from the "AutoDP-search-succeeded" mean; report flagged |
-| `EMPTY pipeline` | AutoDP chose no preprocessing; score is the raw frame | footnote it, don't average as a search result |
+| `EMPTY pipeline` | AutoDP chose no preprocessing; score is the raw frame through the compat adapter — i.e. exactly the No-Preprocessing baseline | footnote it, don't average as a search result |
 | `AutoDP deleted test rows` (`test_coverage < 1`) | `score` (= `score_full`) counts dropped rows wrong | report `score_full`, `score_kept` alongside |
 | `search-iteration exceptions` | their MCTS swallowed exceptions; pipeline may be unevaluated | treat with caution |
 
 To join the TPOT column to the ACORec+TPOT numbers, check the `dataset_csv.target_sha1_16`
 fingerprint in each row matches the ACORec arm's row for that dataset.
+
+> **Comparing columns fairly.** The AutoDP number in an existing RQ1 table was very likely scored
+> by AutoGluon (a stronger downstream than a 5-minute estimator-only TPOT search). Do not compare
+> AutoDP+AutoGluon against ACORec+TPOT — that gap is the downstream model, not the preprocessing.
+> Under TPOT every method compresses toward ~0.80; this run produces the AutoDP+TPOT column that
+> makes the row apples-to-apples.
 
 ## Cell 6 — pull the file
 

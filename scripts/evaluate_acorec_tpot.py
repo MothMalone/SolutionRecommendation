@@ -68,6 +68,8 @@ from _tpot_eval import (  # noqa: E402  (kept importable under the historical na
     _safe_cv_folds,
     knob_summary,
     normalize_task_type,
+    prune_rare_classes,
+    to_tpot_matrix,
 )
 
 
@@ -130,8 +132,19 @@ def evaluate_recommendation(
     if len(X_test_processed) != len(y_test):
         raise ValueError("Processed test X/y lengths do not match")
 
-    train_matrix = _numeric_matrix(X_train_processed, "training")
-    test_matrix = _numeric_matrix(X_test_processed, "test")
+    # ACORec's IQR/LOF operators can push a training class below the CV fold floor. Drop those
+    # (unusable for stratified CV); test set untouched. Same handling as the AutoDP arm.
+    dropped_rare_classes: list = []
+    if task_type == "classification" and isinstance(X_train_processed, pd.DataFrame):
+        X_train_processed, y_train_processed, dropped_rare_classes = prune_rare_classes(
+            X_train_processed.reset_index(drop=True), y_train_processed, min_count=2
+        )
+
+    # DataFrame -> the No-Preprocessing compat adapter (median/mode impute + one-hot), matching
+    # every other TPOT arm; already-numeric matrix (post-PCA/SVD) -> finite check only.
+    train_matrix, test_matrix, adapter_meta = to_tpot_matrix(
+        X_train_processed, X_test_processed, y_train_processed
+    )
     cv_folds = _safe_cv_folds(y_train_processed, task_type, max_cv_folds)
     target_encoder = None
     y_train_for_tpot = y_train_processed.to_numpy()
@@ -203,6 +216,8 @@ def evaluate_recommendation(
             if target_encoder is not None else "not_applicable"
         ),
         "cv_folds": int(cv_folds),
+        "compat_adapter": adapter_meta,
+        "dropped_rare_class_train_rows": [str(c) for c in dropped_rare_classes],
         "max_time_mins": int(max_time_mins),
         "max_eval_time_mins": int(max_eval_time_mins),
         "n_jobs": int(n_jobs),

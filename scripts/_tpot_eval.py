@@ -14,15 +14,30 @@ Two evaluators import from here so their TPOT settings CANNOT drift apart:
 and it adds no preprocessing of its own on top of what is under test.
 
 The knobs below are the ones the frozen ACORec TPOT run used
-(``notebooks/run-acorec-tpot-kaggle.ipynb``). Changing one here changes both arms at once, which is
-the point.
+(``notebooks/run-acorec-tpot-kaggle.ipynb``): split seed 42, TPOT ``random_state`` 1 (a separate
+knob), ``max_time_mins`` 5, ``max_eval_time_mins`` 1, ``population_size`` 20, ``early_stop`` 5,
+``cv`` = ``min(5, smallest training-class count)``. The search space is sized with the
+*transformed* ``n_features`` / ``n_samples`` (matching ``evaluate_acorec_tpot`` /
+``evaluate_ctxpipe_tpot`` / the DiffPrep TPOT notebook; the standalone No-Preprocessing baseline
+notebook sizes it with raw ``n_features`` and ``random_state`` 42 -- a pre-existing inconsistency
+on that column alone). Changing a knob here changes both arms at once, which is the point.
+
+Frames that a method's pipeline left with NaN or an object column are run through
+``apply_minimal_adapter`` -- the identical train-fitted median/mode-impute + one-hot cleanup the
+No-Preprocessing baseline is scored through. Without it TPOT (``preprocessing=False``) cannot
+consume the frame at all, and a method that preprocessed nothing (AutoDP frequently) would be
+silently dropped rather than scored at the no-preprocessing floor.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
 
 
 # --------------------------------------------------------------------------- knobs (both arms)
@@ -51,7 +66,10 @@ def knob_summary() -> dict:
         "early_stop": TPOT_EARLY_STOP,
         "preprocessing": False,
         "validation_strategy": "none",
-        "search_space": "classifiers | regressors (estimator-only)",
+        "search_space": "classifiers | regressors (estimator-only), sized with transformed n_features/n_samples",
+        "compat_adapter": "No-Preprocessing baseline adapter: train-fit median-impute numerics + "
+                          "most_frequent-impute + one-hot categoricals; applied only to columns "
+                          "the method's pipeline left dirty",
     }
 
 
@@ -87,22 +105,20 @@ def safe_cv_folds(y_train: pd.Series, task_type: str, maximum: int = TPOT_MAX_CV
 
 
 def numeric_matrix(frame: Any, label: str) -> np.ndarray:
-    """Coerce a transformed frame to a finite float32 matrix, or raise loudly.
+    """Coerce an ALREADY-numeric transformed block to a finite float32 matrix, or raise.
 
-    TPOT with ``preprocessing=False`` hands the frame straight to sklearn estimators, so a NaN or a
-    leftover object column is a hard failure here -- unlike AutoGluon / H2O, which tolerate both.
-    That is deliberate: imputing or encoding at this point would be downstream preprocessing, which
-    this protocol forbids. The caller turns the raised error into a ``status: "failed"`` row.
+    Used only for the array / sparse path (e.g. a method's pipeline whose output is already a
+    numeric matrix -- post-PCA, post-SVD). For DataFrame input with residual NaN or object columns,
+    callers use ``apply_minimal_adapter`` instead: raising there would hold a method whose pipeline
+    left a column dirty to a stricter protocol than the No-Preprocessing baseline, which is scored
+    through exactly that adapter.
     """
     if isinstance(frame, pd.DataFrame):
         if any(isinstance(dtype, pd.SparseDtype) for dtype in frame.dtypes):
             frame = frame.sparse.to_dense()
         non_numeric = frame.select_dtypes(exclude=["number", "bool"]).columns.tolist()
         if non_numeric:
-            raise ValueError(
-                f"{label} matrix still has non-numeric columns after residual encoding: "
-                f"{non_numeric[:10]}"
-            )
+            raise ValueError(f"{label} matrix still has non-numeric columns: {non_numeric[:10]}")
         values = frame.to_numpy(dtype=np.float32, copy=False)
     elif hasattr(frame, "toarray"):
         values = np.asarray(frame.toarray(), dtype=np.float32)
@@ -111,11 +127,101 @@ def numeric_matrix(frame: Any, label: str) -> np.ndarray:
     if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] == 0:
         raise ValueError(f"{label} matrix has invalid shape {values.shape}")
     if not np.isfinite(values).all():
-        raise ValueError(
-            f"{label} matrix contains NaN or infinity -- the frame under test left values TPOT "
-            f"cannot consume, and imputing them here would be downstream preprocessing"
-        )
+        raise ValueError(f"{label} matrix contains NaN or infinity")
     return values
+
+
+# ---------------------------------------------------------- the No-Preprocessing compat adapter
+# Verbatim from scripts/build_tpot_baselines_notebook.py: the "unavoidable" train-fitted cleanup
+# (median-impute numerics, most_frequent-impute + one-hot categoricals) that the No-Preprocessing
+# TPOT baseline is scored through. TPOT gets `preprocessing=False`, so a frame with NaN or an
+# object column is unscoreable without it. Applying the SAME adapter to every arm keeps a method
+# whose pipeline left a column dirty on the same protocol as the baseline it is compared to,
+# instead of silently dropping that dataset. It scales / selects / reduces nothing -- the method's
+# own preprocessing is still the only thing under test.
+def tpot_ready_raw_frame(frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
+    """Normalise categorical dtypes to str/object (NaN preserved). Learns nothing."""
+    frame = frame.copy()
+    categorical = list(frame.select_dtypes(exclude=[np.number]).columns)
+    for column in categorical:
+        missing = frame[column].isna()
+        frame[column] = frame[column].astype(str).astype(object)
+        frame.loc[missing, column] = np.nan
+    return frame, categorical
+
+
+def build_minimal_adapter(x_train: pd.DataFrame) -> ColumnTransformer:
+    numeric = list(x_train.select_dtypes(include=[np.number]).columns)
+    categorical = [c for c in x_train.columns if c not in numeric]
+    transformers = []
+    if numeric:
+        transformers.append(("numeric", SimpleImputer(strategy="median"), numeric))
+    if categorical:
+        transformers.append((
+            "categorical",
+            Pipeline([
+                ("imputer", SimpleImputer(strategy="most_frequent")),
+                ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False,
+                                         dtype=np.float32)),
+            ]),
+            categorical,
+        ))
+    return ColumnTransformer(transformers=transformers, remainder="drop",
+                             sparse_threshold=0.0, verbose_feature_names_out=False)
+
+
+def apply_minimal_adapter(
+    x_train: pd.DataFrame, x_test: pd.DataFrame, y_train: Any,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Fit the compat adapter on train, transform both. Returns (train_arr, test_arr, meta)."""
+    tr, _ = tpot_ready_raw_frame(x_train)
+    te, _ = tpot_ready_raw_frame(x_test)
+    numeric = list(tr.select_dtypes(include=[np.number]).columns)
+    categorical = [c for c in tr.columns if c not in numeric]
+    nan_numeric = [c for c in numeric if tr[c].isna().any()]
+    adapter = build_minimal_adapter(tr)
+    train_arr = np.asarray(adapter.fit_transform(tr, y_train), dtype=np.float32)
+    test_arr = np.asarray(adapter.transform(te), dtype=np.float32)
+    meta = {
+        "applied": bool(nan_numeric or categorical),
+        "numeric_columns_imputed_median": nan_numeric,
+        "categorical_columns_imputed_mode_and_onehot": categorical,
+        "n_features_in": int(x_train.shape[1]),
+        "n_features_out": int(train_arr.shape[1]),
+    }
+    return train_arr, test_arr, meta
+
+
+def to_tpot_matrix(
+    x_train: Any, x_test: Any, y_train: Any,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """DataFrame -> compat adapter (median/mode impute + one-hot); array/sparse -> finite check.
+
+    A method's pipeline may hand back a DataFrame (columns, maybe dirty) or an already-numeric
+    matrix (post-PCA/SVD). Both arms route through here so their frame handling is identical.
+    """
+    if isinstance(x_train, pd.DataFrame):
+        return apply_minimal_adapter(x_train, x_test, y_train)
+    return (numeric_matrix(x_train, "training"), numeric_matrix(x_test, "test"),
+            {"applied": False, "note": "already-numeric matrix; adapter not needed"})
+
+
+def prune_rare_classes(
+    x_train: pd.DataFrame, y_train: pd.Series, min_count: int = 2,
+) -> Tuple[pd.DataFrame, pd.Series, List[Any]]:
+    """Drop training rows whose class appears < min_count times (unusable for stratified CV).
+
+    Triggers only when a method's pipeline deleted rows and pushed a class below the fold floor
+    (AutoDP's outlier ops, ACORec's IQR/LOF). Records which classes so it is a footnote, not
+    hidden. The test set is untouched, so the score stays comparable.
+    """
+    counts = pd.Series(y_train).value_counts()
+    rare = counts[counts < int(min_count)].index.tolist()
+    if not rare:
+        return x_train, y_train, []
+    keep = ~pd.Series(y_train).isin(rare).to_numpy()
+    return (x_train.loc[keep].reset_index(drop=True),
+            pd.Series(y_train).loc[keep].reset_index(drop=True), rare)
 
 
 def default_tpot_components(task_type: str):

@@ -58,12 +58,13 @@ from _tpot_eval import (  # noqa: E402
     TPOT_POPULATION_SIZE,
     TPOT_RANDOM_STATE,
     TPOT_SPLIT_SEED,
+    apply_minimal_adapter,
     knob_summary,
     normalize_task_type,
-    numeric_matrix,
+    prune_rare_classes,
     safe_cv_folds,
 )
-from eval_autodatapre import _encode_residual_objects, _split_positions  # noqa: E402
+from eval_autodatapre import _split_positions  # noqa: E402
 
 
 def _csv_fingerprint(csv_path: str, frame: pd.DataFrame, target: str) -> Dict[str, Any]:
@@ -143,11 +144,20 @@ def score_prepared_tpot(
     problem_type, eval_metric = _detect_problem_type(y_orig)
     task_type = normalize_task_type(problem_type)
 
-    # Residual object columns -> one-hot (train-fit), then coerce to a finite float matrix. The
-    # numeric_matrix call raises on any leftover NaN / object -- caught by main() as a failure row.
-    X_train_enc, X_test_enc, residual_cols = _encode_residual_objects(X_train, X_test)
-    train_matrix = numeric_matrix(X_train_enc, "training")
-    test_matrix = numeric_matrix(X_test_enc, "test")
+    # AutoDP's row-dropping operators (IQR/LOF/DROP) can push a training class below the CV fold
+    # floor; those rows are unusable for stratified CV. Drop them (test set untouched) and record.
+    dropped_rare_classes: list = []
+    if task_type == "classification":
+        X_train, y_train, dropped_rare_classes = prune_rare_classes(X_train, y_train, min_count=2)
+        if len(X_train) == 0:
+            raise RuntimeError("no training rows left after dropping rare classes")
+
+    # The No-Preprocessing baseline's train-fitted compat adapter: median/mode impute + one-hot.
+    # AutoDP frequently selects no preprocessing at all (pipeline == ['<classifier>']), leaving the
+    # raw frame -- NaN and object columns TPOT (preprocessing=False) cannot consume. This is the
+    # SAME adapter that baseline is scored through; AutoDP's own operators are still the only
+    # preprocessing under test.
+    train_matrix, test_matrix, adapter_meta = apply_minimal_adapter(X_train, X_test, y_train)
 
     cv_folds = safe_cv_folds(y_train, task_type, max_cv_folds)
     target_encoder = None
@@ -233,7 +243,8 @@ def score_prepared_tpot(
         "n_test_rows_kept": int(len(X_test)),
         "n_train_rows": int(len(X_train)),
         "n_features_scored": int(train_matrix.shape[1]),
-        "residual_encoding_applied": residual_cols,
+        "compat_adapter": adapter_meta,
+        "dropped_rare_class_train_rows": [str(c) for c in dropped_rare_classes],
         "target_label_encoding": (
             "LabelEncoder_fit_on_train_inverse_before_scoring"
             if target_encoder is not None else "not_applicable"
