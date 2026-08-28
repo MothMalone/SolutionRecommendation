@@ -53,6 +53,7 @@ import os
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -120,6 +121,20 @@ def _apply_step(dataset: dict, step: str, op: str) -> None:
         X_tr_p, y_tr_p = res
     else:
         X_tr_p, y_tr_p = res, y_series.reset_index(drop=True)
+
+    # ACORec's public transformers reset frame indexes after any row drop. Keep row identities in
+    # a private side channel so an outer-split evaluator can restore the original target by row.
+    train_row_ids = dataset.get("__adp_train_rows")
+    if train_row_ids is not None:
+        train_row_ids = pd.Series(train_row_ids).reset_index(drop=True)
+        for mask in getattr(pre, "row_keep_masks_", []):
+            train_row_ids = train_row_ids.loc[np.asarray(mask, dtype=bool)].reset_index(drop=True)
+        if len(train_row_ids) != len(X_tr_p):
+            raise AssertionError(
+                f"row-id tracking mismatch after {step}:{op}: "
+                f"{len(train_row_ids)} ids for {len(X_tr_p)} transformed rows"
+            )
+        dataset["__adp_train_rows"] = train_row_ids.to_numpy()
 
     # Keep index and target aligned: their classifiers do dataset['target'].loc[X.index].
     X_tr_p = X_tr_p.reset_index(drop=True)

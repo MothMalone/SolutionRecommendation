@@ -21,6 +21,11 @@ Two protocols, because ``AutoDP.Classifier(df, ...)`` has no fit/transform split
   fair    The search sees ONLY our 80% train+val. The winning operator chain is then applied to
           {train: our 80%, test: our 20%} using AutoDP's OWN operator classes, so our test rows
           never inform the search. This is the protocol our method is held to.
+  tpot_leakfree
+          The search sees ONLY our 60% outer-training partition. The winning chain is applied to
+          that training partition and to the untouched outer test 20%; the fixed validation 20%
+          is deliberately excluded. This is the protocol for estimator-only TPOT final evaluation,
+          whose own search uses CV on the same 60% training partition.
 
 Faithfulness notes (each one is a deliberate, documented deviation):
   * ``AutoDP.Classifier`` does not return the winning pipeline, so native mode replicates its body
@@ -187,6 +192,8 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS)
         "target": y_enc.iloc[trainval].to_frame(),
         "test": feats.iloc[te].copy(),
         "target_test": y_enc.iloc[te].to_frame(),
+        "__adp_train_rows": trainval.copy(),
+        "__adp_test_rows": te.copy(),
     }
 
     status = "ok"
@@ -201,6 +208,7 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS)
     except Exception:
         status = "apply_failed_returned_raw"
         p_train, p_test = feats.iloc[trainval].copy(), feats.iloc[te].copy()
+        d["__adp_train_rows"], d["__adp_test_rows"] = trainval.copy(), te.copy()
         print("[warn] applying the winning pipeline failed; falling back to the RAW frame:\n"
               + traceback.format_exc(), flush=True)
 
@@ -209,6 +217,56 @@ def _run_fair(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS)
     p_train["__adp_split__"] = "trainval"
     p_test = p_test.copy()
     p_test["__adp_row__"] = p_test.index
+    p_test["__adp_split__"] = "test"
+    return pd.concat([p_train, p_test], axis=0, ignore_index=True), pipeline, times, scores, status
+
+
+def _run_tpot_leakfree(df: pd.DataFrame, target: str, task: str, runtime, mctsdata, MCTS):
+    """Leak-free TPOT protocol: AutoDP and final TPOT only see the outer 60% training rows.
+
+    ``fair`` intentionally searches/applies on train+validation because the AutoGluon final
+    evaluator fits on that 80%. Estimator-only TPOT instead fits and cross-validates exclusively
+    on the outer 60% train partition, leaving validation unused. Keeping this as an explicit mode
+    prevents an accidental 80%-fit AutoDP result from being compared to the TPOT baselines.
+    """
+    from sklearn.preprocessing import LabelEncoder
+
+    tr, _val, te = _split_positions(len(df))
+    dataset, pipeline, times, scores = _search(df.iloc[tr], target, task, runtime, mctsdata, MCTS)
+    del dataset
+
+    y_enc = pd.Series(LabelEncoder().fit_transform(df[target]), index=df.index, name=target)
+    feats = df.drop(columns=[target])
+    d = {
+        "train": feats.iloc[tr].copy(),
+        "target": y_enc.iloc[tr].to_frame(),
+        "test": feats.iloc[te].copy(),
+        "target_test": y_enc.iloc[te].to_frame(),
+        "__adp_train_rows": tr.copy(),
+        "__adp_test_rows": te.copy(),
+    }
+
+    status = "ok"
+    try:
+        _apply_pipeline(d, pipeline, mctsdata)
+        p_train = _strip_helpers(d["train"])
+        p_test = _strip_helpers(d["test"])
+        missing = [c for c in p_train.columns if c not in p_test.columns]
+        if missing:
+            raise RuntimeError(f"prepared test split is missing train columns: {missing[:10]}")
+        p_test = p_test[list(p_train.columns)]
+    except Exception:
+        status = "apply_failed_returned_raw"
+        p_train, p_test = feats.iloc[tr].copy(), feats.iloc[te].copy()
+        d["__adp_train_rows"], d["__adp_test_rows"] = tr.copy(), te.copy()
+        print("[warn] applying the winning pipeline failed; falling back to the RAW frame:\n"
+              + traceback.format_exc(), flush=True)
+
+    p_train = p_train.copy()
+    p_train["__adp_row__"] = np.asarray(d.get("__adp_train_rows", p_train.index))
+    p_train["__adp_split__"] = "train"
+    p_test = p_test.copy()
+    p_test["__adp_row__"] = np.asarray(d.get("__adp_test_rows", p_test.index))
     p_test["__adp_split__"] = "test"
     return pd.concat([p_train, p_test], axis=0, ignore_index=True), pipeline, times, scores, status
 
@@ -243,7 +301,11 @@ def _worker(csv_path: str, target: str, mode: str, runtime, seed: int, out_dir: 
     n_rows_in = len(df)
 
     t0 = time.time()
-    runner = _run_native if mode == "native" else _run_fair
+    runner = {
+        "native": _run_native,
+        "fair": _run_fair,
+        "tpot_leakfree": _run_tpot_leakfree,
+    }[mode]
     prepared, pipeline, times, scores, status = runner(df, target, task, runtime, mctsdata, MCTS)
     elapsed = time.time() - t0
 
@@ -285,7 +347,7 @@ def main() -> None:
     ap.add_argument("--dataset-csv", required=True, help="an exported <id>.csv from export_eval_datasets.py")
     ap.add_argument("--dataset-id", default=None, help="defaults to the csv basename")
     ap.add_argument("--target", default="target")
-    ap.add_argument("--mode", choices=["native", "fair"], required=True)
+    ap.add_argument("--mode", choices=["native", "fair", "tpot_leakfree"], required=True)
     ap.add_argument("--runtime", type=float, default=None,
                     help="AutoDP runTime budget in seconds; omit for its default run-to-convergence")
     ap.add_argument("--cap-seconds", type=float, default=3600.0,

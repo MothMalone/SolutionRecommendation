@@ -55,6 +55,9 @@ class Preprocessor:
         self.outlier_cleaner_num = None
         self.outlier_cleaner_cat = None
         self.row_drop_log_ = []
+        # Execution-only masks accompany row_drop_log_.  They preserve source row identities for
+        # adapters that must emit a transformed frame after index-resetting row drops.
+        self.row_keep_masks_ = []
 
     @staticmethod
     def _resolve_feature_operator(spec: object, column: str, default: str = "none") -> str:
@@ -213,6 +216,7 @@ class Preprocessor:
         self.row_drop_log_.append(
             {"dropped": n_before - int(mask.sum()), "kept": int(mask.sum()), "ignored": False}
         )
+        self.row_keep_masks_.append(np.asarray(mask, dtype=bool))
         if X_num is not None:
             X_num = X_num.loc[mask].reset_index(drop=True)
         if X_cat is not None:
@@ -440,6 +444,9 @@ class Preprocessor:
         else:
             mask = pd.Series(True, index=X_num.index)
 
+        # Unlike the AutoDP-compatible branch above, the native operators historically apply the
+        # mask inline. Record it too so callers can preserve the original row-id side channel.
+        self.row_keep_masks_.append(np.asarray(mask, dtype=bool))
         X_num = X_num.loc[mask].reset_index(drop=True)
         if X_cat is not None:
             X_cat = X_cat.loc[mask].reset_index(drop=True)
