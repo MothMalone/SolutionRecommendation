@@ -569,6 +569,32 @@ vocabulary, not the architecture.
 Verified: with a retrained corpus, `dimensionality_reduction` is returned as a first-class family.
 Under aliasing that was unreachable.
 
+**Scale (parity rebuild, 2026-08-28).** The first build under-delivered against its own
+`--n-datasets 200` target and produced only **108** datasets (`data/adp_ourops_corpus_108`,
+fingerprint `d5b76a950e749ead`). ACORec's Siamese metric is fit on the 901-column AutoGluon
+performance matrix (879 after the eval holdout), so a 108-row 1-NN table put the two methods an
+order of magnitude apart on reference-set size. `data/adp_ourops_corpus` was rebuilt over the
+**same reference datasets ACORec uses**: the performance-matrix `D_<id>` columns, restricted to
+classification and ≤1000 features and with the 30 `EVAL_IDS` + 10 `THEIR_DATASETS` removed
+(`scripts/adp_parity_ref_ids.py` → 775 ids), 4 round-robin shards of
+`build_adp_meta_corpus.py --ids … --shard i/4`. After attrition (regression targets, all-tie
+"no signal", proxy failures, and 7 datasets whose AutoDP metafeatures came back NaN) the corpus is
+**645 datasets × 10 pipelines**, fingerprint `80c470059a49543c` — 6× the old build.
+
+The 645 are drawn from the **same 901-column reference library ACORec's Siamese trains on**, so this
+closes the order-of-magnitude scale gap; it is not exact parity. The chain is 901 → 775 after
+restricting to classification and ≤1000 features (both filters inherent to the LogReg proxy scorer —
+it cannot fit continuous targets and its cost scales with column count) and removing the eval /
+`THEIR_DATASETS` holdout → 645 after attrition. ACORec's 879 applies neither the classification nor
+the width filter, so the two reference sets differ in composition (≈77 wide + 4 regression datasets
+ACORec's metric sees and this corpus does not), not only in count.
+
+**Two asymmetries the parity rebuild does *not* remove, by design:** the corpus is scored with the
+**LogReg proxy** (ACORec's matrix is AutoGluon; ~6,500 AutoGluon fits was not affordable) and uses
+**10 randomly-sampled shuffled-order pipelines** per dataset (ACORec's matrix is 12 fixed canonical
+pipelines with full coverage). The proxy only has to rank pipelines well enough to read a family
+order off the best one; disclose both alongside the arm-1 result.
+
 Two correctness details:
 
 - **Metafeatures are computed by AutoDP itself**, not by a port. A pure-python port was written and

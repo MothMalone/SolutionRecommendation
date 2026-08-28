@@ -197,6 +197,9 @@ def available_locally(local_dirs) -> set:
 def choose_ids(args, local_dirs=()) -> list:
     if args.ids:
         chosen = [normalize_id(i) for i in args.ids.split(",") if i.strip()]
+        if args.shard:
+            i, n = (int(x) for x in args.shard.split("/"))
+            chosen = [d for k, d in enumerate(chosen) if k % n == (i - 1) % n]
         assert_disjoint(chosen, context="adp meta-corpus --ids", extra_ids=_HOLDOUT_EXTRA)
         return chosen
     feats = pd.read_csv(REPO / "data" / "openml" / "dataset_feats.csv", index_col=0)

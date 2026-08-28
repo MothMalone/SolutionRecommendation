@@ -381,3 +381,8 @@ docs/PLAN.md
 # shard notebook reads). The per-dataset cache and progress log are local build scratch.
 data/adp_ourops_corpus/datasets/
 data/adp_ourops_corpus/progress.jsonl
+# _108 = the pre-parity 108-dataset corpus, kept for provenance (fingerprint d5b76a950e749ead).
+data/adp_ourops_corpus_108/datasets/
+data/adp_ourops_corpus_108/progress.jsonl
+# transient shard build dirs (Step 2 of the parity rebuild)
+data/adp_ourops_corpus_s[0-9]/

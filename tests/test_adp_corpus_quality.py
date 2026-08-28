@@ -195,6 +195,24 @@ def test_pool_is_restricted_to_classification_datasets():
     assert 'feats["NumberOfClasses"] >= 2' in src, "classification filter missing from choose_ids"
 
 
+def test_explicit_ids_are_shardable_and_partition_cleanly():
+    """--ids + --shard I/N must round-robin the explicit list (parity rebuild runs 4 shards over
+    ~775 ids). Before the fix choose_ids returned the whole list for every shard -> 4x wasted work.
+    """
+    mod = _mod()
+    ids = ",".join(str(i) for i in range(200000, 200101))  # 101 synthetic non-eval ids
+    seen, sizes = set(), []
+    for i in (1, 2, 3):
+        args = mod.build_parser().parse_args(
+            ["--out-dir", "/tmp/x", "--ids", ids, "--shard", f"{i}/3"])
+        chunk = mod.choose_ids(args)
+        sizes.append(len(chunk))
+        assert not (set(chunk) & seen), "shards overlap"
+        seen |= set(chunk)
+    assert seen == {str(i) for i in range(200000, 200101)}, "shards do not cover the full list"
+    assert max(sizes) - min(sizes) <= 1, f"uneven shard sizes {sizes}"
+
+
 def test_zero_scoring_round_stops_instead_of_retrying():
     """A round that scores nothing fails for structural reasons; a second round repeats it."""
     src = (REPO / "scripts" / "build_adp_meta_corpus.py").read_text()
