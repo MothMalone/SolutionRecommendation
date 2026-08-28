@@ -32,6 +32,7 @@ pickleshare
 # every dataset. That failure is indistinguishable from honest convergence unless you instrument the
 # search. Installing it is required to evaluate AutoDP fairly.
 category_encoders
+requests
 
 # These two have no wheels for python >= 3.10 and their setup.py imports pip, which fails under
 # pip's build isolation. setup_autodp_env.sh installs them with --no-build-isolation after

@@ -70,9 +70,14 @@ subprocess.run([
     sys.executable, "-m", "pip", "install", "-q",
     "TPOT==1.1.0", "pyarrow>=15", "requests>=2.31",
 ], check=True)
-        subprocess.run(["bash", str(REPO_DIR / "scripts" / "setup_autodp_env.sh")], cwd=REPO_DIR, check=True)
+subprocess.run(["bash", str(REPO_DIR / "scripts" / "setup_autodp_env.sh")], cwd=REPO_DIR, check=True)
+adp_python = REPO_DIR / ".venv-autodp" / "bin" / "python"
+subprocess.run([
+    str(adp_python), "-c",
+    "import requests; print('AutoDP venv requests:', requests.__version__)",
+], check=True)
 
-        required = [
+required = [
             REPO_DIR / "scripts" / "adp_bench_tpot.py",
             REPO_DIR / "scripts" / "eval_autodatapre_tpot.py",
         ]

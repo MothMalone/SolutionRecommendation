@@ -25,7 +25,13 @@ echo "[setup] venv=$VENV"
 if [ -x "$VENV/bin/python" ]; then
   echo "[setup] $VENV already exists; verifying ..."
   if "$VENV/bin/python" -c "import autodatapre" 2>/dev/null; then
-    echo "[setup] OK -- AutoDP already installed. Delete $VENV to rebuild."
+    if "$VENV/bin/python" -c "import requests" 2>/dev/null; then
+      echo "[setup] OK -- AutoDP and runtime dependencies already installed."
+    else
+      echo "[setup] AutoDP exists but requests is missing; installing runtime dependency ..."
+      "$VENV/bin/python" -m pip install -q --no-warn-conflicts requests
+      echo "[setup] OK -- installed missing requests dependency."
+    fi
     exit 0
   fi
   echo "[setup] incomplete env, rebuilding"
