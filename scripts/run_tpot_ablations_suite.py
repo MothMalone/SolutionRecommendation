@@ -543,6 +543,8 @@ def print_tpot_table(completed: Dict[Tuple[str, str], float], out_csv: Optional[
         print(f"\n[table] saved CSV to {out_csv}")
 
 
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     default_working = "/kaggle/working" if os.path.isdir("/kaggle/working") else "outputs"
     parser.add_argument("--data-dir", default="/kaggle/working/eval_all" if os.path.isdir("/kaggle/working") else "data/eval_datasets", help="Directory with <id>.csv datasets")
     parser.add_argument("--ctxpipe-zip", default=None, help="Path to ctxpipe-3linear.zip")
