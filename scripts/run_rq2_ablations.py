@@ -100,23 +100,29 @@ ACOREC_FLAGS = [
 ]
 
 
-def _read_completed(out_path: Path) -> Dict[Tuple[str, str], float]:
-    """Read completed (dataset_id, optimizer) -> score mappings."""
+def _read_completed(out_spec: str) -> Dict[Tuple[str, str], float]:
+    """Read completed (dataset_id, optimizer) -> score mappings from a file or glob pattern."""
+    import glob
     done = {}
-    if not out_path.exists():
-        return done
-    for line in out_path.read_text().splitlines():
-        line = line.strip()
-        if not line:
+    files = sorted(glob.glob(str(out_spec)))
+    if not files and os.path.exists(str(out_spec)):
+        files = [str(out_spec)]
+    for f in files:
+        p = Path(f)
+        if not p.is_file():
             continue
-        try:
-            row = json.loads(line)
-            if row.get("status") == "ok" and row.get("score") is not None:
-                did = str(row.get("dataset_id"))
-                opt = str(row.get("optimizer"))
-                done[(did, opt)] = float(row["score"])
-        except Exception:
-            continue
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                if row.get("status") == "ok" and row.get("score") is not None:
+                    did = str(row.get("dataset_id"))
+                    opt = str(row.get("optimizer"))
+                    done[(did, opt)] = float(row["score"])
+            except Exception:
+                continue
     return done
 
 
