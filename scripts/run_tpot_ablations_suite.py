@@ -193,6 +193,10 @@ def run_no_prep(dataset_id: str, data_dir: str, time_limit_mins: int = 5, seed: 
     X, y, task_type, problem_type = load_dataset(data_dir, dataset_id)
     X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=seed)
 
+    # Prune rare training classes (< 2 instances) for stratified CV (e.g. 44956 abalone)
+    if task_type == "classification" and isinstance(X_train, pd.DataFrame):
+        X_train, y_train, _ = _tpot_eval.prune_rare_classes(X_train.reset_index(drop=True), y_train.reset_index(drop=True), min_count=2)
+
     # Apply minimal adapter (median/mode impute + onehot) so TPOT can consume without internal preprocessing
     train_matrix, test_matrix, adapter_meta = _tpot_eval.apply_minimal_adapter(X_train, X_test, y_train)
 
@@ -238,6 +242,10 @@ def run_default_prep(dataset_id: str, data_dir: str, time_limit_mins: int = 5, s
     X, y, task_type, problem_type = load_dataset(data_dir, dataset_id)
     X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=seed)
 
+    # Prune rare training classes (< 2 instances) for stratified CV (e.g. 44956 abalone)
+    if task_type == "classification" and isinstance(X_train, pd.DataFrame):
+        X_train, y_train, _ = _tpot_eval.prune_rare_classes(X_train.reset_index(drop=True), y_train.reset_index(drop=True), min_count=2)
+
     # Basic OHE for categorical columns so TPOT preprocessors don't fail on string dtypes
     train_matrix, test_matrix, adapter_meta = _tpot_eval.apply_minimal_adapter(X_train, X_test, y_train)
 
@@ -264,7 +272,7 @@ def run_default_prep(dataset_id: str, data_dir: str, time_limit_mins: int = 5, s
         memory_limit="5GB",
         early_stop=5,
         preprocessing=True,  # Default TPOT Preprocessing enabled
-        verbosity=2,
+        verbose=2,
     )
     t0 = time.time()
     model.fit(train_matrix, y_train_arr)
@@ -286,12 +294,17 @@ def run_default_prep(dataset_id: str, data_dir: str, time_limit_mins: int = 5, s
 # -------------------------------------------------------------------------------------------------
 # 3. CtxPipe -> TPOT
 # -------------------------------------------------------------------------------------------------
-def setup_ctxpipe_models(ctxpipe_zip: Optional[str] = None, dest_dir: str = "external/ctxpipe/models/ctxpipe-3linear"):
+def setup_ctxpipe_models(ctxpipe_zip: Optional[str] = None, dest_dir: str = "/kaggle/working/models/ctxpipe-3linear"):
     dest = Path(dest_dir)
     if (dest / "ctx_32000_fengine_model.pkl").exists():
         return dest
+    # Fallback to local
+    local_dest = _REPO / "external" / "ctxpipe" / "models" / "ctxpipe-3linear"
+    if (local_dest / "ctx_32000_fengine_model.pkl").exists():
+        return local_dest
     if ctxpipe_zip and os.path.exists(ctxpipe_zip):
         print(f"[ctxpipe] Extracting {ctxpipe_zip} -> {dest.parent} ...")
+        dest.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(ctxpipe_zip, "r") as z:
             z.extractall(dest.parent)
     return dest
@@ -299,11 +312,15 @@ def setup_ctxpipe_models(ctxpipe_zip: Optional[str] = None, dest_dir: str = "ext
 
 def run_ctxpipe_tpot(dataset_id: str, data_dir: str, ctxpipe_model_dir: str,
                      time_limit_mins: int = 5, seed: int = 42, tpot_seed: int = 1) -> dict:
-    ctxpipe_root = _REPO / "external" / "ctxpipe"
-    if str(ctxpipe_root) not in sys.path:
-        sys.path.insert(0, str(ctxpipe_root))
-    
-    os.environ["CTXPIPE_MODEL_DIR"] = os.path.abspath(ctxpipe_model_dir)
+    ctxpipe_root = str(_REPO / "external" / "ctxpipe")
+    if ctxpipe_root not in sys.path:
+        sys.path.insert(0, ctxpipe_root)
+
+    model_dir_abs = os.path.abspath(ctxpipe_model_dir)
+    os.environ["CTXPIPE_MODEL_DIR"] = model_dir_abs
+    scratch_root = Path(ctxpipe_model_dir).parent
+    os.environ["CTXPIPE_EXP_DIR"] = str(scratch_root / "exp")
+    os.environ["CTXPIPE_LOG_DIR"] = str(scratch_root / "logs")
 
     import env
     env.init()
@@ -331,6 +348,11 @@ def run_ctxpipe_tpot(dataset_id: str, data_dir: str, ctxpipe_model_dir: str,
     task_type = "classification" if problem_type in ("binary", "multiclass", "classification") else "regression"
 
     X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=seed)
+
+    # Prune rare classes before transform
+    if task_type == "classification" and isinstance(X_train, pd.DataFrame):
+        X_train, y_train, _ = _tpot_eval.prune_rare_classes(X_train.reset_index(drop=True), y_train.reset_index(drop=True), min_count=2)
+
     train_x = X_train.reset_index(drop=True).copy()
     train_y = y_train.reset_index(drop=True).copy()
     test_x = X_test.reset_index(drop=True).copy()
@@ -389,8 +411,11 @@ def run_ctxpipe_tpot(dataset_id: str, data_dir: str, ctxpipe_model_dir: str,
 def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
                     time_limit_mins: int = 5, seed: int = 42, tpot_seed: int = 1) -> dict:
     t0 = time.time()
+    workdir_abs = workdir.resolve()
+    workdir_abs.mkdir(parents=True, exist_ok=True)
+
     # 1. Run ACORec recommendation search
-    rec_out = workdir / "acorec_rec"
+    rec_out = workdir_abs / "acorec_rec"
     rec_out.mkdir(parents=True, exist_ok=True)
     rec_json = rec_out / "recommendation.json"
 
@@ -398,14 +423,14 @@ def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
         cmd = [
             sys.executable, str(_REPO / "scripts" / "run_recommend.py"),
             "--dataset-source", "openml",
-            "--openml-local-folder", str(data_dir),
+            "--openml-local-folder", str(Path(data_dir).resolve()),
             "--dataset-ids", str(dataset_id),
             "--kaggle-root", str(_REPO),
             "--time-limit", "120",
             "--seed", str(seed),
             "--output-dir", str(rec_out),
         ] + ACOREC_FLAGS
-        proc = subprocess.run(cmd, cwd=str(_REPO), check=True)
+        proc = subprocess.run(cmd, cwd=str(workdir_abs), check=True)
 
     if not rec_json.exists():
         sub_rec = rec_out / f"dataset_{dataset_id}" / "recommendation.json"
@@ -413,11 +438,11 @@ def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
             rec_json = sub_rec
 
     # 2. Evaluate recommended pipeline with estimator-only TPOT
-    tpot_out_json = workdir / "tpot_eval.json"
+    tpot_out_json = workdir_abs / "tpot_eval.json"
     cmd_eval = [
         sys.executable, str(_REPO / "scripts" / "evaluate_acorec_tpot.py"),
         "--recommendation-json", str(rec_json),
-        "--dataset-csv", str(Path(data_dir) / f"{dataset_id}.csv"),
+        "--dataset-csv", str((Path(data_dir) / f"{dataset_id}.csv").resolve()),
         "--dataset-id", str(dataset_id),
         "--output-json", str(tpot_out_json),
         "--split-seed", str(seed),
@@ -427,7 +452,7 @@ def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
         "--n-jobs", "2",
         "--force",
     ]
-    proc_eval = subprocess.run(cmd_eval, cwd=str(_REPO), check=True)
+    proc_eval = subprocess.run(cmd_eval, cwd=str(workdir_abs), check=True)
 
     data = json.loads(tpot_out_json.read_text(encoding="utf-8"))
     score = float(data["score"])
@@ -518,11 +543,10 @@ def print_tpot_table(completed: Dict[Tuple[str, str], float], out_csv: Optional[
         print(f"\n[table] saved CSV to {out_csv}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--data-dir", default="/kaggle/working/eval_all", help="Directory with <id>.csv datasets")
-    parser.add_argument("--ctxpipe-zip", default="ctxpipe-3linear.zip", help="Path to ctxpipe-3linear.zip")
-    parser.add_argument("--ctxpipe-model-dir", default="external/ctxpipe/models/ctxpipe-3linear", help="CtxPipe model directory")
+    default_working = "/kaggle/working" if os.path.isdir("/kaggle/working") else "outputs"
+    parser.add_argument("--data-dir", default="/kaggle/working/eval_all" if os.path.isdir("/kaggle/working") else "data/eval_datasets", help="Directory with <id>.csv datasets")
+    parser.add_argument("--ctxpipe-zip", default=None, help="Path to ctxpipe-3linear.zip")
+    parser.add_argument("--ctxpipe-model-dir", default=os.path.join(default_working, "models", "ctxpipe-3linear"), help="CtxPipe model directory")
     parser.add_argument("--methods", default=None, help="Comma-separated methods: no_prep, default_prep, ctxpipe, acorec")
     parser.add_argument("--datasets", default=None, help="Comma-separated dataset ids: e.g. 44956, 1119, 1471")
     parser.add_argument("--missing-only", action="store_true", default=True, help="Run only missing cells")
@@ -530,10 +554,10 @@ def main():
     parser.add_argument("--time-limit-mins", type=int, default=5, help="TPOT max_time_mins per fit (default: 5)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tpot-seed", type=int, default=1)
-    parser.add_argument("--out", default="outputs/tpot_ablations.jsonl", help="Output JSONL")
+    parser.add_argument("--out", default=os.path.join(default_working, "tpot_ablations.jsonl"), help="Output JSONL")
     parser.add_argument("--out-csv", default=None, help="Output CSV for final table")
     parser.add_argument("--summarize", action="store_true", help="Print table and exit")
-    parser.add_argument("--scratch-dir", default="outputs/scratch_tpot", help="Scratch directory")
+    parser.add_argument("--scratch-dir", default=os.path.join(default_working, "scratch_tpot"), help="Scratch directory")
     args = parser.parse_args()
 
     completed = _read_completed(args.out)
@@ -541,7 +565,7 @@ def main():
         print_tpot_table(completed, out_csv=args.out_csv)
         return 0
 
-    setup_ctxpipe_models(args.ctxpipe_zip, args.ctxpipe_model_dir)
+    setup_ctxpipe_models(args.ctxpipe_zip or str(_REPO / "ctxpipe-3linear.zip"), args.ctxpipe_model_dir)
 
     selected_methods = [m.strip() for m in args.methods.split(",") if m.strip()] if args.methods else ["no_prep", "default_prep", "ctxpipe", "acorec"]
     selected_ds = [d.strip() for d in args.datasets.split(",") if d.strip()] if args.datasets else ["44956", "1119", "1471"]
