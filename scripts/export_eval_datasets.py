@@ -28,7 +28,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 import pandas as pd
 
-from automl_aco.data.loaders import _detect_target_column, load_openml_dataset
+from automl_aco.data.loaders import (
+    _detect_target_column,
+    load_gitlab_openml_dataset,
+    load_openml_dataset,
+)
 from automl_aco.eval_ids import EVAL_IDS
 
 # Searched for <id>.csv when OpenML is unreachable (Kaggle sessions with internet off).
@@ -81,6 +85,10 @@ def main() -> None:
     ap.add_argument("--openml-local-folder", default=None,
                     help="folder of <id>.csv files to fall back on. Without it, /kaggle/input, "
                          "data/openml and test_data_local are searched automatically.")
+    ap.add_argument("--openml-backend", choices=["openml", "gitlab"], default="openml",
+                    help="dataset backend: OpenML API (default) or the GitLab/DataGit Parquet mirror")
+    ap.add_argument("--gitlab-cache-dir", default=None,
+                    help="writable cache root for the GitLab backend; defaults to <out-dir>/.gitlab_cache")
     ap.add_argument("--local-root", action="append", default=[],
                     help="repeatable: extra root to search for <id>.csv")
     ap.add_argument("--overwrite", action="store_true")
@@ -143,17 +151,27 @@ def main() -> None:
                 except Exception:
                     pass
         print(f"[load] {did} from {src} ...", flush=True)
-        ds = load_openml_dataset(
-            did,
-            # Declaring the ids as "test" selects the loader's max_samples_if_test branch, which is
-            # how --max-rows takes effect; see the flag's help for why this was a silent 5000.
-            test_dataset_ids=[str(d) for d in ids],
-            verbose=args.verbose,
-            local_data_folder=local_dir,
-            # Offline, the API attempt only burns time on DNS/connect failures.
-            use_direct_api=online,
-            max_samples_if_test=(args.max_rows if args.max_rows > 0 else _NO_CAP),
-        )
+        # Declaring the ids as "test" selects the loader's max_samples_if_test branch, which is
+        # how --max-rows takes effect; see the flag's help for why this was a silent 5000.
+        if args.openml_backend == "gitlab":
+            ds = load_gitlab_openml_dataset(
+                did,
+                test_dataset_ids=[str(d) for d in ids],
+                verbose=args.verbose,
+                local_data_folder=local_dir,
+                cache_dir=args.gitlab_cache_dir or os.path.join(args.out_dir, ".gitlab_cache"),
+                max_samples_if_test=(args.max_rows if args.max_rows > 0 else _NO_CAP),
+            )
+        else:
+            ds = load_openml_dataset(
+                did,
+                test_dataset_ids=[str(d) for d in ids],
+                verbose=args.verbose,
+                local_data_folder=local_dir,
+                # Offline, the API attempt only burns time on DNS/connect failures.
+                use_direct_api=online,
+                max_samples_if_test=(args.max_rows if args.max_rows > 0 else _NO_CAP),
+            )
         if ds is None or "X" not in ds or "y" not in ds:
             why = ("no local CSV found and OpenML is unreachable — enable Internet or mount the "
                    "dataset" if (not online and not local_dir)

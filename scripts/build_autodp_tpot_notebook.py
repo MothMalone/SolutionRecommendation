@@ -64,20 +64,20 @@ cells = [
         else:
             subprocess.run(["git", "clone", "--branch", BRANCH, "--single-branch", REPO_URL, str(REPO_DIR)], check=True)
 
-# The benchmark process runs in Kaggle's main Python environment.  The repository
-# loader imports requests before AutoDP is launched in its isolated legacy venv.
-subprocess.run([
-    sys.executable, "-m", "pip", "install", "-q",
-    "TPOT==1.1.0", "pyarrow>=15", "requests>=2.31",
-], check=True)
-subprocess.run(["bash", str(REPO_DIR / "scripts" / "setup_autodp_env.sh")], cwd=REPO_DIR, check=True)
-adp_python = REPO_DIR / ".venv-autodp" / "bin" / "python"
-subprocess.run([
-    str(adp_python), "-c",
-    "import requests; print('AutoDP venv requests:', requests.__version__)",
-], check=True)
+        # The benchmark process runs in Kaggle's main Python environment.  The repository
+        # loader imports requests before AutoDP is launched in its isolated legacy venv.
+        subprocess.run([
+            sys.executable, "-m", "pip", "install", "-q",
+            "TPOT==1.1.0", "pyarrow>=15", "requests>=2.31",
+        ], check=True)
+        subprocess.run(["bash", str(REPO_DIR / "scripts" / "setup_autodp_env.sh")], cwd=REPO_DIR, check=True)
+        adp_python = REPO_DIR / ".venv-autodp" / "bin" / "python"
+        subprocess.run([
+            str(adp_python), "-c",
+            "import requests; print('AutoDP venv requests:', requests.__version__)",
+        ], check=True)
 
-required = [
+        required = [
             REPO_DIR / "scripts" / "adp_bench_tpot.py",
             REPO_DIR / "scripts" / "eval_autodatapre_tpot.py",
         ]
@@ -102,9 +102,10 @@ required = [
         from automl_aco.eval_ids import EVAL_IDS
 
         RUN_MODE = "smoke"             # smoke or final
-        NUM_DATASET_SHARDS = 5
-        DATASET_SHARD_INDEX = 0          # zero-based: 0..4
+        NUM_DATASET_SHARDS = 6
+        DATASET_SHARD_INDEX = 0          # zero-based: 0..5
         DATASET_IDS_OVERRIDE = None      # e.g. (1066, 1047); None = this shard
+        OPENML_BACKEND = "gitlab"        # GitLab/DataGit mirror; avoids fragile OpenML parsing
 
         TPOT_MAX_TIME_MINS = 5
         TPOT_MAX_EVAL_TIME_MINS = 1
@@ -126,8 +127,8 @@ required = [
         if CORPUS_DIR is None:
             raise FileNotFoundError("Attach adp_ourops_corpus as Kaggle Input, then update CORPUS_CANDIDATES.")
 
-        # Optional: point this at a Kaggle Input containing <OpenML-id>.csv files. Leave None with
-        # Internet enabled to use the repository loader's normal download fallback.
+        # Optional: point this at a Kaggle Input containing <OpenML-id>.csv files. These files
+        # remain authoritative (including synthetic DiffPrep id 100000); other ids use GitLab.
         OPENML_LOCAL_FOLDER = None
         OUTPUT_DIR = Path("/kaggle/working/adp_ourops_tpot")
         DATA_DIR = OUTPUT_DIR / "datasets"
@@ -163,6 +164,7 @@ required = [
             "--adp-meta-corpus", str(CORPUS_DIR),
             "--adp-python", str(REPO_DIR / ".venv-autodp" / "bin" / "python"),
             "--data-dir", str(DATA_DIR),
+            "--openml-backend", OPENML_BACKEND,
             "--cap-seconds", str(AUTODP_CAP_SECONDS),
             "--max-time-mins", str(TPOT_MAX_TIME_MINS),
             "--max-eval-time-mins", str(TPOT_MAX_EVAL_TIME_MINS),

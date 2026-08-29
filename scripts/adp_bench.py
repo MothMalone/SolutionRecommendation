@@ -84,12 +84,17 @@ def _shard(ids, spec: str):
     return [d for i, d in enumerate(ids) if i % total == (part - 1)]
 
 
-def _export_dataset(did: str, dest_dir: str, local_folder, verbose: bool) -> str:
+def _export_dataset(did: str, dest_dir: str, local_folder, verbose: bool,
+                    openml_backend: str | None = None, gitlab_cache_dir: str | None = None) -> str:
     """Materialise <id>.csv exactly as run_recommend.py builds the frame in memory."""
     cmd = [sys.executable, os.path.join(_HERE, "export_eval_datasets.py"),
            "--ids", str(did), "--out-dir", dest_dir]
     if local_folder:
         cmd += ["--openml-local-folder", local_folder]
+    if openml_backend:
+        cmd += ["--openml-backend", openml_backend]
+    if gitlab_cache_dir:
+        cmd += ["--gitlab-cache-dir", gitlab_cache_dir]
     if verbose:
         cmd.append("--verbose")
     subprocess.run(cmd, check=True)

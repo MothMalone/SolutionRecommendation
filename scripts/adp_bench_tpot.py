@@ -99,6 +99,8 @@ def run(args) -> None:
                 csv_path = Path(_export_dataset(
                     str(dataset_id), str(Path(args.data_dir) if args.data_dir else scratch),
                     args.openml_local_folder, args.verbose,
+                    openml_backend=args.openml_backend,
+                    gitlab_cache_dir=args.gitlab_cache_dir,
                 ))
             print(f"\n[{ordinal}/{len(todo)}] dataset {dataset_id}: AutoDP MCTS on ACORec operators", flush=True)
             prepared_dir, return_code = _run_autodp(
@@ -179,6 +181,10 @@ def main() -> None:
     parser.add_argument("--adp-python", default=str(ROOT / ".venv-autodp" / "bin" / "python"))
     parser.add_argument("--data-dir", default=None, help="reuse exported <id>.csv files here")
     parser.add_argument("--openml-local-folder", default=None)
+    parser.add_argument("--openml-backend", choices=["openml", "gitlab"], default="gitlab",
+                        help="dataset backend for materialization; GitLab avoids fragile OpenML parsing")
+    parser.add_argument("--gitlab-cache-dir", default=None,
+                        help="writable GitLab cache root; defaults under --data-dir")
     parser.add_argument("--cap-seconds", type=float, default=1800.0, help="AutoDP wall-clock watchdog per dataset")
     parser.add_argument("--runtime", type=float, default=None, help="explicit AutoDP MCTS time budget; default: convergence")
     parser.add_argument("--seed", type=int, default=42, help="shared outer-split seed")

@@ -213,6 +213,7 @@ def load_gitlab_openml_dataset(
     regression_dataset_ids: Optional[Iterable[int]] = None,
     verbose: bool = False,
     cache_dir: Optional[str] = None,
+    local_data_folder: Optional[str] = None,
     max_samples_if_test: int = 100000,
 ) -> Optional[Dict[str, Any]]:
     """Load an OpenML dataset from DataGit's GitLab Parquet mirror.
@@ -229,8 +230,9 @@ def load_gitlab_openml_dataset(
     did = int(dataset_id)
     cache_root = Path(cache_dir or tempfile.gettempdir()) / "openml_gitlab" / str(did)
     try:
-        if cache_dir:
-            local_df = _load_local_openml_csv(dataset_id=did, local_data_folder=cache_dir)
+        local_folder = local_data_folder or cache_dir
+        if local_folder:
+            local_df = _load_local_openml_csv(dataset_id=did, local_data_folder=local_folder)
             if local_df is not None:
                 target = _detect_target_column(local_df)
                 force_task_type = (
