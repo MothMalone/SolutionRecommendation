@@ -107,7 +107,12 @@ def _default_tpot_components(problem_type: str):
         from tpot.config import get_search_space
     except Exception as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("TPOT 1.1.0 is required for the final evaluator") from exc
-    return (TPOTClassifier if problem_type == "classification" else TPOTRegressor), get_search_space
+    # The shared repository detector returns ``binary`` or ``multiclass`` for
+    # classification and ``regression`` for regression.  Treat every non-
+    # regression type as classification; comparing to the literal
+    # "classification" would silently select TPOTRegressor for every classifier.
+    estimator = TPOTRegressor if problem_type == "regression" else TPOTClassifier
+    return estimator, get_search_space
 
 
 def score_prepared(
@@ -185,19 +190,20 @@ def score_prepared(
         raise RuntimeError("TPOT compatibility adapter left NaN or infinity")
 
     problem_type, eval_metric = _detect_problem_type(y_original)
+    is_classification = problem_type != "regression"
     cv_folds = _safe_cv_folds(y_train, problem_type, max_cv_folds)
     target_encoder = None
     y_train_for_tpot = y_train.to_numpy()
-    if problem_type == "classification":
+    if is_classification:
         target_encoder = LabelEncoder()
         y_train_for_tpot = target_encoder.fit_transform(y_train.to_numpy())
-    n_classes = int(y_train.nunique()) if problem_type == "classification" else 1
+    n_classes = int(y_train.nunique()) if is_classification else 1
 
     if estimator_factory is None or search_space_factory is None:
         default_estimator, default_search_space = _default_tpot_components(problem_type)
         estimator_factory = estimator_factory or default_estimator
         search_space_factory = search_space_factory or default_search_space
-    group = "classifiers" if problem_type == "classification" else "regressors"
+    group = "classifiers" if is_classification else "regressors"
     search_space = search_space_factory(
         group,
         n_classes=n_classes,
@@ -208,7 +214,7 @@ def score_prepared(
     )
     model = estimator_factory(
         search_space=search_space,
-        scorers=["accuracy" if problem_type == "classification" else "r2"],
+        scorers=["accuracy" if is_classification else "r2"],
         scorers_weights=[1],
         cv=cv_folds,
         preprocessing=False,
@@ -231,7 +237,7 @@ def score_prepared(
     tpot_seconds = float(time.perf_counter() - started)
 
     coverage = len(X_test) / len(test_rows)
-    if problem_type == "regression":
+    if not is_classification:
         score_kept = float(r2_score(y_test_kept, predictions))
         full_predictions = pd.Series(float(np.mean(y_train)), index=range(len(test_rows)))
         kept_positions = {int(row_id): i for i, row_id in enumerate(rows[is_test])}

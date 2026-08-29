@@ -248,8 +248,18 @@ def install(verbose: bool = False, retrained_dir=None) -> None:
 
     # 3. operator dispatch -> ACORec implementations
     def getAcc(dataset, order, target):
-        _apply_pipeline(dataset, order)
-        return D.choose_classifier(dataset, order[0], target).get("quality_metric")
+        try:
+            _apply_pipeline(dataset, order)
+            quality = D.choose_classifier(dataset, order[0], target).get("quality_metric")
+            return float(quality) if quality is not None and np.isfinite(quality) else 0.0
+        except Exception as exc:
+            # AutoDP's bundled classifier uses fixed CV folds.  On a small or
+            # imbalanced dataset one candidate (typically LDA) can request
+            # more folds than the rarest class contains.  That candidate is
+            # invalid, not a reason to abort the whole MCTS search.
+            if verbose:
+                print(f"[adapter] classifier candidate failed; assigning quality=0: {type(exc).__name__}: {exc}")
+            return 0.0
 
     def getMse(dataset, order, target):
         try:
