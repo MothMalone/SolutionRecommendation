@@ -102,8 +102,8 @@ cells = [
         from automl_aco.eval_ids import EVAL_IDS
 
         RUN_MODE = "smoke"             # smoke or final
-        NUM_DATASET_SHARDS = 6
-        DATASET_SHARD_INDEX = 0          # zero-based: 0..5
+        NUM_DATASET_SHARDS = 10
+        DATASET_SHARD_INDEX = 0          # zero-based: 0..9
         DATASET_IDS_OVERRIDE = None      # e.g. (1066, 1047); None = this shard
         OPENML_BACKEND = "gitlab"        # GitLab/DataGit mirror; avoids fragile OpenML parsing
 
