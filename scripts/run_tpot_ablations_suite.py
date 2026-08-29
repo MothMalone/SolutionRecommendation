@@ -295,18 +295,55 @@ def run_default_prep(dataset_id: str, data_dir: str, time_limit_mins: int = 5, s
 # 3. CtxPipe -> TPOT
 # -------------------------------------------------------------------------------------------------
 def setup_ctxpipe_models(ctxpipe_zip: Optional[str] = None, dest_dir: str = "/kaggle/working/models/ctxpipe-3linear"):
-    dest = Path(dest_dir)
+    dest = Path(dest_dir).resolve()
     if (dest / "ctx_32000_fengine_model.pkl").exists():
         return dest
-    # Fallback to local
-    local_dest = _REPO / "external" / "ctxpipe" / "models" / "ctxpipe-3linear"
-    if (local_dest / "ctx_32000_fengine_model.pkl").exists():
-        return local_dest
-    if ctxpipe_zip and os.path.exists(ctxpipe_zip):
-        print(f"[ctxpipe] Extracting {ctxpipe_zip} -> {dest.parent} ...")
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(ctxpipe_zip, "r") as z:
-            z.extractall(dest.parent)
+
+    # 1. Search for existing extracted directory containing the pkl files
+    search_dirs = [
+        dest,
+        _REPO / "external" / "ctxpipe" / "models" / "ctxpipe-3linear",
+        _REPO / "models" / "ctxpipe-3linear",
+        _REPO / "ctxpipe-3linear",
+    ]
+    for pattern in ["/kaggle/input/**/ctxpipe-3linear", "/kaggle/input/**/models/ctxpipe-3linear"]:
+        for d in glob.glob(pattern, recursive=True):
+            search_dirs.append(Path(d))
+
+    for d in search_dirs:
+        if d.exists() and (d / "ctx_32000_fengine_model.pkl").exists():
+            print(f"[ctxpipe] Found existing model directory: {d}")
+            if d.resolve() != dest:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if not dest.exists():
+                    try:
+                        shutil.copytree(str(d), str(dest))
+                    except Exception:
+                        return d
+            return dest
+
+    # 2. Search for zip file
+    candidate_zips = []
+    if ctxpipe_zip:
+        candidate_zips.append(Path(ctxpipe_zip))
+    candidate_zips.extend([
+        _REPO / "ctxpipe-3linear.zip",
+        _REPO / "external" / "ctxpipe" / "models" / "ctxpipe-3linear.zip",
+    ])
+    for pattern in ["/kaggle/input/**/ctxpipe-3linear*.zip", "/kaggle/working/**/ctxpipe-3linear*.zip"]:
+        for z in glob.glob(pattern, recursive=True):
+            candidate_zips.append(Path(z))
+
+    for z in candidate_zips:
+        if z.exists() and z.is_file():
+            print(f"[ctxpipe] Extracting {z} -> {dest.parent} ...")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(z, "r") as zf:
+                zf.extractall(dest.parent)
+            if (dest / "ctx_32000_fengine_model.pkl").exists():
+                return dest
+
+    print(f"[ctxpipe] WARNING: Could not find ctxpipe-3linear models in candidate paths: {candidate_zips}")
     return dest
 
 
