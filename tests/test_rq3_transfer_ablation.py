@@ -63,3 +63,47 @@ def test_num_ants_ablation_changes_n_ants_and_keeps_k_h_fixed(tmp_path):
     assert value_after("--n-ants") == "15"
     assert value_after("--heuristic-top-k") == "5"
     assert value_after("--heuristic-top-l") == "3"
+
+
+def test_pheromone_weight_ablation_defaults_to_three_paper_variants():
+    args = build_parser("pheromone_weight_method", "test").parse_args([])
+    assert _variant_values(args) == ["exponential", "rank", "uniform"]
+    assert _variant_name("pheromone_weight_method", "rank") == "W_rank"
+
+
+def test_pheromone_weight_ablation_changes_only_reinforcement_weighting(tmp_path):
+    args = build_parser("pheromone_weight_method", "test").parse_args(
+        [
+            "--root", str(tmp_path),
+            "--fixed-k", "5",
+            "--fixed-h", "3",
+            "--n-ants", "10",
+            "--n-iterations", "10",
+            "--top-k-pheromone", "3",
+            "--aco-markov-order", "2",
+            "--aco-lambda-smooth", "0.7",
+        ]
+    )
+    command = _build_search_command(
+        args,
+        {
+            "performance_matrix": tmp_path / "performance.csv",
+            "metafeatures": tmp_path / "features.csv",
+            "pipeline_configs": tmp_path / "pipelines.json",
+            "data_dir": tmp_path / "data",
+        },
+        "1066",
+        tmp_path / "run",
+        "exponential",
+    )
+
+    def value_after(flag: str) -> str:
+        return command[command.index(flag) + 1]
+
+    assert value_after("--aco-weight-method") == "exponential"
+    assert value_after("--top-k-pheromone") == "3"
+    assert value_after("--aco-markov-order") == "2"
+    assert value_after("--aco-lambda-smooth") == "0.7"
+    assert value_after("--n-ants") == "10"
+    assert value_after("--heuristic-top-k") == "5"
+    assert value_after("--heuristic-top-l") == "3"

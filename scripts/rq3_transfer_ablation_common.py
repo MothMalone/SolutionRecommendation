@@ -8,7 +8,9 @@ being ablated:
 
 * ``num_retrieved_datasets``: ``--heuristic-top-k`` (K), with H fixed;
 * ``num_selected_pipelines``: ``--heuristic-top-l`` (H), with K fixed;
-* ``num_ants``: ``--n-ants``, with K and H fixed.
+* ``num_ants``: ``--n-ants``, with K and H fixed;
+* ``pheromone_weight_method``: ``--aco-weight-method``, with the remaining
+  ACO search parameters fixed.
 
 Each dataset/variant is an independent checkpoint, so a Kaggle session can be
 sharded and resumed without repeating successful runs.
@@ -67,6 +69,25 @@ def _parse_int_list(value: Any) -> List[int]:
         if number not in seen:
             result.append(number)
             seen.add(number)
+    return result
+
+
+def _parse_pheromone_weight_methods(value: Any) -> List[str]:
+    """Parse and validate pheromone reinforcement weighting methods."""
+    tokens = str(value).replace(",", " ").split() if value is not None else []
+    allowed = {"exponential", "rank", "uniform"}
+    result: List[str] = []
+    for token in tokens:
+        method = token.strip().lower()
+        if not method:
+            continue
+        if method not in allowed:
+            raise ValueError(
+                f"Unsupported pheromone weight method {method!r}; "
+                f"expected one of {sorted(allowed)}"
+            )
+        if method not in result:
+            result.append(method)
     return result
 
 
@@ -234,13 +255,24 @@ def build_parser(ablation: str, description: str) -> argparse.ArgumentParser:
     parser.add_argument("--kaggle-target-column", default="target")
     parser.add_argument("--data-dir", type=Path, default=None, help="Dataset cache used by search and final evaluation")
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/rq3_transfer_ablation"))
-    parser.add_argument("--variant-values", default=None, help="Comma/space separated K, H, or ant-count values")
+    parser.add_argument(
+        "--variant-values",
+        default=None,
+        help="Comma/space separated K, H, ant-count, or pheromone weight-method values",
+    )
     parser.add_argument("--fixed-k", type=int, default=5)
     parser.add_argument("--fixed-h", type=int, default=3)
     parser.add_argument("--search-k", type=int, default=5, help="Fixed ACO candidate/neighbor parameter; K ablation uses --heuristic-top-k")
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
     parser.add_argument("--top-k-pheromone", type=int, default=3, help="Fixed number of elite candidates reinforced by pheromone")
+    parser.add_argument(
+        "--aco-weight-method",
+        choices=["rank", "linear", "exponential", "reciprocal", "power_rank", "uniform"],
+        default="rank",
+    )
+    parser.add_argument("--aco-markov-order", type=int, default=2)
+    parser.add_argument("--aco-lambda-smooth", type=float, default=0.0)
     parser.add_argument("--aco-seed", type=int, default=42)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--proxy-profile", choices=["default", "robust"], default="default")
@@ -288,8 +320,12 @@ def _resolve_paths(args: argparse.Namespace, root: Path) -> Dict[str, Path]:
     }
 
 
-def _variant_values(args: argparse.Namespace) -> List[int]:
-    if args.variant_values:
+def _variant_values(args: argparse.Namespace) -> List[Any]:
+    if args.ablation == "pheromone_weight_method":
+        values = _parse_pheromone_weight_methods(
+            args.variant_values or "exponential,rank,uniform"
+        )
+    elif args.variant_values:
         values = _parse_int_list(args.variant_values)
     elif args.ablation == "num_retrieved_datasets":
         values = [1, 3, 5]
@@ -302,8 +338,13 @@ def _variant_values(args: argparse.Namespace) -> List[int]:
     return values
 
 
-def _variant_name(ablation: str, parameter_value: int) -> str:
+def _variant_name(ablation: str, parameter_value: Any) -> str:
     """Return a compact, unambiguous directory name for an ablation value."""
+    if ablation == "pheromone_weight_method":
+        method = str(parameter_value).strip().lower()
+        if method not in {"exponential", "rank", "uniform"}:
+            raise ValueError(f"Unsupported pheromone weight method: {method}")
+        return f"W_{method}"
     prefix = {
         "num_retrieved_datasets": "K",
         "num_selected_pipelines": "H",
@@ -319,7 +360,7 @@ def _build_search_command(
     paths: Mapping[str, Path],
     dataset_id: str,
     run_dir: Path,
-    parameter_value: int,
+    parameter_value: Any,
 ) -> List[str]:
     root = Path(args.root)
     if args.ablation == "num_retrieved_datasets":
@@ -330,9 +371,17 @@ def _build_search_command(
         n_ants = int(args.n_ants)
     elif args.ablation == "num_ants":
         transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
-        n_ants = parameter_value
+        n_ants = int(parameter_value)
+        weight_method = str(args.aco_weight_method)
+    elif args.ablation == "pheromone_weight_method":
+        transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
+        n_ants = int(args.n_ants)
+        weight_method = str(parameter_value).strip().lower()
     else:
         raise ValueError(f"Unsupported RQ3 ablation: {args.ablation}")
+
+    if args.ablation != "pheromone_weight_method":
+        weight_method = str(args.aco_weight_method)
 
     command = [
         sys.executable,
@@ -357,6 +406,9 @@ def _build_search_command(
         "--n-ants", str(max(1, n_ants)),
         "--n-iterations", str(max(1, int(args.n_iterations))),
         "--top-k-pheromone", str(max(1, int(args.top_k_pheromone))),
+        "--aco-weight-method", weight_method,
+        "--aco-markov-order", str(max(1, int(args.aco_markov_order))),
+        "--aco-lambda-smooth", str(float(args.aco_lambda_smooth)),
         "--seed", str(int(args.aco_seed)),
         "--proxy-profile", str(args.proxy_profile),
         "--proxy-clf-model", str(args.proxy_clf_model),
@@ -460,7 +512,7 @@ def _load_rows(suite_dir: Path) -> List[Dict[str, Any]]:
         return []
 
 
-def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespace, dataset_ids: List[str], values: List[int]) -> None:
+def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespace, dataset_ids: List[str], values: List[Any]) -> None:
     frame = pd.DataFrame(rows)
     if frame.empty:
         summary = pd.DataFrame()
@@ -486,7 +538,7 @@ def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespa
                 {
                     "ablation": args.ablation,
                     "variant": variant,
-                    "parameter_value": int(group["parameter_value"].iloc[0]),
+                    "parameter_value": group["parameter_value"].iloc[0],
                     "requested_datasets": int(len(dataset_ids)),
                     "runs": int(len(group)),
                     "successful_runs": int(len(ok)),
@@ -516,6 +568,9 @@ def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespa
         "fixed_k": int(args.fixed_k),
         "fixed_h": int(args.fixed_h),
         "top_k_pheromone": int(args.top_k_pheromone),
+        "aco_weight_method": str(args.aco_weight_method),
+        "aco_markov_order": int(args.aco_markov_order),
+        "aco_lambda_smooth": float(args.aco_lambda_smooth),
         "n_iterations": int(args.n_iterations),
         "evaluator": args.evaluator,
         "split_seed": int(args.split_seed),
@@ -609,11 +664,18 @@ def run_ablation(args: argparse.Namespace) -> int:
             row: Dict[str, Any] = {
                 "ablation": args.ablation,
                 "variant": variant,
-                "parameter_value": int(value),
+                "parameter_value": (
+                    str(value) if args.ablation == "pheromone_weight_method" else int(value)
+                ),
                 "n_ants": int(value if args.ablation == "num_ants" else args.n_ants),
                 "fixed_k": int(args.fixed_k),
                 "fixed_h": int(args.fixed_h),
                 "top_k_pheromone": int(args.top_k_pheromone),
+                "aco_weight_method": (
+                    str(value) if args.ablation == "pheromone_weight_method" else str(args.aco_weight_method)
+                ),
+                "aco_markov_order": int(args.aco_markov_order),
+                "aco_lambda_smooth": float(args.aco_lambda_smooth),
                 "n_iterations": int(args.n_iterations),
                 "dataset_id": str(dataset_id),
                 "split_seed": int(args.split_seed),
@@ -628,7 +690,7 @@ def run_ablation(args: argparse.Namespace) -> int:
             }
             try:
                 if args.force or not recommendation_path.exists():
-                    search_command = _build_search_command(args, paths, str(dataset_id), run_dir, int(value))
+                    search_command = _build_search_command(args, paths, str(dataset_id), run_dir, value)
                     print(f"\n[{variant}] dataset={dataset_id} search")
                     if args.verbose:
                         print(" ", " ".join(str(part) for part in search_command))
