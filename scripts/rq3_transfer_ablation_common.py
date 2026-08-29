@@ -1,4 +1,4 @@
-"""Leak-free RQ3 ablations for transfer-neighborhood size.
+"""Leak-free RQ3 ablations for transfer-neighborhood size and ACO ants.
 
 This module deliberately keeps the ACORec core untouched.  It runs the existing
 ``run_recommend.py`` entry point with the search restricted to the externally
@@ -7,7 +7,8 @@ the outer test split.  The two thin command-line wrappers select the parameter
 being ablated:
 
 * ``num_retrieved_datasets``: ``--heuristic-top-k`` (K), with H fixed;
-* ``num_selected_pipelines``: ``--heuristic-top-l`` (H), with K fixed.
+* ``num_selected_pipelines``: ``--heuristic-top-l`` (H), with K fixed;
+* ``num_ants``: ``--n-ants``, with K and H fixed.
 
 Each dataset/variant is an independent checkpoint, so a Kaggle session can be
 sharded and resumed without repeating successful runs.
@@ -233,12 +234,13 @@ def build_parser(ablation: str, description: str) -> argparse.ArgumentParser:
     parser.add_argument("--kaggle-target-column", default="target")
     parser.add_argument("--data-dir", type=Path, default=None, help="Dataset cache used by search and final evaluation")
     parser.add_argument("--output-root", type=Path, default=Path("/kaggle/working/rq3_transfer_ablation"))
-    parser.add_argument("--variant-values", default=None, help="Comma/space separated K or H values")
+    parser.add_argument("--variant-values", default=None, help="Comma/space separated K, H, or ant-count values")
     parser.add_argument("--fixed-k", type=int, default=5)
     parser.add_argument("--fixed-h", type=int, default=3)
     parser.add_argument("--search-k", type=int, default=5, help="Fixed ACO candidate/neighbor parameter; K ablation uses --heuristic-top-k")
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
+    parser.add_argument("--top-k-pheromone", type=int, default=3, help="Fixed number of elite candidates reinforced by pheromone")
     parser.add_argument("--aco-seed", type=int, default=42)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--proxy-profile", choices=["default", "robust"], default="default")
@@ -263,6 +265,11 @@ def build_parser(ablation: str, description: str) -> argparse.ArgumentParser:
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     parser.add_argument("--force", action="store_true", help="Re-run both search and final evaluation")
+    parser.add_argument(
+        "--search-only",
+        action="store_true",
+        help="Run ACO search and collect proxy diagnostics without final evaluator",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands without executing them")
     parser.add_argument("--dataset-shard-index", type=int, default=0)
     parser.add_argument("--num-dataset-shards", type=int, default=1)
@@ -286,11 +293,25 @@ def _variant_values(args: argparse.Namespace) -> List[int]:
         values = _parse_int_list(args.variant_values)
     elif args.ablation == "num_retrieved_datasets":
         values = [1, 3, 5]
+    elif args.ablation == "num_ants":
+        values = [5, 10, 15, 20]
     else:
         values = [1, 2, 3]
     if not values:
         raise ValueError("At least one ablation value is required")
     return values
+
+
+def _variant_name(ablation: str, parameter_value: int) -> str:
+    """Return a compact, unambiguous directory name for an ablation value."""
+    prefix = {
+        "num_retrieved_datasets": "K",
+        "num_selected_pipelines": "H",
+        "num_ants": "A",
+    }.get(ablation)
+    if prefix is None:
+        raise ValueError(f"Unsupported RQ3 ablation: {ablation}")
+    return f"{prefix}{int(parameter_value)}"
 
 
 def _build_search_command(
@@ -303,8 +324,15 @@ def _build_search_command(
     root = Path(args.root)
     if args.ablation == "num_retrieved_datasets":
         transfer_k, transfer_h = parameter_value, int(args.fixed_h)
-    else:
+        n_ants = int(args.n_ants)
+    elif args.ablation == "num_selected_pipelines":
         transfer_k, transfer_h = int(args.fixed_k), parameter_value
+        n_ants = int(args.n_ants)
+    elif args.ablation == "num_ants":
+        transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
+        n_ants = parameter_value
+    else:
+        raise ValueError(f"Unsupported RQ3 ablation: {args.ablation}")
 
     command = [
         sys.executable,
@@ -326,8 +354,9 @@ def _build_search_command(
         "--eval-k", str(max(1, int(args.eval_k))),
         "--heuristic-top-k", str(max(1, transfer_k)),
         "--heuristic-top-l", str(max(1, transfer_h)),
-        "--n-ants", str(max(1, int(args.n_ants))),
+        "--n-ants", str(max(1, n_ants)),
         "--n-iterations", str(max(1, int(args.n_iterations))),
+        "--top-k-pheromone", str(max(1, int(args.top_k_pheromone))),
         "--seed", str(int(args.aco_seed)),
         "--proxy-profile", str(args.proxy_profile),
         "--proxy-clf-model", str(args.proxy_clf_model),
@@ -486,11 +515,17 @@ def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespa
         "variant_values": values,
         "fixed_k": int(args.fixed_k),
         "fixed_h": int(args.fixed_h),
+        "top_k_pheromone": int(args.top_k_pheromone),
+        "n_iterations": int(args.n_iterations),
         "evaluator": args.evaluator,
         "split_seed": int(args.split_seed),
         "aco_seed": int(args.aco_seed),
         "git_commit": _git_commit(Path(args.root)),
-        "protocol": "search on externally fixed train+validation; frozen pipeline evaluated once on untouched outer test",
+        "protocol": (
+            "search on externally fixed train+validation; no final evaluator"
+            if args.search_only
+            else "search on externally fixed train+validation; frozen pipeline evaluated once on untouched outer test"
+        ),
     }
     (suite_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print("\nSaved:")
@@ -518,7 +553,7 @@ def run_ablation(args: argparse.Namespace) -> int:
     suite_dir = Path(args.output_root).resolve() / str(args.ablation)
     if args.dry_run:
         for value in values:
-            variant = f"K{value}" if args.ablation == "num_retrieved_datasets" else f"H{value}"
+            variant = _variant_name(args.ablation, value)
             for dataset_id in dataset_ids:
                 run_dir = suite_dir / variant / f"dataset_{dataset_id}"
                 recommendation_path = run_dir / "recommendation.json"
@@ -548,7 +583,7 @@ def run_ablation(args: argparse.Namespace) -> int:
     )
 
     for value in values:
-        variant = (f"K{value}" if args.ablation == "num_retrieved_datasets" else f"H{value}")
+        variant = _variant_name(args.ablation, value)
         for dataset_id in dataset_ids:
             key = (variant, str(dataset_id))
             existing = by_key.get(key)
@@ -562,7 +597,7 @@ def run_ablation(args: argparse.Namespace) -> int:
                 and existing
                 and str(existing.get("status")) == "ok"
                 and recommendation_path.exists()
-                and evaluation_path.exists()
+                and (args.search_only or evaluation_path.exists())
             ):
                 print(f"SKIP {variant} dataset={dataset_id} (already successful)")
                 continue
@@ -575,6 +610,11 @@ def run_ablation(args: argparse.Namespace) -> int:
                 "ablation": args.ablation,
                 "variant": variant,
                 "parameter_value": int(value),
+                "n_ants": int(value if args.ablation == "num_ants" else args.n_ants),
+                "fixed_k": int(args.fixed_k),
+                "fixed_h": int(args.fixed_h),
+                "top_k_pheromone": int(args.top_k_pheromone),
+                "n_iterations": int(args.n_iterations),
                 "dataset_id": str(dataset_id),
                 "split_seed": int(args.split_seed),
                 "aco_seed": int(args.aco_seed),
@@ -605,6 +645,17 @@ def run_ablation(args: argparse.Namespace) -> int:
                     raise RuntimeError(f"Could not parse recommendation: {recommendation_path}")
                 row.update(selected_pipeline_operator_stats(recommendation))
                 row.update(_last_history_values(run_dir))
+
+                if args.search_only:
+                    # Search-only runs intentionally do not invoke AutoGluon or
+                    # TPOT.  The recommendation and ACO history are the only
+                    # required artifacts for proxy/search-cost diagnostics.
+                    row["evaluation_path"] = None
+                    row["evaluation_return_code"] = None
+                    row["evaluation_wall_clock_seconds"] = None
+                    row["evaluation_status"] = "not_run"
+                    row["status"] = "ok"
+                    continue
 
                 if args.force or not evaluation_path.exists() or _load_json(evaluation_path).get("status") != "ok":
                     evaluation_command = _build_evaluation_command(args, paths, str(dataset_id), run_dir, evaluation_path, recommendation_path)
@@ -644,4 +695,10 @@ def run_ablation(args: argparse.Namespace) -> int:
     rows = [by_key[item] for item in sorted(by_key)]
     _save_rows(rows, suite_dir)
     _summary(suite_dir, rows, args, dataset_ids, values)
-    return 0 if all(str(row.get("status")) == "ok" for row in rows if str(row.get("variant")) in {f"K{x}" if args.ablation == "num_retrieved_datasets" else f"H{x}" for x in values} and str(row.get("dataset_id")) in set(dataset_ids)) else 2
+    expected_variants = {_variant_name(args.ablation, value) for value in values}
+    return 0 if all(
+        str(row.get("status")) == "ok"
+        for row in rows
+        if str(row.get("variant")) in expected_variants
+        and str(row.get("dataset_id")) in set(dataset_ids)
+    ) else 2
