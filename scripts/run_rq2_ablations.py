@@ -140,6 +140,7 @@ def run_one(dataset_id: str, optimizer: str, data_dir: str, time_limit: int, see
         "--dataset-source", "openml",
         "--openml-local-folder", str(data_dir),
         "--dataset-ids", str(dataset_id),
+        "--kaggle-root", str(_REPO),
         "--optimizer", str(optimizer),
         "--time-limit", str(time_limit),
         "--seed", str(seed),

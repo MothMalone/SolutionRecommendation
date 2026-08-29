@@ -1037,54 +1037,45 @@ def main() -> None:
                 return path
         raise FileNotFoundError(f"Could not find {label}. Tried: {candidates}")
 
+    _REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
     if args.performance_matrix:
         performance_matrix_path = args.performance_matrix
     else:
-        if use_kaggle:
-            repo_perf_primary = os.path.join(args.kaggle_root, "data", "openml", "training_performance_matrix_autogluon.csv")
-            repo_perf_legacy = os.path.join(args.kaggle_root, "aco", "training_performance_matrix_autogluon.csv")
-            performance_matrix_path = pick_existing(
-                "performance matrix",
-                [repo_perf_primary, repo_perf_legacy] + KAGGLE_TRAIN_PERF_PATHS,
-            )
-        else:
-            performance_matrix_path = pick_existing(
-                "performance matrix",
-                [LOCAL_TRAIN_PERF_PATH],
-            )
+        candidates = [
+            os.path.join(_REPO_DIR, "data", "openml", "training_performance_matrix_autogluon.csv"),
+            os.path.join(_REPO_DIR, "aco", "training_performance_matrix_autogluon.csv"),
+            os.path.join(args.kaggle_root, "data", "openml", "training_performance_matrix_autogluon.csv"),
+            os.path.join(args.kaggle_root, "aco", "training_performance_matrix_autogluon.csv"),
+            LOCAL_TRAIN_PERF_PATH,
+        ] + KAGGLE_TRAIN_PERF_PATHS
+        performance_matrix_path = pick_existing("performance matrix", candidates)
 
     if args.metafeatures:
         metafeatures_path = args.metafeatures
     else:
-        if use_kaggle:
-            # Prefer the broader openml metafeature file when both exist.
-            repo_meta_primary = os.path.join(args.kaggle_root, "data", "openml", "dataset_feats.csv")
-            repo_meta_secondary = os.path.join(args.kaggle_root, "aco", "dataset_feats.csv")
-            metafeatures_path = pick_existing(
-                "metafeatures",
-                [repo_meta_primary, repo_meta_secondary, KAGGLE_METAFEATURES_PATH],
-            )
-        else:
-            metafeatures_path = pick_existing(
-                "metafeatures",
-                ["dataset_feats.csv", LOCAL_METAFEATURES_PATH, "data/openml/dataset_feats.csv", "Data/openml/dataset_feats.csv"],
-            )
+        candidates = [
+            os.path.join(_REPO_DIR, "data", "openml", "dataset_feats.csv"),
+            os.path.join(_REPO_DIR, "aco", "dataset_feats.csv"),
+            os.path.join(args.kaggle_root, "data", "openml", "dataset_feats.csv"),
+            os.path.join(args.kaggle_root, "aco", "dataset_feats.csv"),
+            "dataset_feats.csv", LOCAL_METAFEATURES_PATH, "data/openml/dataset_feats.csv", "Data/openml/dataset_feats.csv",
+            KAGGLE_METAFEATURES_PATH,
+        ]
+        metafeatures_path = pick_existing("metafeatures", candidates)
 
     if args.pipeline_configs:
         pipeline_configs_path = args.pipeline_configs
     else:
-        if use_kaggle:
-            repo_pipelines = os.path.join(args.kaggle_root, "aco", "pipeline_configs.json")
-            repo_pipelines_alt = os.path.join(args.kaggle_root, "Data", "openml", "pipelines.json")
-            pipeline_configs_path = pick_existing(
-                "pipeline configs",
-                [repo_pipelines, repo_pipelines_alt, KAGGLE_PIPELINES_PATH],
-            )
-        else:
-            pipeline_configs_path = pick_existing(
-                "pipeline configs",
-                [LOCAL_PIPELINES_PATH, LOCAL_PIPELINES_PATH_ALT],
-            )
+        candidates = [
+            os.path.join(_REPO_DIR, "aco", "pipeline_configs.json"),
+            os.path.join(_REPO_DIR, "Data", "openml", "pipelines.json"),
+            os.path.join(_REPO_DIR, "data", "openml", "pipelines.json"),
+            os.path.join(args.kaggle_root, "aco", "pipeline_configs.json"),
+            os.path.join(args.kaggle_root, "Data", "openml", "pipelines.json"),
+            LOCAL_PIPELINES_PATH, LOCAL_PIPELINES_PATH_ALT, KAGGLE_PIPELINES_PATH,
+        ]
+        pipeline_configs_path = pick_existing("pipeline configs", candidates)
 
     perf = pd.read_csv(performance_matrix_path, index_col=0)
     meta_raw = pd.read_csv(metafeatures_path)
