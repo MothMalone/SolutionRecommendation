@@ -122,7 +122,7 @@ METHOD_TO_COLUMN = {
     "acorec": "Tool(TPOT)",
 }
 
-# Standard ACORec Reference Flags
+# Standard ACORec Reference Flags (No downstream AutoGluon required; downstream is TPOT)
 ACOREC_FLAGS = [
     "--train-metric-inline",
     "--metric-loss", "pearson",
@@ -136,8 +136,6 @@ ACOREC_FLAGS = [
     "--cv-select-folds", "3",
     "--use-aco",
     "--optimizer", "aco",
-    "--require-autogluon",
-    "--autogluon-profile", "best_quality",
 ]
 
 
@@ -173,12 +171,42 @@ def _append_record(out_path: Path, record: dict) -> None:
 
 
 def load_dataset(data_dir: str, dataset_id: str, target: str = "target"):
-    p = Path(data_dir) / f"{dataset_id}.csv"
-    if not p.exists():
-        raise FileNotFoundError(f"Dataset CSV not found: {p}")
-    df = pd.read_csv(p)
+    candidates = [
+        Path(data_dir) / f"{dataset_id}.csv",
+        Path("/kaggle/working/eval_all") / f"{dataset_id}.csv",
+        _REPO / "data" / "eval_datasets" / f"{dataset_id}.csv",
+    ]
+    for pattern in [f"/kaggle/input/**/{dataset_id}.csv"]:
+        for p in glob.glob(pattern, recursive=True):
+            candidates.append(Path(p))
+
+    found_path = None
+    for p in candidates:
+        if p.exists() and p.is_file() and p.stat().st_size > 0:
+            found_path = p
+            break
+
+    if found_path is None:
+        # Try to auto-export
+        print(f"[data] Attempting auto-export for dataset {dataset_id} ...")
+        dest_dir = Path(data_dir) if data_dir else Path("/kaggle/working/eval_all")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cmd = [sys.executable, str(_REPO / "scripts" / "export_eval_datasets.py"),
+                   "--ids", str(dataset_id), "--out-dir", str(dest_dir)]
+            subprocess.run(cmd, check=False)
+        except Exception:
+            pass
+        auto_p = dest_dir / f"{dataset_id}.csv"
+        if auto_p.exists() and auto_p.stat().st_size > 0:
+            found_path = auto_p
+
+    if found_path is None:
+        raise FileNotFoundError(f"Dataset CSV for id={dataset_id} not found. Tried: {[str(c) for c in candidates]}")
+
+    df = pd.read_csv(found_path)
     if target not in df.columns:
-        raise ValueError(f"Target column '{target}' not in {p}")
+        raise ValueError(f"Target column '{target}' not in {found_path}")
     y = df[target]
     X = df.drop(columns=[target])
     problem_type, metric = _detect_problem_type(y)
