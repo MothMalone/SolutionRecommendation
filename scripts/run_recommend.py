@@ -226,6 +226,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
+    parser.add_argument(
+        "--aco-total-ant-budget",
+        type=int,
+        default=None,
+        help=(
+            "Optional total number of ant draws across all iterations. The final iteration "
+            "may be partial; for example n_ants=10 and budget=15 runs 10 then 5 ants. "
+            "Unset preserves the normal n_ants * n_iterations behavior."
+        ),
+    )
     parser.add_argument("--alpha", type=float, default=1.0, help="ACO alpha: pheromone importance")
     parser.add_argument("--beta", type=float, default=2.0, help="ACO beta: heuristic importance")
     parser.add_argument("--evaporation", type=float, default=0.2, help="ACO pheromone evaporation rate")
@@ -2136,6 +2146,7 @@ def main() -> None:
                 aco_params={
                     "n_ants": args.n_ants,
                     "n_iterations": args.n_iterations,
+                    "total_ant_budget": args.aco_total_ant_budget,
                     "seed": args.seed,
                     "alpha": args.alpha,
                     "beta": args.beta,

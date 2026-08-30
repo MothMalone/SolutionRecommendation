@@ -213,7 +213,10 @@ def search_pipelines_aco(
     exploration_initial_epsilon: float = 0.05,
     exploration_step: float = 0.05,
     exploration_max_epsilon: float = 0.30,
+    total_ant_budget: Optional[int] = None,
 ) -> Tuple[List[Tuple[Dict[str, Any], float]], List[Tuple[Dict[str, Any], float]]]:
+    if total_ant_budget is not None and int(total_ant_budget) < 1:
+        raise ValueError("total_ant_budget must be positive when provided")
     if legacy_notebook_aco:
         # Match the old notebook exactly: it seeded and sampled from NumPy's
         # global RNG, so downstream evaluation code that resets np.random can
@@ -404,6 +407,11 @@ def search_pipelines_aco(
         cached_draw_count = 0
         invalid_cached_draw_count = 0
         target_draws = max(0, int(n_ants))
+        if total_ant_budget is not None:
+            remaining_draws = max(0, int(total_ant_budget) - int(cumulative_draw_count))
+            target_draws = min(target_draws, remaining_draws)
+            if remaining_draws <= 0:
+                break
         if refill_unique_ants:
             known_keys = set(eval_cache).union(invalid_cache)
             target_draws = min(target_draws, max(0, search_space_size - len(known_keys)))

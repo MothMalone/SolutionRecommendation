@@ -470,3 +470,37 @@ def test_stagnation_exploration_increases_then_resets_after_improvement():
         [row["effective_epsilon"] for row in history],
         [0.05, 0.05, 0.10, 0.05],
     )
+
+
+@pytest.mark.parametrize(
+    ("budget", "expected_draws"),
+    [
+        (5, [5]),
+        (10, [10]),
+        (15, [10, 5]),
+        (20, [10, 10]),
+        (25, [10, 10, 5]),
+        (30, [10, 10, 10]),
+    ],
+)
+def test_total_ant_budget_allows_a_partial_final_iteration(budget, expected_draws):
+    options = {"imputation": [f"v{i}" for i in range(100_000)]}
+
+    def evaluate(configs):
+        results = [(dict(cfg), float(index)) for index, cfg in enumerate(configs)]
+        return results[-1][0], results[-1][1], results, results.copy()
+
+    _final, _unsorted, history = search_pipelines_aco(
+        options=options,
+        evaluate_fn=evaluate,
+        eta=_make_eta(options),
+        n_pipelines=1,
+        n_ants=10,
+        n_iterations=(budget + 9) // 10,
+        total_ant_budget=budget,
+        return_history=True,
+        seed=123,
+    )
+
+    assert [row["draw_count"] for row in history] == expected_draws
+    assert history[-1]["cumulative_draw_count"] == budget

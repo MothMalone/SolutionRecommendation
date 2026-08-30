@@ -9,6 +9,7 @@ being ablated:
 * ``num_retrieved_datasets``: ``--heuristic-top-k`` (K), with H fixed;
 * ``num_selected_pipelines``: ``--heuristic-top-l`` (H), with K fixed;
 * ``num_ants``: ``--n-ants``, with K and H fixed;
+* ``total_ant_budget``: total ant draws, with 10 ants per full iteration;
 * ``pheromone_weight_method``: ``--aco-weight-method``, with the remaining
   ACO search parameters fixed.
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -258,13 +260,29 @@ def build_parser(ablation: str, description: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--variant-values",
         default=None,
-        help="Comma/space separated K, H, ant-count, or pheromone weight-method values",
+        help="Comma/space separated K, H, ant-count, total-budget, or pheromone weight-method values",
     )
     parser.add_argument("--fixed-k", type=int, default=5)
     parser.add_argument("--fixed-h", type=int, default=3)
     parser.add_argument("--search-k", type=int, default=5, help="Fixed ACO candidate/neighbor parameter; K ablation uses --heuristic-top-k")
     parser.add_argument("--n-ants", type=int, default=10)
     parser.add_argument("--n-iterations", type=int, default=10)
+    parser.add_argument(
+        "--early-stop-rounds",
+        "--aco-early-stop-rounds",
+        dest="early_stop_rounds",
+        type=int,
+        default=0,
+        help="Stop ACO after this many iterations without proxy improvement; 0 disables.",
+    )
+    parser.add_argument(
+        "--min-improvement",
+        "--aco-min-improvement",
+        dest="min_improvement",
+        type=float,
+        default=0.0,
+        help="Minimum proxy-score increase that resets early-stop patience.",
+    )
     parser.add_argument("--top-k-pheromone", type=int, default=3, help="Fixed number of elite candidates reinforced by pheromone")
     parser.add_argument(
         "--aco-weight-method",
@@ -331,6 +349,8 @@ def _variant_values(args: argparse.Namespace) -> List[Any]:
         values = [1, 3, 5]
     elif args.ablation == "num_ants":
         values = [5, 10, 15, 20]
+    elif args.ablation == "total_ant_budget":
+        values = [5, 10, 15, 20, 25, 30]
     else:
         values = [1, 2, 3]
     if not values:
@@ -349,6 +369,7 @@ def _variant_name(ablation: str, parameter_value: Any) -> str:
         "num_retrieved_datasets": "K",
         "num_selected_pipelines": "H",
         "num_ants": "A",
+        "total_ant_budget": "B",
     }.get(ablation)
     if prefix is None:
         raise ValueError(f"Unsupported RQ3 ablation: {ablation}")
@@ -372,6 +393,10 @@ def _build_search_command(
     elif args.ablation == "num_ants":
         transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
         n_ants = int(parameter_value)
+        weight_method = str(args.aco_weight_method)
+    elif args.ablation == "total_ant_budget":
+        transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
+        n_ants = int(args.n_ants)
         weight_method = str(args.aco_weight_method)
     elif args.ablation == "pheromone_weight_method":
         transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
@@ -404,11 +429,17 @@ def _build_search_command(
         "--heuristic-top-k", str(max(1, transfer_k)),
         "--heuristic-top-l", str(max(1, transfer_h)),
         "--n-ants", str(max(1, n_ants)),
-        "--n-iterations", str(max(1, int(args.n_iterations))),
+        "--n-iterations", str(
+            max(1, math.ceil(int(parameter_value) / max(1, n_ants)))
+            if args.ablation == "total_ant_budget"
+            else max(1, int(args.n_iterations))
+        ),
         "--top-k-pheromone", str(max(1, int(args.top_k_pheromone))),
         "--aco-weight-method", weight_method,
         "--aco-markov-order", str(max(1, int(args.aco_markov_order))),
         "--aco-lambda-smooth", str(float(args.aco_lambda_smooth)),
+        "--aco-early-stop-rounds", str(max(0, int(args.early_stop_rounds))),
+        "--aco-min-improvement", str(max(0.0, float(args.min_improvement))),
         "--seed", str(int(args.aco_seed)),
         "--proxy-profile", str(args.proxy_profile),
         "--proxy-clf-model", str(args.proxy_clf_model),
@@ -418,6 +449,8 @@ def _build_search_command(
         "--skip-aco-plot",
         "--aco-search-fixes",
     ]
+    if args.ablation == "total_ant_budget":
+        command.extend(["--aco-total-ant-budget", str(max(1, int(parameter_value)))])
     if args.dataset_source == "kaggle":
         command.extend(["--kaggle-data-folder", str(args.kaggle_data_folder or paths["data_dir"]), "--kaggle-target-column", str(args.kaggle_target_column)])
     if args.metric_path:
@@ -547,6 +580,12 @@ def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespa
                     "median_accuracy": median("accuracy"),
                     "mean_f1_macro": mean("f1_macro"),
                     "median_f1_macro": median("f1_macro"),
+                    # The two validation quantities are intentionally kept
+                    # separate: search_best_score is the proxy used by ACO;
+                    # evaluator_validation_score is the evaluator's own
+                    # train/validation score before its untouched outer test.
+                    "mean_search_validation_score": mean("search_best_score"),
+                    "mean_evaluator_validation_score": mean("evaluator_validation_score"),
                     "mean_balanced_accuracy": mean("balanced_accuracy"),
                     "mean_search_seconds": mean("search_wall_clock_seconds"),
                     "mean_evaluation_seconds": mean("evaluation_wall_clock_seconds"),
@@ -668,6 +707,9 @@ def run_ablation(args: argparse.Namespace) -> int:
                     str(value) if args.ablation == "pheromone_weight_method" else int(value)
                 ),
                 "n_ants": int(value if args.ablation == "num_ants" else args.n_ants),
+                "total_ant_budget": (
+                    int(value) if args.ablation == "total_ant_budget" else None
+                ),
                 "fixed_k": int(args.fixed_k),
                 "fixed_h": int(args.fixed_h),
                 "top_k_pheromone": int(args.top_k_pheromone),
@@ -676,7 +718,13 @@ def run_ablation(args: argparse.Namespace) -> int:
                 ),
                 "aco_markov_order": int(args.aco_markov_order),
                 "aco_lambda_smooth": float(args.aco_lambda_smooth),
-                "n_iterations": int(args.n_iterations),
+                "n_iterations": (
+                    int(math.ceil(int(value) / max(1, int(args.n_ants))))
+                    if args.ablation == "total_ant_budget"
+                    else int(args.n_iterations)
+                ),
+                "early_stop_rounds": int(args.early_stop_rounds),
+                "min_improvement": float(args.min_improvement),
                 "dataset_id": str(dataset_id),
                 "split_seed": int(args.split_seed),
                 "aco_seed": int(args.aco_seed),
@@ -736,6 +784,9 @@ def run_ablation(args: argparse.Namespace) -> int:
                         "accuracy": _safe_float(evaluation.get("accuracy")),
                         "balanced_accuracy": _safe_float(evaluation.get("balanced_accuracy")),
                         "f1_macro": _safe_float(evaluation.get("f1_macro")),
+                        "evaluator_validation_score": _safe_float(
+                            evaluation.get("validation_score")
+                        ),
                         "final_score": _safe_float(evaluation.get("score")),
                         "evaluator_reported_seconds": _safe_float(evaluation.get("total_seconds", evaluation.get("fit_seconds"))),
                         "evaluation_status": evaluation.get("status"),

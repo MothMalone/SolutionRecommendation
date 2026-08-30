@@ -372,6 +372,7 @@ class MetaPipelineRecommender:
         exploration_initial_epsilon: float = 0.05,
         exploration_step: float = 0.05,
         exploration_max_epsilon: float = 0.30,
+        total_ant_budget: Optional[int] = None,
         unobserved_operator_score: Optional[float] = None,
     ):
         if no_warm_start:
@@ -516,6 +517,7 @@ class MetaPipelineRecommender:
             exploration_initial_epsilon=float(exploration_initial_epsilon),
             exploration_step=float(exploration_step),
             exploration_max_epsilon=float(exploration_max_epsilon),
+            total_ant_budget=(None if total_ant_budget is None else int(total_ant_budget)),
         )
         if isinstance(result, tuple) and len(result) == 3:
             return result
@@ -1966,6 +1968,7 @@ class MetaPipelineRecommender:
                             exploration_max_epsilon=float(
                                 aco_params.get("exploration_max_epsilon", 0.30)
                             ),
+                            total_ant_budget=aco_params.get("total_ant_budget"),
                         )
                     elif optimizer_name == "dqn":
                         aco_results, aco_unsorted_res, aco_history = self._search_pipelines_dqn(
