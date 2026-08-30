@@ -187,10 +187,16 @@ def load_dataset(data_dir: str, dataset_id: str, target: str = "target"):
             break
 
     if found_path is None:
-        # Try to auto-export
+        # Try to auto-export via both export_diffprep_datasets and export_eval_datasets
         print(f"[data] Attempting auto-export for dataset {dataset_id} ...")
         dest_dir = Path(data_dir) if data_dir else Path("/kaggle/working/eval_all")
         dest_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            cmd_dp = [sys.executable, str(_REPO / "scripts" / "export_diffprep_datasets.py"),
+                      "--download", "--out-dir", str(dest_dir)]
+            subprocess.run(cmd_dp, check=False)
+        except Exception:
+            pass
         try:
             cmd = [sys.executable, str(_REPO / "scripts" / "export_eval_datasets.py"),
                    "--ids", str(dataset_id), "--out-dir", str(dest_dir)]
@@ -395,10 +401,15 @@ def run_ctxpipe_tpot(dataset_id: str, data_dir: str, ctxpipe_model_dir: str,
     from ctxpipe.env.primitives.imputercat import ImputerCatPrim
     from ctxpipe.env.primitives.primitive import Primitive
 
-    csv_path = Path(data_dir) / f"{dataset_id}.csv"
-    df = pd.read_csv(csv_path)
+    X, y, task_type, problem_type = load_dataset(data_dir, dataset_id)
+    df = pd.concat([X, y], axis=1)
+    # Save a temporary copy if needed or use resolved path
+    tmp_csv = scratch_root / f"{dataset_id}.csv"
+    tmp_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(tmp_csv, index=False)
+
     label_idx = df.columns.get_loc("target")
-    ds = Dataset(str(dataset_id), str(csv_path), label_idx)
+    ds = Dataset(str(dataset_id), str(tmp_csv), label_idx)
 
     # 1. Run CtxPipe DQN inference
     agentman = AgentManager()
@@ -407,11 +418,6 @@ def run_ctxpipe_tpot(dataset_id: str, data_dir: str, ctxpipe_model_dir: str,
     print(f"  [ctxpipe] Inferred pipeline: {seq_prims}")
 
     # 2. Replay primitives on seed-42 split
-    X = df.drop(columns=["target"])
-    y = df["target"]
-    problem_type, _ = _detect_problem_type(y)
-    task_type = "classification" if problem_type in ("binary", "multiclass", "classification") else "regression"
-
     X_train, y_train, X_val, y_val, X_test, y_test = split_train_val_test(X, y, seed=seed)
 
     # Prune rare classes before transform
@@ -479,6 +485,13 @@ def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
     workdir_abs = workdir.resolve()
     workdir_abs.mkdir(parents=True, exist_ok=True)
 
+    # Ensure dataset is loaded/available
+    X, y, _, _ = load_dataset(data_dir, dataset_id)
+    csv_file = Path(data_dir) / f"{dataset_id}.csv"
+    if not csv_file.exists():
+        csv_file = workdir_abs / f"{dataset_id}.csv"
+        pd.concat([X, y], axis=1).to_csv(csv_file, index=False)
+
     # 1. Run ACORec recommendation search
     rec_out = workdir_abs / "acorec_rec"
     rec_out.mkdir(parents=True, exist_ok=True)
@@ -488,7 +501,7 @@ def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
         cmd = [
             sys.executable, str(_REPO / "scripts" / "run_recommend.py"),
             "--dataset-source", "openml",
-            "--openml-local-folder", str(Path(data_dir).resolve()),
+            "--openml-local-folder", str(csv_file.parent.resolve()),
             "--dataset-ids", str(dataset_id),
             "--kaggle-root", str(_REPO),
             "--time-limit", "120",
@@ -507,7 +520,7 @@ def run_acorec_tpot(dataset_id: str, data_dir: str, workdir: Path,
     cmd_eval = [
         sys.executable, str(_REPO / "scripts" / "evaluate_acorec_tpot.py"),
         "--recommendation-json", str(rec_json),
-        "--dataset-csv", str((Path(data_dir) / f"{dataset_id}.csv").resolve()),
+        "--dataset-csv", str(csv_file.resolve()),
         "--dataset-id", str(dataset_id),
         "--output-json", str(tpot_out_json),
         "--split-seed", str(seed),
