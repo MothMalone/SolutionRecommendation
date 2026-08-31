@@ -315,7 +315,12 @@ def search_pipelines_aco(
     conditional_pheromone_enabled = bool(markov_order > 0 and float(lambda_smooth) > 0.0)
     update_policy = str(update_policy).strip().lower()
     exploration_policy = str(exploration_policy).strip().lower()
-    if update_policy not in {"global_elite", "iteration_elite", "improvement_only"}:
+    if update_policy not in {
+        "global_elite",
+        "iteration_elite",
+        "improvement_only",
+        "hybrid_elite",
+    }:
         raise ValueError(f"Unsupported ACO update_policy={update_policy!r}")
     if exploration_policy not in {"none", "fixed", "stagnation"}:
         raise ValueError(f"Unsupported ACO exploration_policy={exploration_policy!r}")
@@ -607,6 +612,25 @@ def search_pipelines_aco(
             reinforcement_pool = iteration_results
         elif update_policy == "improvement_only":
             reinforcement_pool = iteration_results if improved_global else []
+        elif update_policy == "hybrid_elite":
+            # Hybrid update: reserve one of the top-k deposits for the global
+            # best and use the remaining slots for the current iteration's
+            # elite candidates.  This keeps the deposit budget comparable to
+            # the other policies while retaining both long-term memory and a
+            # signal from the current iteration.
+            hybrid_limit = max(1, int(top_k_pheromone))
+            hybrid_candidates = list(cached_results[:1]) + list(iteration_results)
+            selected_hybrid: List[Tuple[Dict[str, Any], float]] = []
+            seen_hybrid: set[Tuple[Tuple[str, Any], ...]] = set()
+            for candidate_cfg, candidate_score in hybrid_candidates:
+                candidate_key = config_key(candidate_cfg)
+                if candidate_key in seen_hybrid:
+                    continue
+                selected_hybrid.append((dict(candidate_cfg), float(candidate_score)))
+                seen_hybrid.add(candidate_key)
+                if len(selected_hybrid) >= hybrid_limit:
+                    break
+            reinforcement_pool = selected_hybrid
         else:
             reinforcement_pool = cached_results
         selected = (

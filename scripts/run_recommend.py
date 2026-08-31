@@ -344,7 +344,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aco-max-sampling-attempt-multiplier", type=int, default=100)
     parser.add_argument(
         "--aco-update-policy",
-        choices=["global_elite", "iteration_elite", "improvement_only"],
+        choices=["global_elite", "iteration_elite", "improvement_only", "hybrid_elite"],
         default="global_elite",
     )
     parser.add_argument(

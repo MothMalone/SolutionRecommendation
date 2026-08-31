@@ -12,6 +12,8 @@ being ablated:
 * ``total_ant_budget``: total ant draws, with 10 ants per full iteration;
 * ``pheromone_weight_method``: ``--aco-weight-method``, with the remaining
   ACO search parameters fixed.
+* ``aco_update_policy``: ``global_elite``, ``iteration_elite``, or
+  ``hybrid_elite`` update policy, with the ACO weighting method fixed.
 
 Each dataset/variant is an independent checkpoint, so a Kaggle session can be
 sharded and resumed without repeating successful runs.
@@ -90,6 +92,25 @@ def _parse_pheromone_weight_methods(value: Any) -> List[str]:
             )
         if method not in result:
             result.append(method)
+    return result
+
+
+def _parse_update_policies(value: Any) -> List[str]:
+    """Parse and validate ACO pheromone update policies."""
+    tokens = str(value).replace(",", " ").split() if value is not None else []
+    allowed = {"global_elite", "iteration_elite", "hybrid_elite"}
+    result: List[str] = []
+    for token in tokens:
+        policy = token.strip().lower()
+        if not policy:
+            continue
+        if policy not in allowed:
+            raise ValueError(
+                f"Unsupported ACO update policy {policy!r}; "
+                f"expected one of {sorted(allowed)}"
+            )
+        if policy not in result:
+            result.append(policy)
     return result
 
 
@@ -260,7 +281,7 @@ def build_parser(ablation: str, description: str) -> argparse.ArgumentParser:
     parser.add_argument(
         "--variant-values",
         default=None,
-        help="Comma/space separated K, H, ant-count, total-budget, or pheromone weight-method values",
+        help="Comma/space separated ablation values, pheromone weight methods, or ACO update policies",
     )
     parser.add_argument("--fixed-k", type=int, default=5)
     parser.add_argument("--fixed-h", type=int, default=3)
@@ -291,6 +312,11 @@ def build_parser(ablation: str, description: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--aco-markov-order", type=int, default=2)
     parser.add_argument("--aco-lambda-smooth", type=float, default=0.0)
+    parser.add_argument(
+        "--aco-update-policy",
+        choices=["global_elite", "iteration_elite", "improvement_only", "hybrid_elite"],
+        default="global_elite",
+    )
     parser.add_argument("--aco-seed", type=int, default=42)
     parser.add_argument("--split-seed", type=int, default=42)
     parser.add_argument("--proxy-profile", choices=["default", "robust"], default="default")
@@ -343,6 +369,10 @@ def _variant_values(args: argparse.Namespace) -> List[Any]:
         values = _parse_pheromone_weight_methods(
             args.variant_values or "exponential,rank,uniform"
         )
+    elif args.ablation == "aco_update_policy":
+        values = _parse_update_policies(
+            args.variant_values or "global_elite,iteration_elite,hybrid_elite"
+        )
     elif args.variant_values:
         values = _parse_int_list(args.variant_values)
     elif args.ablation == "num_retrieved_datasets":
@@ -365,6 +395,11 @@ def _variant_name(ablation: str, parameter_value: Any) -> str:
         if method not in {"exponential", "rank", "uniform"}:
             raise ValueError(f"Unsupported pheromone weight method: {method}")
         return f"W_{method}"
+    if ablation == "aco_update_policy":
+        policy = str(parameter_value).strip().lower()
+        if policy not in {"global_elite", "iteration_elite", "hybrid_elite"}:
+            raise ValueError(f"Unsupported ACO update policy: {policy}")
+        return f"U_{policy}"
     prefix = {
         "num_retrieved_datasets": "K",
         "num_selected_pipelines": "H",
@@ -384,6 +419,7 @@ def _build_search_command(
     parameter_value: Any,
 ) -> List[str]:
     root = Path(args.root)
+    update_policy = str(args.aco_update_policy)
     if args.ablation == "num_retrieved_datasets":
         transfer_k, transfer_h = parameter_value, int(args.fixed_h)
         n_ants = int(args.n_ants)
@@ -402,6 +438,11 @@ def _build_search_command(
         transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
         n_ants = int(args.n_ants)
         weight_method = str(parameter_value).strip().lower()
+    elif args.ablation == "aco_update_policy":
+        transfer_k, transfer_h = int(args.fixed_k), int(args.fixed_h)
+        n_ants = int(args.n_ants)
+        weight_method = str(args.aco_weight_method)
+        update_policy = str(parameter_value).strip().lower()
     else:
         raise ValueError(f"Unsupported RQ3 ablation: {args.ablation}")
 
@@ -438,6 +479,7 @@ def _build_search_command(
         "--aco-weight-method", weight_method,
         "--aco-markov-order", str(max(1, int(args.aco_markov_order))),
         "--aco-lambda-smooth", str(float(args.aco_lambda_smooth)),
+        "--aco-update-policy", update_policy,
         "--aco-early-stop-rounds", str(max(0, int(args.early_stop_rounds))),
         "--aco-min-improvement", str(max(0.0, float(args.min_improvement))),
         "--seed", str(int(args.aco_seed)),
@@ -610,6 +652,7 @@ def _summary(suite_dir: Path, rows: List[Dict[str, Any]], args: argparse.Namespa
         "aco_weight_method": str(args.aco_weight_method),
         "aco_markov_order": int(args.aco_markov_order),
         "aco_lambda_smooth": float(args.aco_lambda_smooth),
+        "aco_update_policy": str(args.aco_update_policy),
         "n_iterations": int(args.n_iterations),
         "evaluator": args.evaluator,
         "split_seed": int(args.split_seed),
@@ -704,7 +747,9 @@ def run_ablation(args: argparse.Namespace) -> int:
                 "ablation": args.ablation,
                 "variant": variant,
                 "parameter_value": (
-                    str(value) if args.ablation == "pheromone_weight_method" else int(value)
+                    str(value)
+                    if args.ablation in {"pheromone_weight_method", "aco_update_policy"}
+                    else int(value)
                 ),
                 "n_ants": int(value if args.ablation == "num_ants" else args.n_ants),
                 "total_ant_budget": (
@@ -715,6 +760,9 @@ def run_ablation(args: argparse.Namespace) -> int:
                 "top_k_pheromone": int(args.top_k_pheromone),
                 "aco_weight_method": (
                     str(value) if args.ablation == "pheromone_weight_method" else str(args.aco_weight_method)
+                ),
+                "aco_update_policy": (
+                    str(value) if args.ablation == "aco_update_policy" else str(args.aco_update_policy)
                 ),
                 "aco_markov_order": int(args.aco_markov_order),
                 "aco_lambda_smooth": float(args.aco_lambda_smooth),
