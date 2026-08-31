@@ -107,3 +107,32 @@ def test_pheromone_weight_ablation_changes_only_reinforcement_weighting(tmp_path
     assert value_after("--n-ants") == "10"
     assert value_after("--heuristic-top-k") == "5"
     assert value_after("--heuristic-top-l") == "3"
+
+
+def test_alpha_beta_ablation_uses_named_variants_and_forwards_exponents(tmp_path):
+    args = build_parser("aco_alpha_beta", "test").parse_args(
+        ["--root", str(tmp_path), "--aco-lambda-smooth", "0.7"]
+    )
+    assert _variant_values(args) == [
+        "heuristic_only", "pheromone_only", "current", "balanced", "pheromone_strong",
+    ]
+    assert _variant_name("aco_alpha_beta", "heuristic_only") == "AB_heuristic_only_a0_b2"
+    command = _build_search_command(
+        args,
+        {
+            "performance_matrix": tmp_path / "performance.csv",
+            "metafeatures": tmp_path / "features.csv",
+            "pipeline_configs": tmp_path / "pipelines.json",
+            "data_dir": tmp_path / "data",
+        },
+        "1066",
+        tmp_path / "run",
+        "pheromone_strong",
+    )
+
+    def value_after(flag: str) -> str:
+        return command[command.index(flag) + 1]
+
+    assert value_after("--alpha") == "2.0"
+    assert value_after("--beta") == "1.0"
+    assert value_after("--aco-lambda-smooth") == "0.7"
